@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run-tests.sh — the ONLY accepted definition of "green" for the Flow fork.
 #
-# Why this exists (measured 19 Sep 2026, Frappe v16.31.0):
+# Why this exists (measured 19 Sep 2026, Frappe v16.31.0; lock added 19 Sep 2026 after concurrent-run deadlocks):
 #   - `bench init` exited 0 after failing and rolling back.
 #   - `bench run-tests` exits 0 when it discovers ZERO tests (frappe/commands/testing.py:171,
 #     `all(...)` over an empty list is True). A typo in --module is a silent green.
@@ -25,6 +25,14 @@ mkdir -p "$LOG_DIR" || { echo "GATE=RED reason=cannot-create-log-dir"; exit 1; }
 LOG="$LOG_DIR/$(date +%Y%m%dT%H%M%S)${MODULE:+-$MODULE}.log"
 
 cd "$BENCH_DIR" || { echo "GATE=RED reason=no-bench-dir:$BENCH_DIR"; exit 1; }
+
+# One test run at a time. All runs share one site database; concurrent runs deadlock in MariaDB and
+# produce ERROR lines that are not real failures (measured 19 Sep 2026, run 1 of the unattended loop).
+command -v flock >/dev/null || { echo "GATE=RED reason=flock-missing"; exit 1; }
+exec 9>"$BENCH_DIR/.run-tests.lock"
+LOCK_T0=$(date +%s)
+flock -w "${LOCK_WAIT_SECONDS:-2400}" 9 || { echo "GATE=RED reason=lock-timeout-after-${LOCK_WAIT_SECONDS:-2400}s"; exit 1; }
+echo "LOCK_WAITED_SECONDS=$(( $(date +%s) - LOCK_T0 ))"
 
 if [ -n "$MODULE" ]; then
   bench --site "$SITE" run-tests --app flow --module "$MODULE" > "$LOG" 2>&1
