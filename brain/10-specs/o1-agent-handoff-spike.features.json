@@ -1,0 +1,15 @@
+{
+  "_comment": "Acceptance contract for brain/10-specs/o1-agent-handoff-spike.md. The agent may ONLY flip 'passes'. Entries may never be added, removed, or reworded. Written 2026-09-19.",
+  "spec": "o1-agent-handoff-spike",
+  "features": [
+    { "id": 1, "description": "A tool running inside agent A's run starts a run on a code-defined Agent B through the same path start_run uses, and B's final output is returned to A as that tool's result.", "passes": true },
+    { "id": 2, "description": "The same holds when B is a doctype Flow Agent started by name.", "passes": true },
+    { "id": 3, "description": "When B's run pauses for a write approval, a test records what A's tool receives, A's own run status, the Flow Run row B's pause created and its status.", "passes": true },
+    { "id": 4, "description": "A test records whether the user invoking A can reach B's paused run through the documented resume path.", "passes": true },
+    { "id": 5, "description": "A test records which identity B's tools execute under, relative to the user who invoked A.", "passes": true },
+    { "id": 6, "description": "A test records whether any field on either Flow Run row links A's run to B's run.", "passes": true },
+    { "id": 7, "description": "brain/40-architecture/agent-handoff-findings.md exists and marks every finding VERIFIED (naming the test method), INFERRED (naming the code read), or UNKNOWN.", "passes": true },
+    { "id": 8, "description": "A draft ADR exists in brain/20-adr/ with status: proposed, proposing how a specialist's approval request reaches the person talking to the generalist. It is not accepted.", "passes": true },
+    { "id": 9, "description": "scripts/run-tests.sh prints GATE=GREEN with MIN_TESTS=586, and no engine file outside flow/tests/test_spike_agent_handoff.py is changed.", "passes": true }
+  ]
+}
