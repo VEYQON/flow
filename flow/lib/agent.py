@@ -18,8 +18,12 @@ if TYPE_CHECKING:
 
 DEFAULT_MAX_ITERATIONS = 20
 ERROR_MESSAGE_LIMIT = 500
-# An approval question is read by a person before they decide. Past this it stops being read.
+# An approval question is read by a person before they decide. Past this it stops being read —
+# and a question nobody finishes reading is worse than a plain one, so an over-long render is
+# abandoned rather than cut.
 CONFIRM_BODY_LIMIT = 2000
+# No single value may crowd out the sentence around it.
+CONFIRM_VALUE_LIMIT = 200
 VALID_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 
@@ -434,44 +438,70 @@ def _assistant_message(response: ChatResponse) -> dict[str, Any]:
 	return message
 
 
-def _render_confirm_template(template: str, arguments: dict[str, Any]) -> str | None:
+def _displayable(value: Any) -> str:
+	"""One short, single-line rendering of a value the model chose.
+
+	The values in an approval question come from the model; the sentence around them comes from a
+	person. Flattened so a value cannot open a line of its own and forge a second question, and
+	capped so it cannot push the part that matters out of sight.
+	"""
+	text = value if isinstance(value, str) else json.dumps(value, default=str)
+	return " ".join(text.split())[:CONFIRM_VALUE_LIMIT]
+
+
+def _render_confirm_template(
+	template: str, arguments: dict[str, Any], parameters: dict[str, Any] | None = None
+) -> str | None:
 	"""State an approval request in plain language, filled in from the call's arguments.
 
-	Returns None whenever the result cannot be trusted — the template refers to something the call
-	did not supply, it failed to render, or it came out empty — so the caller falls back to showing
-	the arguments as they are. It never raises: a badly written template must not be able to stop a
-	person being asked.
+	Returns None whenever the result cannot be trusted, and the caller then shows the arguments as
+	they are. It never raises: a badly written question must not be able to stop a person being
+	asked.
 
-	The arguments are values here, never template source, and the renderer is the sandboxed one, so
-	nothing in a template or in a model's arguments executes.
+	Two rules make this safe to put in front of someone about to authorise a write.
+
+	A question may speak only about this call's own arguments. The environment a template would
+	otherwise render in carries the platform's template globals — enough to read the database
+	ignoring permissions, or to reach the network — and all of that would run merely because the
+	model proposed a call, before anyone approved it and even if they go on to refuse. So the
+	globals are removed and any name outside the arguments is refused rather than rendered.
+
+	And the values are quoted, not trusted: flattened to a single line and capped, so the model
+	cannot write a second, friendlier question underneath the real one.
 	"""
-	from jinja2 import meta
-
 	try:
 		from frappe.utils.jinja import get_jenv
-		from frappe.utils.safe_exec import safe_render_template
+		from jinja2 import StrictUndefined, meta
 
-		# A name the call did not supply would otherwise render as a silent blank where a value
-		# belongs, which is worse than showing the raw arguments.
-		environment = get_jenv(restrict_globals=True)
-		referenced = meta.find_undeclared_variables(environment.parse(template))
-		if referenced - set(arguments) - set(environment.globals):
+		# The same textual refusal the platform's own renderer applies before compiling.
+		if ".__" in template:
 			return None
 
-		# The renderer decides "is this a path?" by guessing, and its guess is `is_path or
-		# looks_like_a_path`, so asking for False does not switch the guess off. It fires on any
-		# single-line string whose last dotted segment resembles a file extension, which a
-		# perfectly ordinary question does — "Delete the report for {{ customer }}.txt" — and the
-		# result is a template read off the disk instead of the one written here. It only guesses
-		# when the string has no line break, so give it one and take it back off the result.
-		rendered = safe_render_template(template + "\n", dict(arguments), is_path=False)
+		environment = get_jenv(restrict_globals=True)
+		# Declared-but-omitted optional arguments are allowed and bound to nothing, so a question
+		# can guard them with {% if %}. Anything else it names is a mistake or a reach.
+		declared = set((parameters or {}).get("properties") or {})
+		if meta.find_undeclared_variables(environment.parse(template)) - set(arguments) - declared:
+			return None
+
+		# Rendered from a string, never a path, so there is no chance of a question that happens
+		# to end in something extension-shaped being read off the disk instead. Undefined is
+		# strict, so reaching into a value for a part it does not have fails here rather than
+		# printing the placeholder back at the person.
+		speaks_only_of_arguments = environment.overlay(undefined=StrictUndefined)
+		speaks_only_of_arguments.globals = {}
+		context: dict[str, Any] = dict.fromkeys(declared, "")
+		context.update({name: _displayable(value) for name, value in arguments.items()})
+		rendered = speaks_only_of_arguments.from_string(template).render(context)
 	except Exception:
 		return None
 
-	rendered = (rendered or "").strip()
-	if not rendered:
+	rendered = " ".join(rendered.split()) if "\n" not in template else rendered.strip()
+	if not rendered or len(rendered) > CONFIRM_BODY_LIMIT:
+		# Never cut the author's own words: a half-shown question reads as a whole one, and the
+		# clause that got cut is exactly the one someone needed to see.
 		return None
-	return rendered[:CONFIRM_BODY_LIMIT]
+	return rendered
 
 
 def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
@@ -485,7 +515,7 @@ def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
 	if tool.confirm_prompt:
 		body = tool.confirm_prompt(call.arguments)
 	elif tool.confirm_template:
-		body = _render_confirm_template(tool.confirm_template, call.arguments)
+		body = _render_confirm_template(tool.confirm_template, call.arguments, tool.parameters)
 	if not body:
 		body = json.dumps(call.arguments, indent=2, default=str)
 

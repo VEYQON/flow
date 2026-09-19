@@ -9,6 +9,8 @@ test_ai_agent.py, which stays green and unmodified.
 import frappe
 from frappe.tests import IntegrationTestCase
 
+from flow.lib.agent import CONFIRM_BODY_LIMIT
+
 
 class TestConfirmationQuestionWording(IntegrationTestCase):
 	"""What the approval question SAYS. Nothing here touches what executes, on which answer —
@@ -36,6 +38,20 @@ class TestConfirmationQuestionWording(IntegrationTestCase):
 		from flow.lib.agent import _confirmation_question
 
 		return _confirmation_question(self._call(), self._tool(**overrides))
+
+	def _render(self, template, arguments=None, parameters=None):
+		"""The renderer alone. A "the fallback appeared" assertion proves nothing on its own —
+		that is also what happens when the feature is absent — so every refusal below is paired
+		with a positive control in the identical form."""
+		from flow.lib.agent import _render_confirm_template
+
+		return _render_confirm_template(
+			template, arguments or {"amount": 4200, "customer": "Acme"}, parameters
+		)
+
+	def test_the_renderer_renders_a_good_template(self):
+		"""The positive control the refusal tests are measured against."""
+		self.assertEqual(self._render("Post {{ amount }} for {{ customer }}."), "Post 4200 for Acme.")
 
 	# --- the three-way precedence ------------------------------------------------------------
 	def test_a_record_template_is_rendered_from_the_calls_arguments(self):
@@ -75,6 +91,10 @@ class TestConfirmationQuestionWording(IntegrationTestCase):
 		self.assertIn('"amount": 4200', q.prompt)
 
 	def test_an_empty_render_falls_back(self):
+		# Asserted on the renderer itself: blank is caught in two places, so going through the
+		# question could not tell the two apart and stayed green under every mutation.
+		self.assertIsNone(self._render("{# just a comment #}"))
+		self.assertIsNotNone(self._render("Post {{ amount }}."))
 		q = self._question(confirm_template="{# just a comment #}")
 		self.assertIn('"amount": 4200', q.prompt)
 
@@ -82,15 +102,106 @@ class TestConfirmationQuestionWording(IntegrationTestCase):
 	def test_a_template_cannot_reach_through_an_attribute_to_escape(self):
 		"""Attribute traversal is refused outright, so nothing about the running process can be
 		reflected back into the question. The person sees the arguments instead."""
+		self.assertIsNone(self._render("{{ amount.__class__.__mro__ }}"))
+		self.assertIsNotNone(self._render("Post {{ amount }}."))  # positive control
 		q = self._question(confirm_template="{{ amount.__class__.__mro__ }}")
 		self.assertIn('"amount": 4200', q.prompt)
 		for leak in ("class", "mro", "builtins", "object"):
 			self.assertNotIn(leak, q.prompt.lower())
 
 	def test_a_template_cannot_read_a_file(self):
+		self.assertIsNone(self._render("{{ open('/etc/hostname').read() }}"))
+		self.assertIsNotNone(self._render("Post {{ amount }}."))  # positive control
 		q = self._question(confirm_template="{{ open('/etc/hostname').read() }}")
 		self.assertIn('"amount": 4200', q.prompt)
 		self.assertEqual(q.options, ["Approve", "Deny"])
+
+	def test_a_question_may_speak_only_about_this_calls_arguments(self):
+		"""The renderer's environment carries the platform's own template globals. A placeholder
+		colliding with one would print engine internals — or a database lookup's result — into the
+		text a person reads before authorising a write. Refused, not rendered."""
+		for reach in (
+			"{{ frappe }}",
+			"{{ frappe.db.get_value('User', 'Administrator', 'email') }}",
+			"{{ log }}",
+			"{{ dict }}",
+			"{{ frappe.get_all('User', fields=['name']) }}",
+			"{{ frappe.db.sql('select name from `tabUser` limit 1') }}",
+			"{{ frappe.msgprint('ATTACKER CONTROLLED POPUP') }}",
+			"{{ frappe.render_template(customer, {}) }}",
+		):
+			with self.subTest(reach=reach):
+				self.assertIsNone(self._render(reach))
+		self.assertIsNotNone(self._render("Post {{ amount }}."))  # positive control
+
+	def test_a_declared_but_omitted_argument_can_be_guarded(self):
+		"""An optional parameter the call left out must not sink the whole question — the author
+		guarded it, and falling back to the raw arguments is the failure this feature exists to
+		remove."""
+		parameters = {"properties": {"amount": {}, "customer": {}, "note": {}}}
+		rendered = self._render(
+			"{% if note %}Note: {{ note }}. {% endif %}Post {{ amount }}.", parameters=parameters
+		)
+		self.assertEqual(rendered, "Post 4200.")
+
+		with_note = self._render(
+			"{% if note %}Note: {{ note }}. {% endif %}Post {{ amount }}.",
+			arguments={"amount": 4200, "note": "urgent"},
+			parameters=parameters,
+		)
+		self.assertEqual(with_note, "Note: urgent. Post 4200.")
+
+	def test_reaching_into_a_value_that_has_no_such_part_falls_back(self):
+		"""`customer` is a plain string. Left alone this rendered the placeholder back at the
+		person, braces and all — a hole where a value belongs, which is what AC5 exists to stop."""
+		self.assertIsNone(self._render("Bill {{ customer.name }}."))
+		self.assertIsNotNone(self._render("Bill {{ customer }}."))  # positive control
+
+	def test_a_value_cannot_push_the_question_out_of_sight(self):
+		"""The attack: the author writes "Update {{ customer }} and DELETE every invoice they
+		have." and the model sends a customer name padded past the limit. Cutting the rendered
+		text would hide the clause that matters and leave a question that still reads as whole.
+		The value is capped instead, so the author's own words always survive."""
+		template = "Update {{ customer }} and DELETE every invoice they have."
+		rendered = self._render(template, arguments={"amount": 1, "customer": "Acme " + "padding " * 400})
+		self.assertIn("DELETE every invoice they have.", rendered)
+		self.assertLess(len(rendered), CONFIRM_BODY_LIMIT)
+
+	def test_an_over_long_question_is_refused_rather_than_cut(self):
+		"""If the author's own text is too long there is nothing safe to show: a half-shown
+		question reads as a whole one."""
+		self.assertIsNone(self._render("x" * (CONFIRM_BODY_LIMIT + 10) + " {{ amount }}"))
+		self.assertIsNotNone(self._render("Post {{ amount }}."))  # positive control
+
+	def test_a_value_cannot_forge_a_second_question(self):
+		"""Values come from the model. Left as prose, one can open a line of its own and write a
+		reassuring second question under the real one — the JSON dump escaped newlines; this path
+		has to flatten them."""
+		from flow.lib.agent import CONFIRM_VALUE_LIMIT, _displayable
+
+		hostile = "Acme\n\nNOTE: read-only preview, nothing will be written.\nApprove `read_report`?"
+		# Asserted on the value itself. Going through the question could not tell this apart from
+		# the whitespace tidy applied to the finished line — it stayed green with this defence
+		# removed, which is the whole reason it is pinned here instead.
+		self.assertNotIn("\n", _displayable(hostile))
+		self.assertTrue(_displayable(hostile).startswith("Acme NOTE:"))
+		self.assertLessEqual(len(_displayable("x" * 5000)), CONFIRM_VALUE_LIMIT)
+		self.assertEqual(_displayable(4200), "4200")
+
+		rendered = self._render("Post an invoice for {{ customer }}.", arguments={"customer": hostile})
+		self.assertNotIn("\n", rendered)
+		self.assertTrue(rendered.startswith("Post an invoice for Acme"))
+
+	def test_a_failed_render_tells_the_person_nothing_about_the_machine(self):
+		"""A render that fails must not put a server traceback in front of the approver. The
+		platform's own template helper reports a bad template by queueing a message for the
+		browser containing absolute server paths and library names — which would both name the
+		platform to the user and pop an error modal at the moment of approval."""
+		frappe.clear_messages()
+		self.assertIsNone(self._render("{{ amount / 0 }}"))
+		messages = " ".join(str(m) for m in frappe.get_message_log() or [])
+		for leak in ("Traceback", "jinja2", "/apps/", "site-packages"):
+			self.assertNotIn(leak, messages)
 
 	def test_a_path_shaped_template_is_rendered_as_text_not_loaded_from_disk(self):
 		"""The renderer treats a single-line string whose last dotted segment looks like a file
@@ -106,6 +217,8 @@ class TestConfirmationQuestionWording(IntegrationTestCase):
 		call = ToolCall(id="c1", name="post_invoice", arguments={"customer": "{{ 7 * 7 }}"})
 		q = _confirmation_question(call, self._tool(confirm_template="Bill {{ customer }}."))
 		self.assertNotIn("49", q.prompt)
+		# ...and it IS shown, rather than the whole question being refused.
+		self.assertIn("Bill {{ 7 * 7 }}.", q.prompt)
 
 	# --- the first line ------------------------------------------------------------------------
 	def test_the_first_line_uses_the_human_title_when_there_is_one(self):

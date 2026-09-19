@@ -195,3 +195,58 @@ to the JSON dump, and a crafted one could have loaded an app template file off d
 Branch `loop/e5-confirm-prompt-field`, cut from `veyqon`. Nothing pushed. The doctype field is
 additive and optional, so an unmigrated site is unaffected and a tool without a template behaves
 exactly as before.
+
+---
+## Verify pass — what adversarial review changed
+
+Two reviewers, fresh contexts. Security found **two HIGHs**, both proven live on the bench; code
+review found **one HIGH** and several mediums. All fixed here. The approval gate itself was cleared
+by both, at byte level: `_invoke`, `_resolve_confirmation`, `_has_denial` identical to `veyqon`,
+options and `allow_other` unreachable from a template, `TestAgentConfirmation` unmodified and green.
+
+**HIGH — a value could push the question out of sight.** The rendered body was cut at 2000
+characters with no marker. Proven attack: the author writes "Update {{ customer }} and DELETE every
+invoice they have." and the model sends a padded customer name; the person approves "Update Acme …"
+and the delete runs. Worse, the JSON dump it replaces has no such limit, so this was a regression
+*relative to the thing it improved on*. Fixed by capping each **value** instead, so the author's own
+words always survive; and if the author's own text is still too long the question is refused rather
+than cut, because a half-shown question reads as a whole one.
+
+**HIGH — a value could forge a second question.** Values were interpolated as raw prose, so a model
+could open a new line and write a reassuring second question underneath the real one
+("NOTE: read-only preview, nothing will be written."). `json.dumps` escaped newlines; this path did
+not. Fixed by flattening every value to one line before it enters the sentence.
+
+**HIGH (deploy) — an unmigrated site lost every tool.** `doc.confirm_template` on a `Document`
+raises rather than answering None, so on a site running this code before its migration *all* tool
+resolution failed, not just templated ones. `doc.get(...)` now.
+
+**MED — the question could read the database.** The template rendered in the platform's restricted
+environment, which still carries globals enough to query ignoring permissions and to reach the
+network — and it rendered **before** approval, in the approver's session, even when they went on to
+refuse. Proven: `{{ frappe.db.sql(...) }}`, `{{ frappe.get_all(...) }}`, `{{ frappe.msgprint(...) }}`
+all executed. The globals are now removed from the rendering environment and any name outside the
+call's own arguments is refused.
+
+**MED — a traceback reached the person.** A failed render queued a browser message containing
+absolute server paths and library names — naming the platform to the user, against rule 3, at the
+moment of approval. Rendering from a string rather than through the platform's helper removes that
+path entirely.
+
+**MED — good questions were refused.** `{% if note %}` on a declared-but-omitted optional argument
+fell back to the JSON dump on every call that omitted it, which is the exact failure this feature
+exists to remove. Declared parameters are now allowed and bound to nothing.
+
+**MED — bad questions were shown.** `{{ customer.name }}` on a plain string printed the placeholder
+back at the person, braces and all. Undefined is strict now, so it fails into the fallback.
+
+**A correction to this spec's own Ship section above.** It says the `+ "\n"` trick is the fix for
+the path-guessing problem. That was true of the first implementation; the renderer no longer goes
+near that code path at all, so the trick is gone and the problem with it.
+
+**Tests: 22 → 31.** Review showed 14 of the original 22 survived deleting the feature outright, and
+that the "safety" tests asserted only that the JSON fallback appeared — which is also what happens
+when the feature is absent. Every refusal test now carries a positive control in the identical form,
+and the ones that could not discriminate assert the unit directly. Probed: unflattening values
+reddens both HIGH tests; restoring the globals reddens seven; removing the code-callable precedence,
+the missing-argument guard and the never-raises guarantee redden their own.

@@ -76,7 +76,10 @@ def _build_tool(doc: FlowTool, parameters: dict[str, Any], func: Any, *, confirm
 		requires_confirmation=bool(doc.requires_confirmation),
 		confirm_prompt=confirm_prompt,
 		title=doc.title,
-		confirm_template=doc.confirm_template,
+		# .get, not attribute access: on a site running this code before its migration the field
+		# does not exist yet, and a Document raises rather than answering None — which would take
+		# out every tool, not just the ones with a question written on them.
+		confirm_template=doc.get("confirm_template"),
 	)
 
 

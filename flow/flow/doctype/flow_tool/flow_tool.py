@@ -13,6 +13,8 @@ from frappe.model.document import Document
 from flow.utils.system_generated import block_delete, block_rename, validate_immutable
 
 SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+# An approval question is one or two sentences. Anything longer is not being read.
+CONFIRM_TEMPLATE_LIMIT = 1000
 IMPORT_PATH_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)+$")
 MAIN_FUNCTION_NAME = "main"
 
@@ -43,9 +45,35 @@ class FlowTool(Document):
 		self._normalize()
 		self._validate_slug()
 		self._validate_type_fields()
+		self._validate_confirm_template()
 		if self.type == "Script":
 			self._validate_code()
 		validate_immutable(self, ("type", "import_path"))
+
+	def _validate_confirm_template(self):
+		"""Refuse an approval question that cannot be rendered, at the moment it is written.
+
+		Left to the moment of approval, the only sign would be the raw arguments appearing where
+		a sentence was meant to be — and nobody would know why.
+		"""
+		template = (self.confirm_template or "").strip()
+		if not template:
+			return
+		if len(template) > CONFIRM_TEMPLATE_LIMIT:
+			frappe.throw(
+				_("Keep the approval question under {0} characters.").format(CONFIRM_TEMPLATE_LIMIT),
+				title=_("Approval Question Too Long"),
+			)
+		from frappe.utils.jinja import get_jenv
+		from jinja2 import TemplateSyntaxError
+
+		try:
+			get_jenv(restrict_globals=True).parse(template)
+		except TemplateSyntaxError as e:
+			frappe.throw(
+				_("The approval question is not valid: {0}").format(e),
+				title=_("Invalid Approval Question"),
+			)
 
 	def on_trash(self):
 		block_delete(self, always=True)
