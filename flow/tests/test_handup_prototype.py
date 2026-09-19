@@ -56,6 +56,16 @@ def _calls(name: str, arguments: dict[str, Any], call_id: str = "c1") -> ChatRes
 	)
 
 
+def _calls_many(pairs: list[tuple[str, dict[str, Any], str]]) -> ChatResponse:
+	"""One assistant message carrying several tool calls — what a model does when it fans out."""
+	return ChatResponse(
+		content=None,
+		tool_calls=[ToolCall(id=call_id, name=name, arguments=args) for name, args, call_id in pairs],
+		finish_reason="tool_calls",
+		usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+	)
+
+
 THE_WRITE = {"folder": "2025 invoices", "count": 812}
 SPECIALIST_LABEL = "records"
 
@@ -396,10 +406,13 @@ class TestTheApprovalGateItselfIsUntouched(HandupFixture):
 
 		guarded = ("_invoke", "_resolve_confirmation", "_confirmation_question", "_has_denial")
 		for name in guarded:
+			# Positive control: a misspelled name would compare None to None and pass silently.
+			self.assertIsNotNone(_segment(baseline, name), f"{name} not found in the baseline")
+			self.assertIsNotNone(_segment(source, name), f"{name} not found on this branch")
 			self.assertEqual(
 				_segment(baseline, name), _segment(source, name), f"{name} changed on this branch"
 			)
-		self.assertNotEqual(_segment(baseline, "Question"), None)
+		self.assertIsNone(_segment(baseline, "_no_such_function_"), "the control itself is broken")
 
 
 def _segment(source: str, name: str) -> str | None:
@@ -410,3 +423,106 @@ def _segment(source: str, name: str) -> str | None:
 		if isinstance(node, ast.FunctionDef | ast.ClassDef) and node.name == name:
 			return ast.get_source_segment(source, node)
 	return None
+
+
+class TestTheSecurityReviewsFindings(HandupFixture):
+	"""Three attacks the security reviewer executed against the first version of this prototype
+	(19 Sep 2026). Each is pinned here so the fix cannot quietly come undone."""
+
+	def test_a_second_delegation_in_one_turn_is_still_recorded_as_a_child(self):
+		"""The depth guard reads the flag naming the run in progress. A nested run CLEARS that flag
+		on the way out, so the second delegation of the same turn sees nothing. It used to be
+		stored with no parent — an orphan, and free to delegate again, which a security reviewer
+		rode to depth 2. It is now refused instead."""
+		executed: list[dict[str, Any]] = []
+
+		@tool(requires_confirmation=True)
+		def delete_records(folder: str, count: int) -> str:
+			"""Delete records in a folder."""
+			executed.append({"folder": folder, "count": count})
+			return "done"
+
+		specialist = Agent(
+			model=ScriptedModel(
+				[
+					_calls("delete_records", THE_WRITE, call_id="s1"),
+					_calls("delete_records", THE_WRITE, call_id="s2"),
+				]
+			),
+			name="specialist",
+			instructions="You look after the records.",
+			tools=[delete_records],
+		)
+		handup.register_specialist(SPECIALIST_LABEL, specialist)
+
+		@tool
+		def ask_the_specialist(question: str) -> Any:
+			"""Hand a question to the specialist."""
+			return handup.delegate(specialist, question, label=SPECIALIST_LABEL)
+
+		generalist = Agent(
+			model=ScriptedModel(
+				[
+					_calls_many(
+						[
+							("ask_the_specialist", {"question": "a"}, "g1"),
+							("ask_the_specialist", {"question": "b"}, "g2"),
+						]
+					)
+				]
+			),
+			name="generalist",
+			tools=[ask_the_specialist],
+		)
+		outer = generalist.new_session()
+		outer_run = outer.chat("do both")
+		outer_run.reload()
+
+		# The second delegation is REFUSED, not silently orphaned. What must never happen is a run
+		# stored with no parent: that is what reached depth 2 in the reviewer's attack.
+		children = frappe.get_all(
+			"Flow Run", filters={"parent_run": outer_run.name}, pluck="name", order_by="creation asc"
+		)
+		self.assertEqual(len(children), 1)
+		orphans = [
+			r
+			for r in frappe.get_all("Flow Run", fields=["name", "parent_run", "session"])
+			if not r.parent_run and r.name != outer_run.name
+		]
+		self.assertEqual(orphans, [], f"a delegated run was stored with no parent: {orphans}")
+		self.assertEqual(executed, [])
+
+	def test_a_turn_resumed_without_an_answer_for_its_question_does_not_complete(self):
+		"""The delegating tool does not itself require confirmation, so an answers dict that does
+		not name its call used to serialise to "" — the caller finished and said the work was done
+		while the write was still parked."""
+		outer, outer_run, child_run, executed = self.pause_it()
+
+		with self.assertRaises(frappe.ValidationError):
+			outer.resume({"s1": "Approve"})  # the CHILD's call id, not the caller's
+
+		self.assertEqual(executed, [])
+		outer_run.reload()
+		child_run.reload()
+		self.assertEqual(outer_run.status, "Paused")
+		self.assertEqual(child_run.status, "Paused")
+
+	def test_a_specialist_that_stops_again_does_not_let_the_caller_claim_it_is_done(self):
+		"""After the approved write the specialist asked for a second one. The caller used to be
+		handed the paused run's empty output and finish the turn — the original failure, restored."""
+		outer, executed = self.build(
+			specialist_replies=[
+				_calls("delete_records", THE_WRITE, call_id="s1"),
+				_calls("delete_records", {"folder": "everything else", "count": 99}, call_id="s2"),
+			]
+		)
+		outer_run = outer.chat("clear the 2025 invoices")
+
+		with self.assertRaises(frappe.ValidationError):
+			outer.resume({"g1": "Approve"})
+
+		# The approved write ran — it was approved. The one nobody was asked about did not.
+		self.assertEqual(executed, [THE_WRITE])
+		outer_run.reload()
+		self.assertEqual(outer_run.status, "Paused")
+		self.assertIsNone(outer_run.output)

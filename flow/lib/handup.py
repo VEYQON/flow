@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 
 # Depth is exactly one: the person's own run may delegate; a specialist may not delegate again.
 MAX_HANDUP_DEPTH = 1
+# The specialist's label is framing text, not an argument, and is not covered by the digest.
+LABEL_MAX_LENGTH = 60
 
 # A code-defined specialist's session cannot rebuild its own runtime, so a resume has to be handed
 # the same object back. A shipped version would use record-defined specialists and need none of
@@ -59,9 +61,20 @@ def delegate(specialist: Any, question: str, *, label: str) -> Any:
 
 def _assert_depth(parent_run: str | None) -> None:
 	"""Refuse a second hop. The run doing the delegating is a specialist's run exactly when it
-	already has a parent run."""
+	already has a parent run.
+
+	Refuse too when the calling run cannot be identified at all. The flag naming the run in
+	progress is cleared by each nested turn on its way out, so the SECOND delegation of one turn
+	sees nothing — and a run stored with no parent is both an orphan and free to delegate again. A
+	security reviewer executed exactly that to reach depth 2 (19 Sep 2026). Failing closed keeps
+	the flag's own meaning intact (the O1 spike characterises it) at the cost of allowing only one
+	delegation per turn, which is recorded as a limitation rather than hidden.
+	"""
 	if not parent_run:
-		return
+		frappe.throw(
+			_("Only one piece of work can be handed to a specialist at a time."),
+			title=_("Handoff Depth"),
+		)
 	if frappe.db.get_value("Flow Run", parent_run, "parent_run"):
 		frappe.throw(
 			_("A specialist cannot hand work on to another specialist."),
@@ -82,7 +95,7 @@ def _hand_up(child_run: FlowRun, *, label: str) -> Question:
 		for call in calls
 	)
 	return Question(
-		prompt=_("Approve this, asked for by the {0} specialist?\n\n{1}").format(label, body),
+		prompt=_("Approve this, asked for by the {0} specialist?\n\n{1}").format(_one_line(label), body),
 		options=["Approve", "Deny"],
 		allow_other=True,
 		handup={
@@ -92,6 +105,13 @@ def _hand_up(child_run: FlowRun, *, label: str) -> Question:
 			"child_keys": [call["id"] for call in calls],
 		},
 	)
+
+
+def _one_line(label: str) -> str:
+	"""The framing line above the arguments is NOT covered by the digest, so nothing in it may add
+	a line of its own or run long enough to push the arguments out of view. Whitespace is collapsed
+	and the result capped."""
+	return " ".join(str(label).split())[:LABEL_MAX_LENGTH] or "unnamed"
 
 
 def pending_calls_of(run: FlowRun) -> list[dict[str, Any]]:
@@ -139,24 +159,65 @@ def route_answers_down(parent_run: FlowRun, answers: dict[str, Any]) -> dict[str
 	routed = dict(answers)
 	for question in questions:
 		handup = question.get("handup")
-		key = question.get("key")
-		if not handup or key not in routed:
+		if not handup:
 			continue
+		key = question.get("key")
+		if key not in routed:
+			# Without an answer the delegating tool would be handed "" and the caller would finish
+			# its turn — telling the person the work is done while the write is still parked. That
+			# is the exact failure this design exists to remove, so refuse instead.
+			frappe.throw(
+				_("This turn is still waiting on an answer and cannot continue."),
+				title=_("Still Waiting"),
+			)
 
 		answer = routed[key]
-		child_run = frappe.get_doc("Flow Run", handup["child_run"])
 		assert_run_owner(parent_run)
+		child_run = frappe.get_doc("Flow Run", handup["child_run"])
 		assert_run_owner(child_run)
 		_assert_unchanged(child_run, handup)
 
 		child_session = load_session(child_run.session, agent=_SPECIALISTS.get(handup["specialist"]))
+		_assert_same_tools(child_session, child_run)
+		# A registered runtime is a long-lived object that another caller may have left with
+		# approvals switched off. Nothing reached through a hand-up runs unapproved.
+		child_session._runtime.auto_approve = False
 		child_session.resume({call_id: answer for call_id in handup["child_keys"]})
 		child_run.reload()
 
+		if child_run.status == "Paused":
+			# The answer was taken and acted on, and the run it went to has stopped for a SECOND
+			# question. Handing the caller an empty result here would re-create the failure this
+			# design exists to remove, so the caller's turn stays paused rather than completing on
+			# nothing. Handing the new question up in turn is not built (see the prototype note).
+			frappe.throw(
+				_("More has been asked before this can go on. Nothing further has been done."),
+				title=_("Still Waiting"),
+			)
+
 		if answer == "Deny":
 			continue
-		routed[key] = child_run.output or ""
+		# NOT the bare string. This value is about to be read by code that compares answers against
+		# "Approve" and "Deny"; a specialist whose reply happened to be one of those words would be
+		# read as a person's decision. Model text and a human decision never share a value space.
+		routed[key] = json.dumps({"status": "specialist_result", "output": child_run.output or ""})
 	return routed
+
+
+def _assert_same_tools(child_session: Any, child_run: FlowRun) -> None:
+	"""The runtime about to execute is looked up by a label carried alongside the question, and the
+	digest does not cover that label. So prove the runtime actually owns the calls that were shown,
+	and that they are still the kind of call that needs approving — otherwise a substituted runtime
+	could run a different implementation, or resolve the call with no execution and no denial at
+	all, and the model would be told it was approved."""
+	tools = child_session._runtime._tools_by_name
+	for call in pending_calls_of(child_run):
+		tool = tools.get(call["name"])
+		if tool is None or not tool.requires_confirmation:
+			frappe.throw(
+				_("What was approved cannot be carried out as described. Nothing has been done."),
+				title=_("Approval No Longer Matches"),
+			)
 
 
 def _assert_unchanged(child_run: FlowRun, handup: dict[str, Any]) -> None:

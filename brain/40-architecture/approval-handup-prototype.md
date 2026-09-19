@@ -10,21 +10,55 @@ adr: [[20-adr/ADR-002-specialist-approval-routing]]
 > The prototype exists so the decision can be taken against measurements. Every claim below is a
 > named test in `flow/tests/test_handup_prototype.py`, green at `GATE=GREEN`, `TESTS_RUN=616`.
 
-## The invariant table
+## The invariant table — AFTER a security review that broke four things
+
+> **Read this table with the review section below it.** The first version of this note marked
+> I1, I3, I5 and I7 VERIFIED. A security reviewer then executed three attacks that falsified them.
+> The invariants were NOT bent to fit; the table was corrected, the prototype was fixed where the
+> fix was small, and what is still not established says so.
 
 | # | invariant | status | test |
 |---|---|---|---|
-| I1 | one approval question in the person's own conversation, naming the specialist, showing the exact arguments | **VERIFIED** | `test_i1_the_specialists_pause_raises_one_question_on_the_callers_run`, `test_i1_the_question_names_the_specialist_and_shows_the_exact_arguments`, `test_i1_the_question_is_keyed_to_the_callers_own_tool_call` |
-| I2 | only the exact `"Approve"` executes, at any depth; zero tool calls before approval | **VERIFIED** | `test_i2_nothing_executes_while_the_question_is_pending`, `test_i2_the_exact_approve_executes_the_write_the_person_was_shown`, `test_i2_deny_executes_nothing_at_either_depth`, `test_i2_free_text_executes_nothing`, `test_i2_a_lowercase_approve_does_not_execute` |
-| I3 | what executes is byte-for-byte what was shown, compared by digest | **VERIFIED** | `test_i3_the_digest_covers_the_arguments_the_person_was_shown`, `test_i3_arguments_changed_after_the_question_was_asked_do_not_execute` |
-| I4 | parent run and child run linked in the stored records both ways | **VERIFIED** | `test_i4_the_child_run_points_at_the_run_that_is_waiting_on_it`, `test_i4_the_waiting_run_points_at_the_child_it_is_waiting_on`, `test_i4_a_paused_child_is_reachable_from_the_conversation_the_person_is_in` |
-| I5 | nothing is claimed done or under way while anything is pending | **VERIFIED** | `test_i5_the_caller_never_says_the_work_is_done_or_under_way`, `test_i5_no_stored_message_claims_the_work_happened` |
-| I6 | resume runs as the owner of the parent run only | **VERIFIED — but read the note below** | `test_i6_another_user_cannot_approve_the_handed_up_question`, `test_i6_the_run_owner_check_fires_before_the_specialists_session_is_opened`, `test_i6_the_owner_of_the_parent_run_owns_the_child_run_too` |
-| I7 | depth is exactly one | **VERIFIED, with a caveat below** | `test_i7_a_specialist_cannot_hand_work_on_to_another_specialist` |
+| I1 | one approval question in the person's own conversation, naming the specialist, showing the exact arguments | **PARTLY VERIFIED** — true for the first pause; a *second* pause was not handed up at all (HIGH-2). The prototype now refuses to continue rather than hiding it, but the second question still does not reach the person | `test_i1_*`, `test_a_specialist_that_stops_again_does_not_let_the_caller_claim_it_is_done` |
+| I2 | only the exact `"Approve"` executes, at any depth; zero tool calls before approval | **VERIFIED** — the reviewer attacked the answers dict in six shapes and could not execute anything without the exact string, except through HIGH-4, which is fixed | `test_i2_*` |
+| I3 | what executes is byte-for-byte what was shown, compared by digest | **FAILED as worded** — the digest is over the *pending calls of the run that paused*, and that is not always the write. In the reviewer's depth-2 chain it covered the delegation call, so one "Approve" ran a write two levels down that the question did not name. The depth fix closes that chain; the general weakness stands (see "What is still not established") | `test_i3_*` |
+| I4 | parent run and child run linked in the stored records both ways | **VERIFIED after a fix** — the *second* delegation of one turn used to be stored with no parent at all (HIGH-1) | `test_i4_*`, `test_a_second_delegation_in_one_turn_is_still_recorded_as_a_child` |
+| I5 | nothing is claimed done or under way while anything is pending | **FAILED as first built, VERIFIED after the fixes** — the reviewer produced "parent Completed, output `done`, child still Paused" **twice** (HIGH-2, HIGH-3), and the two original I5 tests could not see it because both assert only on the moment *before* any answer | `test_i5_*` plus the three `TestTheSecurityReviewsFindings` tests |
+| I6 | resume runs as the owner of the parent run only | **VERIFIED** | `test_i6_*` |
+| I7 | depth is exactly one | **FAILED as first built, VERIFIED after the fix** — depth 2 was executed (HIGH-1); the fix also limits a turn to ONE delegation | `test_i7_*`, `test_a_second_delegation_in_one_turn_is_still_recorded_as_a_child` |
 
-**None of the seven had to be bent.** ADR-002's proposed design, as far as this prototype goes,
-can satisfy all of them. What it cost is listed under "What it takes", and what is still
-unanswered under "Not established".
+**The honest summary for the decision: of the seven, two were false when this note first claimed
+them verified, one is false as worded and stays false, and the rest held.** ADR-002's design is not
+refuted by that — every failure but I3's was a defect in this prototype, and each was small to fix.
+I3's is the design's own sharpest risk, which ADR-002 already names ("Question keys must stay
+unambiguous across two runs"), showing up in a form the ADR did not anticipate: the question and the
+run the answer is routed into are not bound to each other at all.
+
+## The security review, and what was done about it
+A security reviewer (read-only, isolated, on commit `ca9be13`) executed four attacks in a console
+session, each ending in a rollback. Three were confirmed end to end.
+
+| sev | finding | fix |
+|---|---|---|
+| **HIGH-1** | **Depth guard bypassed, and I4 with it.** `delegate` reads `frappe.flags.flow_run` to learn which run it is inside. The nested turn *cleared* that flag on the way out, so a model that emits two delegations in one assistant message gave the second one `parent_run=None` — stored as a top-level run, and then free to delegate again. Depth 2 was reached; one "Approve" executed a write two levels down that the question did not name. | **FIXED by failing closed.** A delegation whose calling run cannot be identified is now REFUSED, so no run is ever stored without a parent. The first fix attempted was to make `chat`/`resume` restore the previously active run instead of clearing it — which is the better fix, and also closes the memory-stamp clobber O1 found — but it turns O1's own characterisation test red, and a test is never edited to make a change pass. **Recommendation for the owner: take the restore fix and update O1's characterisation test deliberately, in its own commit.** The cost of the shipped fix is that only one delegation per turn is possible. |
+| **HIGH-2** | **The original failure, restored.** When the specialist paused a *second* time after its approved call, `route_answers_down` took `child_run.output or ""` from a still-Paused run, so the caller finished and said the work was done while a second write sat parked. | **FIXED.** A still-Paused child now refuses the caller's turn rather than completing it on nothing. Probe I → **RED**. Handing the *new* question up in turn is not built. |
+| **HIGH-3** | **A resume whose answers omit the caller's own key completed the turn with no approval at all** — the delegating tool is not `requires_confirmation`, so `answers.get(key) → None → ""` became its result. Reachable through the public resume API by answering with the child's call id. | **FIXED.** A hand-up question with no answer in the dict refuses the resume. Probe H → **RED**. |
+| **HIGH-4** | **`auto_approve` could survive on a registered specialist.** `_SPECIALISTS` holds a long-lived mutable `Agent`; `FlowSession.resume` never resets `auto_approve`, so a stale `True` made a second confirmation tool run unasked. Mechanism executed; reaching the `True` is plausible, not executed. | **FIXED.** The hand-up sets `auto_approve = False` on the specialist's runtime before resuming it. No test — the state needed is contrived; recorded here instead. |
+
+The reviewer also found that `test_the_confirmation_functions_are_byte_identical_to_the_branch_point`
+had a hole: a misspelled name compared `None` to `None` and passed. **Fixed** — each name must now
+resolve on both sides, and a deliberately absent name is asserted to resolve to nothing.
+
+**What the reviewer attacked and could NOT break** (evidence, not the absence of it): CLAUDE.md
+rule 4 — it independently hashed the AST source segments of `_invoke`, `_resolve_confirmation`,
+`_confirmation_question`, `_has_denial` and four more, all identical to `veyqon`; the E5
+forged-second-question attack does not reproduce through `_hand_up`, because `json.dumps`'
+`ensure_ascii=True` escapes `\n`, U+2028, U+2029, U+0085 and U+202E, and the body is joined rather
+than interpolated; rule 3 — it printed the actual strings reaching the model and found no platform,
+vendor or model name; the digest cannot be made to disagree between `pending_calls_of` and the
+agent's own `_transcript_calls`; six answer-dict shapes execute nothing; a re-resume fails closed;
+another user is rejected before the session is opened. No new whitelisted endpoint, no
+`allow_guest`, no `frappe.db.sql`, no `ignore_permissions` in the new engine code.
 
 ## What the prototype is
 
@@ -107,10 +141,34 @@ then goes **RED**. If ADR-002 is accepted, that ordering belongs in its acceptan
   the specialist is told "no" rather than being stopped. Whether that is right is a decision.
 
 ## Not established
-- **Streaming.** Every test here is the synchronous path. `stream_with_persistence` clears
-  `frappe.flags.flow_run` in its `finally`, and the O1 spike already found that a nested run clears
-  that flag while the outer turn is still running — `delegate` reads the flag *before* starting the
-  child, so it is unaffected, but a streamed hand-up is **UNKNOWN**.
+- **The HIGH-1 regression test was never watched failing.**
+  `test_a_second_delegation_in_one_turn_is_still_recorded_as_a_child` is green and was written
+  against an attack a reviewer executed on `ca9be13`, but the run's clock ran out before its probe
+  (revert `_assert_depth`'s `if not parent_run: throw` to `return`) could be run. **Treat it as
+  unproven until someone reverts that line and watches it go red.** The two fixes that WERE probed
+  are HIGH-2 (probe I → RED) and HIGH-3 (probe H → RED).
+- **I3 is still weak by design.** `Question.handup` is written by the tool and nothing binds it to
+  the `prompt` a person reads. The digest proves the child has not changed since the record was
+  built; it does not prove the record describes what the prompt says, and it is taken over the
+  pending calls of the paused run whether or not those are the write. If ADR-002 is accepted, the
+  binding between the question's text and the call it authorises needs its own acceptance criteria.
+- **A hand-up has side effects before anyone is asked.** `delegate` runs the specialist's whole
+  loop — a model call and every non-confirmation tool it picks — just to build the question, and
+  outside tests the nested `chat()` commits the transaction first. That is the E5 lesson (a
+  question must not execute anything) at a much larger scale, and this prototype does not solve it.
+- **Direct approval of the specialist's run bypasses everything.** The child session is Manual and
+  owned by the person, so it shows in their history and its paused run can be approved through the
+  ordinary resume API without the parent link, the digest or the owner hop. Today only
+  `load_session`'s code-agent guard blocks it, and that guard disappears with record-defined
+  specialists.
+- **Trigger runs park forever.** `delegate` does not pass `auto_approve` down, so an unattended run
+  pauses with a hand-up question in a session hidden from the chat panel.
+- **Streaming.** Every test here is the synchronous path. `stream_with_persistence` also sets
+  `frappe.flags.flow_run = None` in its `finally`, so a streamed hand-up would hit the
+  cannot-identify-the-caller refusal rather than work. A streamed hand-up is **UNKNOWN and expected
+  to refuse**.
+  *(An earlier version of this note said `delegate` reads the flag before starting the child "so it
+  is unaffected". That was wrong, and a reviewer executed the attack it excused.)*
 - **Concurrency and locking**, unchanged from O1: `chat()` commits before the model call only
   outside tests, so production row locking on `Flow Session` is never exercised here.
 - **What happens to a parked specialist run nobody ever answers.** ADR-002 asks this; the prototype
