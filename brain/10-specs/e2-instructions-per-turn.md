@@ -80,6 +80,21 @@ its own and names no platform, vendor or model.
   so validation prevents it, but `frappe.db.set_value` does not. Falling back to the stored row is
   safer than sending an empty system message.
 - Message-count drift would break `ephemeral_prompt_prefix` and duplicate stored rows. AC7/AC8.
+- **The file-injection budget stops matching the prompt.** `_file_injection_budget` measured the
+  stored rows, which used to be exactly what the model received. After this change they are not, so
+  a long set of instructions would silently buy itself room an attachment then overruns. Found by
+  the adversarial pass, measured at ~200 KB of phantom room on a 512 KB window, and fixed by
+  `_instructions_delta()`. Note the budget still does not count the per-turn context block or the
+  memory block — both predate this spec, both are small, and neither is fixed here.
+- **Only the system message at index 0 is replaced.** A stored system row at a later index is
+  replayed verbatim, so superseded instructions would reach the model beside the current ones. The
+  engine cannot produce that shape — `_persist_turn` writes a system row only into an empty
+  transcript and `append_run_messages` stores only assistant and tool output — so it needs a direct
+  database write. Recorded rather than coded around.
+- **A record-linked session continued with a code `Agent` object runs that object's instructions.**
+  `load_session`'s mismatch guard rejects only a *string* agent, so an `Agent` instance passes while
+  the session still points at the record. That follows from the runtime being the source of truth
+  and is the intended reading, but it is a behaviour change this spec did not originally state.
 
 ## Open questions
 - Should a session pin the instructions it started with, opt-in? Out of scope; capture if wanted.
@@ -167,7 +182,7 @@ transcript is the only copy of what they were told — keep the stored row verba
 | 3 | same test (asserts the superseded text appears nowhere in the second prompt) |
 | 4 | `test_a_code_agent_session_is_unaffected` + `test_a_code_agent_continued_with_different_instructions_keeps_the_stored_ones` |
 | 5 | `test_resume_uses_the_current_instructions` |
-| 6 | `test_context_and_memory_still_follow_the_instructions_in_that_order` |
+| 6 | `test_context_and_memory_still_follow_the_instructions_in_that_order` — **but see the note below: this test pins F3's ordering and passes whether the text came from the record or the stored row. It is a real contract test, just not a discriminating proof of E2.** |
 | 7 | `test_a_linked_session_with_no_stored_system_row_gets_one_and_stores_no_extra` |
 | 8 | the role-list assertions in AC2's and AC7's tests |
 | 9 | `MIN_TESTS=618 scripts/run-tests.sh` → `GATE=GREEN`; `flow/lib/` untouched |

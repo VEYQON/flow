@@ -884,6 +884,40 @@ class TestAgentInstructionsAreRebuiltEachTurn(IntegrationTestCase):
 
 		return load_session(name)
 
+	def test_the_file_budget_counts_the_instructions_actually_sent(self):
+		"""The budget used to be read off the stored rows, which WERE what the model got. They
+		are not any more. Without this the room left for an attachment is computed against a
+		system message that is no longer the one being sent."""
+		session = self._session()
+		sent = []
+		self._turn(session, "one", sent)
+		before = self._reload(session.name)._file_injection_budget()
+
+		frappe.db.set_value("Flow Agent", self.agent.name, "instructions", "X" * 100_000)
+		reloaded = self._reload(session.name)
+		after = reloaded._file_injection_budget()
+
+		# 100k characters of instructions are now in the prompt; the budget has to give them up.
+		self.assertLess(after, before - 99_000)
+
+		# The invariant that matters: what is sent, plus what is still on offer for files, must
+		# fit the window.
+		with pinned_clock(datetime(2026, 9, 19, 10, 42, tzinfo=UTC)):
+			prompt_chars = sum(len(m["content"] or "") for m in reloaded._build_prompt_messages())
+		self.assertLessEqual(after + prompt_chars, reloaded._context_window() * CHARS_PER_TOKEN)
+
+	def test_a_code_agent_session_budgets_exactly_as_before(self):
+		"""No rebuild, no delta: the stored rows really are what a code session sends."""
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), name="Coder", instructions="be terse")
+		session = agent.new_session()
+		sent = []
+		self._turn(session, "hello", sent)
+
+		reloaded = frappe.get_doc("Flow Session", session.name)
+		reloaded._snapshot = {"model": None}
+		reloaded._runtime = agent
+		self.assertEqual(reloaded._instructions_delta(), 0)
+
 	def test_blank_instructions_fall_back_to_the_stored_row(self):
 		"""Instructions are mandatory on the record, but a direct database write can still empty
 		them. A session with a stored system row keeps sending it rather than sending nothing."""
