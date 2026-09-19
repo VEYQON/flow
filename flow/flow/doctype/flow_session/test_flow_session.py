@@ -884,6 +884,21 @@ class TestAgentInstructionsAreRebuiltEachTurn(IntegrationTestCase):
 
 		return load_session(name)
 
+	def test_blank_instructions_fall_back_to_the_stored_row(self):
+		"""Instructions are mandatory on the record, but a direct database write can still empty
+		them. A session with a stored system row keeps sending it rather than sending nothing."""
+		session = self._session()
+		sent = []
+		self._turn(session, "one", sent)
+
+		frappe.db.set_value("Flow Agent", self.agent.name, "instructions", "")
+		reloaded = self._reload(session.name)
+		self.assertIsNone(reloaded._current_instructions())
+		self._turn(reloaded, "two", sent)
+
+		self.assertEqual(sent[1][0]["role"], "system")
+		self.assertTrue(sent[1][0]["content"].startswith("ORIGINAL INSTRUCTIONS"))
+
 	def test_edited_instructions_reach_the_next_turn_of_an_open_session(self):
 		session = self._session()
 		sent = []
@@ -917,7 +932,9 @@ class TestAgentInstructionsAreRebuiltEachTurn(IntegrationTestCase):
 			self.assertNotIn("REVISED INSTRUCTIONS", row.content or "")
 
 	def test_a_code_agent_session_is_unaffected(self):
-		"""No agent link means nothing to rebuild from: the stored row is used verbatim."""
+		"""A smoke test, kept deliberately and labelled: it CANNOT discriminate. A code session's
+		runtime and its stored row hold the same text, so neither assertion below can tell which
+		was used. The test that can is the next one."""
 		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), name="Coder", instructions="be terse")
 		session = agent.new_session()
 		sent = []
@@ -981,18 +998,62 @@ class TestAgentInstructionsAreRebuiltEachTurn(IntegrationTestCase):
 		self.assertNotIn("ORIGINAL INSTRUCTIONS", sent[1][0]["content"])
 
 	def test_resume_uses_the_current_instructions(self):
+		"""A real pause and a real resume, not a second call to the prompt builder: resume has
+		its own reload, its own runtime call and its own persistence, and none of that is
+		exercised by rebuilding the prompt directly."""
+		from flow.lib.session import load_session
+		from flow.lib.tool import tool
+
+		executed: list = []
+
+		@tool(requires_confirmation=True)
+		def post_it(amount: float) -> str:
+			"""Post something. Needs approval."""
+			executed.append(amount)
+			return "posted"
+
 		session = self._session()
-		sent = []
-		self._turn(session, "one", sent)
+		session._runtime.tools = [post_it]
+		session._runtime._tools_by_name = {"post_it": post_it}
+
+		def pause(messages, tools=None, **_):
+			return ChatResponse(
+				content=None,
+				tool_calls=[ToolCall(id="c1", name="post_it", arguments={"amount": 1.0})],
+				finish_reason="tool_calls",
+				usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+			)
+
+		with pinned_clock(datetime(2026, 9, 19, 10, 42, tzinfo=UTC)):
+			with patch.object(Model, "chat", side_effect=pause):
+				run = session.chat("post it")
+		self.assertEqual(run.status, "Paused")
 
 		self.agent.instructions = "REVISED INSTRUCTIONS"
 		self.agent.save(ignore_permissions=True)
 
-		reloaded = self._reload(session.name)
+		sent: list = []
+
+		def capture(messages, tools=None, **_):
+			sent.append([dict(m) for m in messages])
+			return self._reply()
+
+		reloaded = load_session(session.name)
+		reloaded._runtime.tools = [post_it]
+		reloaded._runtime._tools_by_name = {"post_it": post_it}
 		with pinned_clock(datetime(2026, 9, 19, 10, 42, tzinfo=UTC)):
-			built = reloaded._build_prompt_messages()
-		self.assertIn("REVISED INSTRUCTIONS", built[0]["content"])
-		self.assertNotIn("ORIGINAL INSTRUCTIONS", built[0]["content"])
+			with patch.object(Model, "chat", side_effect=capture):
+				resumed = reloaded.resume({"c1": "Approve"})
+
+		# The resumed turn was sent the CURRENT instructions, through resume's own path.
+		self.assertIn("REVISED INSTRUCTIONS", sent[0][0]["content"])
+		self.assertNotIn("ORIGINAL INSTRUCTIONS", sent[0][0]["content"])
+		# The approval still gated the write, and the stored transcript is unrewritten and undup'd.
+		self.assertEqual(executed, [1.0])
+		self.assertEqual(resumed.status, "Completed")
+		rows = frappe.get_doc("Flow Session", session.name).messages
+		self.assertEqual([r.role for r in rows], ["system", "user", "assistant", "tool", "assistant"])
+		self.assertEqual(rows[0].content, "ORIGINAL INSTRUCTIONS")
 
 	def test_a_linked_session_with_no_stored_system_row_gets_one_and_stores_no_extra(self):
 		"""The insert branch must carry the current instructions too, and the ephemeral prefix

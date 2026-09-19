@@ -395,20 +395,23 @@ class FlowSession(Document):
 		return messages
 
 	def _current_instructions(self) -> str | None:
-		"""The linked agent's instructions as they are now, or None to use what was stored.
+		"""The instructions to send now, or None to use whatever the transcript stored.
 
-		None for a code-driven session: it has no agent record to read, and its stored system
-		message is the only copy of its instructions there is. None too when the record's
-		instructions are empty — they are mandatory on the record, but a direct database write
-		can still empty them, and falling back to the stored text beats sending nothing.
+		They come from the runtime this session was loaded with, which for a record-backed
+		session is rebuilt from the record on every load and is therefore already today's text.
+		(Continue such a session with a code agent instead and that agent's text is what goes —
+		the runtime is the source either way.)
+
+		None for a code-driven session: there is no record behind it, and its stored system
+		message is the only copy of its instructions there is. None too when the runtime carries
+		no instructions — mandatory on the record, but a direct database write can still empty
+		them — so a session with a stored system row keeps sending it rather than sending nothing.
 		"""
 		if not self.agent:
 			return None
-		runtime = getattr(self, "_runtime", None)
-		if runtime is not None:
-			# Rebuilt from the record on every load, so it is already today's text.
-			return runtime.instructions or None
-		return frappe.db.get_value("Flow Agent", self.agent, "instructions") or None
+		# Every session reaching here came from new_session/load_session, both of which attach a
+		# runtime; the two callers of the prompt builder dereference it unguarded as well.
+		return self._runtime.instructions or None
 
 	def _latest_user_run(self) -> str | None:
 		for row in reversed(self.messages):
