@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import frappe
 from frappe import _
@@ -30,6 +31,10 @@ RETRIEVAL_FRACTION = 0.5
 RESERVED_OUTPUT_TOKENS = 4096
 # How many retrieved chunks to inject for the current turn.
 RETRIEVAL_TOP_K = 8
+
+# The user's name is user-editable text placed in the system role. Capped so it cannot
+# crowd out the turn's context, and flattened so it cannot add lines of its own.
+MAX_USER_NAME_LENGTH = 100
 
 
 def _set_active_run(run: str | None) -> None:
@@ -324,9 +329,16 @@ class FlowSession(Document):
 		- Retrieval files: a short note marks where each was attached; for the latest user turn
 		  the most relevant chunks (by that turn's query) are injected in place of the full text.
 		- Agent memory: the agent's saved memories are appended to the system message.
+		- Per-turn context: the current date, time, zone and user, rebuilt every turn.
+
+		An empty transcript stays empty: nothing was said yet, so there is nothing to send,
+		and resume relies on that to tell an unstarted session from a resumable one.
 		"""
 		from flow.knowledge.retriever import retrieve_attachments
 		from flow.memory.memory import build_memory_block
+
+		if not self.messages:
+			return []
 
 		attachments_by_run = self._group_attachments_by_run()
 		last_user_run = self._latest_user_run()
@@ -351,12 +363,23 @@ class FlowSession(Document):
 				message["content"] = content
 			messages.append(message)
 
-		memory_block = build_memory_block(self.agent, query=self._latest_user_content())
-		if memory_block:
-			if messages and messages[0]["role"] == "system":
-				messages[0]["content"] = f"{messages[0]['content']}\n\n{memory_block}"
+		# Ephemeral, in this order: what is true now, then what the agent remembers. Added to the
+		# stored system message when there is one, otherwise carried by a system message that
+		# exists only for this prompt (see `ephemeral_prompt_prefix`).
+		blocks = [
+			block
+			for block in (
+				build_turn_context_block(),
+				build_memory_block(self.agent, query=self._latest_user_content()),
+			)
+			if block
+		]
+		if blocks:
+			joined = "\n\n".join(blocks)
+			if messages[0]["role"] == "system":
+				messages[0]["content"] = f"{messages[0]['content']}\n\n{joined}"
 			else:
-				messages.insert(0, {"role": "system", "content": memory_block})
+				messages.insert(0, {"role": "system", "content": joined})
 		return messages
 
 	def _latest_user_run(self) -> str | None:
@@ -404,6 +427,74 @@ class FlowSession(Document):
 			_("This session already has a run in progress."),
 			title=_("Run In Progress"),
 		)
+
+
+def build_turn_context_block() -> str:
+	"""What is true right now: the date, the local time, the zone it is expressed in, and who
+	is speaking. Rebuilt for every prompt (never stored), so a session that has been open for
+	days still gets today's date rather than the day it started.
+
+	Describes the situation only — no software, vendor or model is named.
+	"""
+	from frappe.utils import get_fullname
+	from frappe.utils.data import get_datetime_in_timezone
+
+	time_zone = _resolve_time_zone()
+	now = get_datetime_in_timezone(time_zone)
+	return (
+		f"Current context: today is {now.strftime('%A')}, {now.strftime('%Y-%m-%d')}. "
+		f"Local time is {now.strftime('%H:%M')} ({time_zone}). "
+		f'You are speaking with "{_display_name(get_fullname())}".'
+	)
+
+
+def _resolve_time_zone() -> str:
+	"""The user's own zone when they have a usable one, else the system's.
+
+	An unknown zone is rejected here rather than passed on: the conversion helper answers an
+	unknown zone with the UTC time instead of raising, which would label a clock reading with
+	a zone it is not actually in.
+	"""
+	from frappe.utils.data import get_system_timezone
+
+	system = get_system_timezone()
+	candidate = frappe.db.get_value("User", frappe.session.user, "time_zone")
+	if not candidate:
+		return system
+	try:
+		ZoneInfo(candidate)
+	except (ZoneInfoNotFoundError, ValueError):
+		return system
+	return candidate
+
+
+def _display_name(name: str | None) -> str:
+	"""The user's name as one short, quoted-safe line. Whitespace is collapsed so the name
+	cannot introduce a line of its own, and inner quotes are turned into single quotes so the
+	quoting around it stays unambiguous."""
+	flattened = " ".join((name or "").split()).replace('"', "'")
+	return flattened[:MAX_USER_NAME_LENGTH] or "an unnamed user"
+
+
+def ephemeral_prompt_prefix(session: str, transcript: list[dict[str, Any]]) -> int:
+	"""How many messages at the head of `transcript` this session added for one turn only and
+	never stored.
+
+	Per-turn context rides on a system message; a session whose transcript has no system message
+	of its own gets one inserted for it (see `_build_prompt_messages`). Anything that reads a
+	run's transcript positionally must skip it, or the last stored message is re-persisted as
+	though the run had produced it. Both sides are checked — the transcript must start with a
+	system message *and* the stored rows must not — so a caller passing its own transcript
+	(no ephemeral prefix) is unaffected.
+	"""
+	if not transcript or transcript[0].get("role") != "system":
+		return 0
+	first_stored = frappe.db.get_value(
+		"Flow Session Message", {"parent": session}, "role", order_by="idx asc"
+	)
+	if not first_stored or first_stored == "system":
+		return 0
+	return 1
 
 
 def _delete_attachment_files(sessions: list[str]) -> None:
