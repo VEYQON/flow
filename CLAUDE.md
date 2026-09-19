@@ -21,8 +21,10 @@ production under every Agent Q conversation. See @brain/MOC.md.
 ## Rules that differ from defaults
 1. **bench's exit code is not evidence.** It has exited 0 after a failure here, and Frappe's runner
    exits 0 when it discovers ZERO tests. Green means `scripts/run-tests.sh` printed `GATE=GREEN`.
-2. **Tabs, not spaces**, per upstream's `pyproject.toml`/`.editorconfig`. Doctype JSON is 1-space,
-   no final newline. Never run a formatter with defaults — only `pre-commit`.
+2. **Tabs, not spaces**, per upstream's `pyproject.toml`/`.editorconfig`. Doctype JSON is 1-space
+   indented and — measured 19 Sep 2026 — all 16 doctype JSON files DO end with a newline, despite
+   `.editorconfig`. Match the file you are editing; never reformat it. Only `pre-commit`, never a
+   formatter with defaults.
 3. **Model-facing text never names the platform.** Anything the model reads (system/context blocks,
    tool descriptions, error strings returned to it) must not say Frappe, Flow, ERPNext, MariaDB,
    OpenAI, or any vendor/model name. The product requirement is absolute.
@@ -42,6 +44,8 @@ production under every Agent Q conversation. See @brain/MOC.md.
 3. Touch only the files in the approved plan. Need another? Stop and re-plan.
 4. Never edit or delete a test to make it pass; never edit `features.json` except to flip `passes`.
 5. The agent that wrote the code never reviews it — `/loop-verify` uses fresh subagents.
+   **While reviewers run, the builder does not switch branches or touch the working tree**: the
+   reviewers read and test the checked-out files. Test runs are serialised by the gate's lock.
 6. Report status as `DONE` / `DONE_WITH_CONCERNS` / `NEEDS_CONTEXT` / `BLOCKED`.
 
 ## Lessons
@@ -52,3 +56,8 @@ production under every Agent Q conversation. See @brain/MOC.md.
   "the write executes" — that misreading produced a false security finding (F2, 19 Sep 2026).
 - A block that starts with `cd` must stop if the `cd` fails, or it measures the wrong directory.
 - A measurement written into a comment carries its date, or it does not go in the comment.
+- Switching branches while reviewers were running broke a QA pass and left three mutations untested
+  (19 Sep 2026). The tree belongs to the reviewers until they report.
+- A "sandboxed" template engine rendered model-controlled text into an approval question and could
+  run a database call before anyone approved (E5 v1, 19 Sep 2026). Model-controlled values are data:
+  never evaluate them, never let them change the shape of what a person is asked to approve.
