@@ -143,7 +143,7 @@ the template's referenced names against the arguments before rendering. Decide i
 slug fallback keeps that green **unmodified** — which is a hard limit, not a preference. `:608`
 pins the options and `:609` `allow_other`.
 
-**F-6 — doctype JSON house rules.** 1-space indent, no final newline. A new field needs
+**F-6 — doctype JSON house rules.** 1-space indent, no final newline — **WRONG, corrected in CLAUDE.md 2026-09-19: all 16 doctype JSON files DO end with a newline; match the file**. A new field needs
 `bench --site flow.localhost migrate`, which the run's limits allow.
 
 ### Tasks

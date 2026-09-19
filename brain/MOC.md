@@ -20,6 +20,8 @@ The hub. If a note isn't linked from here, it's lost.
   - [[00-inbox/instructions-frozen-at-first-turn]]
   - [[00-inbox/worded-refusal-reproposes]]
   - [[00-inbox/stream-disconnect-loses-output]]
+  - [[00-inbox/approval-question-never-reaches-the-approver]]
+  - [[00-inbox/a-model-can-drop-the-approval-sentence]]
 
 ## Decisions
 - **ADRs** → `20-adr/` — immutable. Supersede, never edit.

@@ -462,6 +462,13 @@ def _escaped(text: str) -> str:
 	The backslash and the quote are escaped too. Without that, `\\n` in the output could be either a
 	real line break or those two characters, and a quote inside a value could close the pair holding
 	it — the point of escaping is that the reader can tell exactly what the value was.
+
+	The rule is a whitelist and has to stay one. It began as a list of the categories that looked
+	dangerous — Cc and Cf — and that list missed U+2028 and U+2029, which `str.splitlines` and every
+	layout engine treat as line breaks, so a value could still open a line of its own. Everything in
+	a C* or Z* category is escaped now, the ordinary space excepted: unassigned code points, private
+	use and lone surrogates included, so a later revision of Unicode cannot quietly add a new way
+	through.
 	"""
 	out: list[str] = []
 	for ch in text:
@@ -473,7 +480,7 @@ def _escaped(text: str) -> str:
 			out.append("\\r")
 		elif ch == "\t":
 			out.append("\\t")
-		elif unicodedata.category(ch) in ("Cc", "Cf"):
+		elif ch != " " and unicodedata.category(ch)[0] in "CZ":
 			out.append(f"\\u{ord(ch):04x}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08x}")
 		else:
 			out.append(ch)
@@ -490,8 +497,11 @@ def _quoted_argument(value: Any) -> str | None:
 	"""
 	if not isinstance(value, CONFIRM_SCALAR_TYPES):
 		return None
+	# Escaping only ever lengthens, so a value already over the cap is refused before the work of
+	# escaping it: the value is chosen by the model and can be megabytes.
+	if isinstance(value, str) and len(value) > CONFIRM_VALUE_LIMIT:
+		return None
 	shown = _escaped(value if isinstance(value, str) else json.dumps(value))
-	# Escaping only ever lengthens, so this one cap also refuses any raw value over the limit.
 	if len(shown) > CONFIRM_VALUE_LIMIT:
 		return None
 	return f'"{shown}"'
@@ -544,25 +554,28 @@ def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
 
 	The sentence never replaces the arguments. Its wording comes from an administrator, and a
 	question reading "Read the invoices" above a call that deletes them must not be the only thing
-	anyone sees. Wording only: what executes, and on which answer, is decided elsewhere and nothing
-	here can reach it.
-	"""
-	dump = json.dumps(call.arguments, indent=2, default=str)
-	body = None
-	if tool.confirm_prompt:
-		body = tool.confirm_prompt(call.arguments)
-	elif tool.confirm_template:
-		sentence = _render_confirm_template(tool.confirm_template, call.arguments)
-		body = f"{sentence}\n\n{dump}" if sentence else None
-	if not body:
-		body = dump
+	anyone sees. `confirm_prompt` is the exception, deliberately: it is code, written and reviewed
+	with the tool rather than typed into a record, and `test_confirm_prompt_renders_plain_english_body`
+	asserts that the argument shape does not appear beneath it.
 
-	if tool.title:
-		prompt = _("Approve {0}?\n\n{1}").format(_escaped(" ".join(tool.title.split())), body)
-	else:
-		prompt = _("Approve `{0}`?\n\n{1}").format(call.name, body)
+	Wording only: what executes, and on which answer, is decided elsewhere and nothing here can
+	reach it.
+	"""
+	body = tool.confirm_prompt(call.arguments) if tool.confirm_prompt else None
+	if not body:
+		# Built only where it is used. `json.dumps` can raise on an exotic argument, and this
+		# function must not be the reason nobody is asked.
+		dump = json.dumps(call.arguments, indent=2, default=str)
+		sentence = (
+			_render_confirm_template(tool.confirm_template, call.arguments) if tool.confirm_template else None
+		)
+		body = f"{sentence}\n\n{dump}" if sentence else dump
+
+	title = _escaped(" ".join((tool.title or "").split()))
+	# Joined, not interpolated. The body carries the model's own words and is never an argument to
+	# a formatter, so there is nothing for a value shaped like `{0}` or `%s` to be read as.
 	return Question(
-		prompt=prompt,
+		prompt=_("Approve {0}?").format(title or f"`{call.name}`") + "\n\n" + body,
 		options=["Approve", "Deny"],
 		allow_other=True,
 	)

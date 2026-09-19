@@ -11,6 +11,7 @@ they were shown.
 """
 
 import json
+import pathlib
 from unittest.mock import patch
 
 import frappe
@@ -71,7 +72,7 @@ class TestTheSentenceIsSubstitutedNotEvaluated(IntegrationTestCase):
 		self.assertEqual(self._render("Post {{ amount }}."), "Post {{ amount }}.")
 
 	def test_a_database_call_written_into_the_field_stays_literal_text(self):
-		"""Run 1's design ran this. `{{ frappe.db.sql(...) }}` executed inside the question —
+		"""An earlier design rendered this with a template engine, and it ran. `{{ frappe.db.sql(...) }}` executed inside the question —
 		before anyone approved anything, and even if they went on to refuse."""
 		template = "Delete {{ frappe.db.sql('DROP TABLE tabUser') }} for {customer}."
 
@@ -107,21 +108,59 @@ class TestTheSentenceIsSubstitutedNotEvaluated(IntegrationTestCase):
 			self.assertEqual(self._render("Post {amount} for {customer}."), 'Post "4200" for "Acme".')
 
 	def test_rendering_never_raises(self):
-		"""A badly written question must not be able to stop a person being asked."""
+		"""A badly written question must not be able to stop a person being asked.
+
+		The first two cases are the ones that actually reach the guard: `json.dumps` refuses an
+		integer of more than 4300 digits, and `arguments` that is not a mapping fails the lookup.
+		Without the `try`, each of them raises out of the approval path. Called directly rather
+		than through the helper, whose default would turn `None` back into real arguments.
+		"""
+		from flow.lib.agent import _render_confirm_template
+
 		for template, arguments in (
+			("{amount}", {"amount": 10**5000}),
+			("{amount}", None),
+			("{amount}", ["not", "a", "mapping"]),
 			("{amount}", {"amount": object()}),
 			("{amount}", {}),
-			("{amount}", {"amount": float("nan")}),
-			("{" * 500 + "amount" + "}" * 500, ARGUMENTS),
 			("{amount}", {"amount": b"bytes"}),
 		):
-			with self.subTest(template=template[:20], arguments=list(arguments)):
-				self._render(template, arguments)  # must not raise
+			with self.subTest(refused=template[:20], arguments=type(arguments).__name__):
+				self.assertIsNone(_render_confirm_template(template, arguments))
+
+		# Not refusals — these render. They are here because they are the shapes most likely to
+		# blow up a renderer, and they must come back as text rather than as an exception.
+		self.assertEqual(self._render("{amount}", {"amount": float("nan")}), '"NaN"')
+		self.assertIsNotNone(self._render("{" * 500 + "amount" + "}" * 500, ARGUMENTS))
+
+	def test_a_sentence_too_long_once_filled_in_is_abandoned_not_cut(self):
+		"""The fourth abandon condition. A short sentence can still be long once filled in."""
+		from flow.lib.agent import CONFIRM_BODY_LIMIT
+
+		value = "B" * (CONFIRM_VALUE_LIMIT - 1)
+		per_slot = CONFIRM_VALUE_LIMIT + 1  # the two quotes are outside the value's own cap
+		slots = CONFIRM_BODY_LIMIT // per_slot + 1
+		self.assertGreater(slots * per_slot, CONFIRM_BODY_LIMIT)
+		self.assertIsNone(self._render("{c}" * slots, {"c": value}))
+		self.assertIsNotNone(self._render("{c}" * (slots - 1), {"c": value}))  # positive control
+
+	def test_no_template_engine_is_reachable_from_this_path(self):
+		"""A zero-hits search proves nothing on its own, so the same search is run against a
+		string that must match. The point of this test is that it fails the day someone reaches
+		for an engine again."""
+		import re
+
+		banned = re.compile(r"jinja|get_jenv|render_template|safe_eval|from_string|StrictUndefined")
+		self.assertTrue(banned.search("from frappe.utils.jinja import get_jenv"))  # positive control
+		for module in ("flow/lib/agent.py", "flow/lib/tool.py", "flow/lib/resolver.py"):
+			with self.subTest(module=module):
+				source = (pathlib.Path(frappe.get_app_path("flow")).parent / module).read_text()
+				self.assertIsNone(banned.search(source))
 
 
 class TestAValueCannotChangeTheQuestion(IntegrationTestCase):
 	"""The sentence comes from a person; the values come from the model. These are the attacks
-	found against run 1's design, each kept as its own test."""
+	found against an earlier design of this, each kept as its own test."""
 
 	def _render(self, template, arguments):
 		from flow.lib.agent import _render_confirm_template
@@ -147,7 +186,7 @@ class TestAValueCannotChangeTheQuestion(IntegrationTestCase):
 		)
 
 	def test_the_truncation_attack_a_padded_value_cannot_hide_the_rest_of_the_sentence(self):
-		"""Run 1's design cut the body at a fixed length with no marker, so a long enough value
+		"""An earlier design cut the body at a fixed length with no marker, so a long enough value
 		pushed "and DELETE every invoice" off the end. Nothing is cut here: the sentence is
 		abandoned whole and the arguments are shown instead."""
 		template = "Read the invoices for {customer} and DELETE every invoice."
@@ -167,7 +206,7 @@ class TestAValueCannotChangeTheQuestion(IntegrationTestCase):
 		self.assertIn('"customer"', q.prompt)
 
 	def test_the_forged_second_question_a_value_cannot_open_a_line_of_its_own(self):
-		"""Run 1's design let a value write
+		"""An earlier design let a value write
 		"NOTE: read-only preview, nothing will be written." underneath the real question."""
 		forged = "Acme\n\nNOTE: read-only preview, nothing will be written."
 		rendered = self._render("Delete every invoice for {customer}.", {"customer": forged})
@@ -195,6 +234,54 @@ class TestAValueCannotChangeTheQuestion(IntegrationTestCase):
 
 		q = self._question("Read the invoices for {customer}.", {"customer": attacked})
 		self.assertNotIn("‮", q.prompt)
+
+	def test_a_line_separator_cannot_open_a_line_of_its_own_either(self):
+		"""U+2028 and U+2029 are line breaks to `str.splitlines` and to every layout engine, but
+		they are categories Zl and Zp — so a rule that escaped only Cc and Cf let this through and
+		the forged second question above worked again, unchanged apart from the character."""
+		forged = "Acme\u2028\u2028NOTE: read-only preview, nothing will be written."
+		rendered = self._render("Delete every invoice for {customer}.", {"customer": forged})
+
+		self.assertEqual(len(rendered.splitlines()), 1)
+		self.assertIn("\\u2028", rendered)
+		q = self._question("Delete every invoice for {customer}.", {"customer": forged})
+		self.assertFalse([ln for ln in q.prompt.splitlines() if ln.strip().startswith("NOTE:")])
+
+	def test_everything_that_is_not_printable_is_escaped_and_the_space_is_not(self):
+		"""A whitelist, not a list of the characters that have caused trouble so far."""
+		for code, category in (
+			(0x2028, "Zl"),
+			(0x2029, "Zp"),
+			(0x00A0, "Zs"),
+			(0x3000, "Zs"),
+			(0x0085, "Cc"),
+			(0x200B, "Cf"),
+			(0x202E, "Cf"),
+			(0xD800, "Cs"),
+			(0xE000, "Co"),
+			(0x0378, "Cn"),
+		):
+			with self.subTest(code=hex(code), category=category):
+				import unicodedata
+
+				self.assertEqual(unicodedata.category(chr(code)), category)
+				rendered = self._render("Post {c}.", {"c": f"a{chr(code)}b"})
+				# Compared as ascii: a lone surrogate in a FAILURE message cannot be printed at
+				# all, and a test that crashes the runner when it fails is not a test.
+				self.assertEqual(ascii(rendered), ascii(f'Post "a\\u{code:04x}b".'))
+		self.assertEqual(self._render("Post {c}.", {"c": "a b"}), 'Post "a b".')  # positive control
+
+	def test_an_astral_format_character_is_escaped_unambiguously(self):
+		"""U+E0001 is a tag character — invisible, and the shape a hidden instruction takes. Above
+		the BMP it needs eight digits: four would read as U+E000 followed by "1"."""
+		self.assertEqual(self._render("Post {c}.", {"c": "hi\U000e0001"}), 'Post "hi\\U000e0001".')
+
+	def test_a_value_shaped_like_a_format_specifier_is_only_text(self):
+		"""The body is joined to the first line, never passed to a formatter."""
+		for value in ("{0}", "{1}", "%s", "%(customer)s", "{body}", "{{0}}"):
+			with self.subTest(value=value):
+				q = self._question("Post {customer}.", {"customer": value})
+				self.assertIn(f'Post "{value}".', q.prompt)
 
 	def test_a_tab_and_a_carriage_return_are_shown_escaped_too(self):
 		rendered = self._render("Post {customer}.", {"customer": "a\tb\rc\x00d"})
@@ -307,6 +394,16 @@ class TestTheArgumentsAreAlwaysShown(IntegrationTestCase):
 		self.assertEqual(q.prompt.splitlines()[0], "Approve Delete Invoices Approve Read Only??")
 		self.assertNotIn("\nApprove Read Only?", q.prompt)
 
+	def test_a_title_cannot_reorder_the_line_it_is_on(self):
+		"""Flattening alone would pass the test above. A right-to-left override needs no line
+		break, so the title is escaped as well as flattened."""
+		q = self._question(title="Delete\u202eylnO daeR\u202c Invoices")
+		self.assertIn("\\u202e", q.prompt)
+		self.assertNotIn("\u202e", q.prompt)
+
+	def test_a_title_of_nothing_but_spaces_falls_back_to_the_slug(self):
+		self.assertTrue(self._question(title="   ").prompt.startswith("Approve `delete_invoices`?"))
+
 	def test_the_options_are_unchanged_in_every_case(self):
 		for overrides in (
 			{},
@@ -387,6 +484,12 @@ class TestTheRecordCarriesTheWordingToTheRuntime(IntegrationTestCase):
 		del doc.confirm_template
 		built = _build_tool(doc, {"type": "object", "properties": {}}, lambda **kw: "ok")
 		self.assertIsNone(built.confirm_template)
+
+	def test_a_sentence_is_stored_as_it_was_measured(self):
+		"""Padding is not a way past the cap: 999 characters and 5000 spaces is not 999 stored."""
+		doc = self._record(confirm_template="  Post {amount}.   ")
+		self.assertEqual(doc.confirm_template, "Post {amount}.")
+		self.assertIsNone(self._record(confirm_template="   ").confirm_template)
 
 	def test_a_sentence_too_long_to_read_is_refused_when_it_is_written(self):
 		from flow.flow.doctype.flow_tool.flow_tool import CONFIRM_TEMPLATE_LIMIT

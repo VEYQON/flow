@@ -100,6 +100,20 @@ too and is flattened and escaped the same way, so it cannot open a line of its o
 ## Acceptance criteria
 See `e5-confirm-prompt-field-v2.features.json`. Every attack found against v1 is its own named test.
 
+## Files this work may touch
+- `flow/lib/agent.py` — the question builder and its three helpers, and nothing else in the file.
+- `flow/lib/tool.py`, `flow/lib/resolver.py` — carrying `title` and `confirm_template` through.
+- `flow/flow/doctype/flow_tool/flow_tool.{py,json}` — the field and its save-time length cap.
+- `flow/tests/test_ai_confirm_template.py` — ours, from v1; rewritten here.
+- `brain/` and this spec's own features file.
+
+## DO NOT CHANGE
+- `_invoke`, `_resolve_confirmation`, `_has_denial` in `flow/lib/agent.py`.
+- `options`, `allow_other`, and which answer executes.
+- Any test under `flow/tests/` that exists on `veyqon` — `TestAgentConfirmation` above all.
+- The JSON dump's format.
+- Anything under `frontend/` (see the Open questions).
+
 ## Risks
 - **The sentence now costs a line more than the arguments alone.** Accepted: the arguments were
   always the ground truth and are now always present.
@@ -108,9 +122,27 @@ See `e5-confirm-prompt-field-v2.features.json`. Every attack found against v1 is
   exactly what is wrong, and an error at approval time would not.
 - **An administrator can still write a sentence that reads oddly.** They cannot write one that
   hides what executes.
+- **Combining marks (category Mn) are not escaped**, so a value can stack diacritics over the text
+  beside it. Bounded by the 200-character cap — about 150 marks fit, 250 abandons the sentence — and
+  it cannot move the cursor or reorder anything. Measured during verify, accepted, not fixed.
+- **The 1000-character save cap runs in `validate()`**, so `frappe.db.set_value` or a fixture import
+  goes round it. The enforceable bound is the render-time 2000-character cap, which holds regardless
+  of what is stored. Writing a tool record is System Manager-only, so this is hardening, not a
+  boundary.
 
 ## Open questions for the owner
 1. The backslash/quote escaping above — "verbatim" versus unambiguous. I chose unambiguous.
 2. Whether `confirm_prompt` should also carry the arguments beneath it. That requires changing an
    upstream test, so it is not something this run can decide.
 3. Whether the 200-character value cap is the right number. It is a judgement, not a measurement.
+4. **The sentence never reaches the person in the bundled client.** `ConfirmCard.vue` discards
+   `question.prompt` for tool confirmations and builds its own title from the slug. E5 is engine-only
+   in that UI, and was equally so in v1. Captured as
+   [[00-inbox/approval-question-never-reaches-the-approver]]. Not fixed here: it is a client change
+   outside this spec's file list and the card already shows the arguments, so what it should display
+   is a product decision.
+5. **A model can make the sentence disappear** by passing a list, `None` or a 201-character value,
+   because that is what "abandon the whole sentence" means. Nothing false is ever shown and the
+   arguments always are, but the operator gets no signal that a warning was written and dropped.
+   Captured as [[00-inbox/a-model-can-drop-the-approval-sentence]]. Not fixed here because the
+   fallback is part of the design this run was told not to substitute.

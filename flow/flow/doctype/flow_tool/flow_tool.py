@@ -58,7 +58,9 @@ class FlowTool(Document):
 		wrong here, and left to the moment of approval the only sign would be the raw arguments
 		appearing where a sentence was meant to be, with nobody knowing why.
 		"""
-		template = (self.confirm_template or "").strip()
+		# Stored as it is measured: otherwise 999 characters and 5000 spaces passes a 1000 cap.
+		self.confirm_template = (self.confirm_template or "").strip() or None
+		template = self.confirm_template or ""
 		if len(template) > CONFIRM_TEMPLATE_LIMIT:
 			frappe.throw(
 				_("Keep the approval question under {0} characters.").format(CONFIRM_TEMPLATE_LIMIT),
