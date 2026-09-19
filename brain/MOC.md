@@ -14,8 +14,9 @@ The hub. If a note isn't linked from here, it's lost.
 ## Work in flight
 - **Specs** → `10-specs/`
   - [[10-specs/f3-turn-context|F3 — per-turn context]] (implemented 2026-09-19, awaiting review)
+  - [[10-specs/e2-instructions-per-turn|E2 — instructions per turn]] (implemented 2026-09-19, awaiting review)
 - **Inbox** → `00-inbox/`
-  - [[00-inbox/instructions-frozen-at-first-turn]]
+  - [[00-inbox/instructions-frozen-at-first-turn]] (resolved by E2)
   - [[00-inbox/worded-refusal-reproposes]]
   - [[00-inbox/stream-disconnect-loses-output]]
   - [[00-inbox/trigger-runs-name-scheduler-as-the-person]]

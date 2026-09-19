@@ -363,6 +363,17 @@ class FlowSession(Document):
 				message["content"] = content
 			messages.append(message)
 
+		# A session bound to an agent record sends that agent's instructions as they are NOW,
+		# rebuilt here rather than replayed from the row stored on the first turn — so editing an
+		# agent reaches the conversations already open. Ephemeral like everything else below: the
+		# stored row is never rewritten, and the transcript keeps showing what was stored.
+		instructions = self._current_instructions()
+		if instructions:
+			if messages[0]["role"] == "system":
+				messages[0]["content"] = instructions
+			else:
+				messages.insert(0, {"role": "system", "content": instructions})
+
 		# Ephemeral, in this order: what is true now, then what the agent remembers. Added to the
 		# stored system message when there is one, otherwise carried by a system message that
 		# exists only for this prompt (see `ephemeral_prompt_prefix`).
@@ -382,6 +393,22 @@ class FlowSession(Document):
 			else:
 				messages.insert(0, {"role": "system", "content": joined})
 		return messages
+
+	def _current_instructions(self) -> str | None:
+		"""The linked agent's instructions as they are now, or None to use what was stored.
+
+		None for a code-driven session: it has no agent record to read, and its stored system
+		message is the only copy of its instructions there is. None too when the record's
+		instructions are empty — they are mandatory on the record, but a direct database write
+		can still empty them, and falling back to the stored text beats sending nothing.
+		"""
+		if not self.agent:
+			return None
+		runtime = getattr(self, "_runtime", None)
+		if runtime is not None:
+			# Rebuilt from the record on every load, so it is already today's text.
+			return runtime.instructions or None
+		return frappe.db.get_value("Flow Agent", self.agent, "instructions") or None
 
 	def _latest_user_run(self) -> str | None:
 		for row in reversed(self.messages):
