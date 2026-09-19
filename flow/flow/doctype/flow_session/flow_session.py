@@ -406,6 +406,28 @@ class FlowSession(Document):
 		)
 
 
+def ephemeral_prompt_prefix(session: str, transcript: list[dict[str, Any]]) -> int:
+	"""How many messages at the head of `transcript` were added for one prompt only and never
+	stored on the session.
+
+	The memory block rides on a system message, and a session whose transcript has no system
+	message of its own gets one inserted for it (see `_build_prompt_messages`). Anything that
+	reads a run's transcript positionally has to skip it, or the last stored message is persisted
+	a second time as though the run had produced it.
+
+	Both sides are checked — the transcript must start with a system message *and* the stored rows
+	must not — so a caller passing a transcript with no ephemeral prefix is unaffected.
+	"""
+	if not transcript or transcript[0].get("role") != "system":
+		return 0
+	first_stored = frappe.db.get_value(
+		"Flow Session Message", {"parent": session}, "role", order_by="idx asc"
+	)
+	if not first_stored or first_stored == "system":
+		return 0
+	return 1
+
+
 def _delete_attachment_files(sessions: list[str]) -> None:
 	"""Delete the uploaded File docs attached to these sessions. Per-doc (not bulk SQL)
 	so File.on_trash runs to remove the on-disk content, and best-effort so one failure
