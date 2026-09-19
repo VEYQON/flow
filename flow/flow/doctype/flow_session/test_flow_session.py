@@ -25,7 +25,7 @@ from flow.flow.doctype.flow_session.flow_session import (
 	derive_title,
 )
 from flow.lib.agent import Agent
-from flow.lib.model import ChatResponse, Model
+from flow.lib.model import ChatResponse, Model, ToolCall
 
 
 def pinned_clock(utc_instant: datetime):
@@ -582,6 +582,31 @@ class TestTurnContextBlock(IntegrationTestCase):
 		self.assertIn("UTC", block)
 		self.assertIn("10:42", block)
 
+	def test_a_real_but_unresolvable_zone_name_falls_back_too(self):
+		"""The realistic version of the test above. "Mars/Phobos" is obviously bogus; these are
+		names the platform's own picker offers and this tzdata build cannot resolve — renamed or
+		alias zones. Measured 19 Sep 2026: Europe/Kiev, Asia/Rangoon, America/Godthab, CET, EST,
+		MST, PST8PDT and EST5EDT all raise ZoneInfoNotFoundError here. The danger is silent: the
+		conversion helper answers an unknown zone with the UTC time instead of raising, so without
+		the fallback the block would read a UTC clock and label it Asia/Rangoon (UTC+6:30)."""
+		for zone in ("Europe/Kiev", "Asia/Rangoon", "CET"):
+			with self.subTest(zone=zone):
+				block = self._block(zone)
+				self.assertNotIn(zone, block)
+				self.assertIn("(UTC)", block)
+				self.assertIn("10:42", block)
+
+	def test_an_unresolvable_SYSTEM_zone_also_falls_back(self):
+		"""The user's zone was validated from the start; the system's was not. A bad settings
+		value would mislabel every user's clock, not one user's."""
+		frappe.db.set_value("User", self.user, "time_zone", "")
+		with patch("frappe.utils.data.get_system_timezone", return_value="Asia/Rangoon"):
+			with pinned_clock(self.FROZEN), self.set_user(self.user):
+				block = build_turn_context_block()
+		self.assertNotIn("Asia/Rangoon", block)
+		self.assertIn("(UTC)", block)
+		self.assertIn("10:42", block)
+
 	def test_date_is_the_users_own_date_across_midnight(self):
 		"""The spec's first risk: a date that is confidently wrong because it was read in the
 		wrong zone. 23:30 UTC is already the next morning in Tokyo."""
@@ -718,3 +743,90 @@ class TestTurnContextIsNeverStored(IntegrationTestCase):
 		self.assertEqual([r.role for r in rows], ["system", "user", "assistant"])
 		self.assertEqual(rows[0].content, "be terse")
 		self.assertIn("Current context:", sent[0][0]["content"])
+
+
+class TestResumeAlsoRebuildsTheContext(IntegrationTestCase):
+	"""The session-level resume path had no test of its own anywhere in the suite — every
+	existing resume test drives the agent library directly, one layer below this. So the spec's
+	"still current on resume after a pause" was true but ungated: routing resume around the
+	prompt builder would have dropped the context on every resumed run and stayed green."""
+
+	def tearDown(self):
+		frappe.db.rollback()
+
+	def _reply(self, text="done"):
+		return ChatResponse(
+			content=text,
+			finish_reason="stop",
+			usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		)
+
+	def _pausing_agent(self):
+		from flow.lib.tool import tool
+
+		executed: list[dict] = []
+
+		@tool(requires_confirmation=True)
+		def post_it(amount: float) -> str:
+			"""Post something. Needs approval."""
+			executed.append({"amount": amount})
+			return "posted"
+
+		agent = Agent(
+			model=Model(model_id="openai/gpt-4o-mini"),
+			name="Poster",
+			instructions="be terse",
+			tools=[post_it],
+		)
+		return agent, executed
+
+	def test_resume_sends_todays_date_not_the_day_the_turn_paused(self):
+		agent, executed = self._pausing_agent()
+		session = agent.new_session()
+		sent: list = []
+
+		def pause(messages, tools=None, **_):
+			return ChatResponse(
+				content=None,
+				tool_calls=[ToolCall(id="c1", name="post_it", arguments={"amount": 1.0})],
+				finish_reason="tool_calls",
+				usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+			)
+
+		frappe.db.set_value("User", frappe.session.user, "time_zone", "")
+		with patch("frappe.utils.data.get_system_timezone", return_value="UTC"):
+			# The turn pauses late on the 19th...
+			with pinned_clock(datetime(2026, 9, 19, 23, 30, tzinfo=UTC)):
+				with patch.object(Model, "chat", side_effect=pause):
+					run = session.chat("post it")
+			self.assertEqual(run.status, "Paused")
+			self.assertEqual(executed, [])
+
+			# ...and is approved after midnight, the next day.
+			def capture(messages, tools=None, **_):
+				sent.append([dict(m) for m in messages])
+				return self._reply()
+
+			from flow.lib.session import load_session
+
+			with pinned_clock(datetime(2026, 9, 20, 0, 15, tzinfo=UTC)):
+				with patch.object(Model, "chat", side_effect=capture):
+					resumed = load_session(session.name, agent=agent).resume({"c1": "Approve"})
+
+		# The resumed prompt carries the NEW day, rebuilt — not the day the turn paused on.
+		self.assertEqual(sent[0][0]["role"], "system")
+		self.assertIn("Sunday, 2026-09-20", sent[0][0]["content"])
+		self.assertNotIn("2026-09-19", sent[0][0]["content"])
+		self.assertTrue(sent[0][0]["content"].startswith("be terse"))
+
+		# The approval still gated the write, and the run finished.
+		self.assertEqual(executed, [{"amount": 1.0}])
+		self.assertEqual(resumed.status, "Completed")
+
+		# Nothing dated was stored, and no message was duplicated across the pause and resume.
+		rows = frappe.get_doc("Flow Session", session.name).messages
+		self.assertEqual([r.role for r in rows], ["system", "user", "assistant", "tool", "assistant"])
+		self.assertEqual(rows[0].content, "be terse")
+		for row in rows:
+			self.assertNotIn("Current context:", row.content or "")
+			self.assertNotIn("2026-09-20", row.content or "")
