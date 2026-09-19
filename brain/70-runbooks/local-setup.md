@@ -24,6 +24,28 @@ export PATH="$HOME/.local/bin:$PATH"
 ( cd ~/code/flow-bench && bench new-site flow.localhost --db-root-username root --db-root-password root --admin-password admin --mariadb-user-host-login-scope='%' && bench --site flow.localhost install-app flow && bench --site flow.localhost set-config allow_tests true )
 ```
 
+### Test-only dependency: freezegun (added 19 Sep 2026)
+
+Frappe v16.31.0 declares `freezegun~=1.5.1` in its `test` extra
+(`apps/frappe/pyproject.toml:132-138`) and pins `~=1.5.5` for bench
+(`apps/frappe/pyproject.toml:159`), and `self.freeze_time(...)`
+(`apps/frappe/frappe/tests/classes/context_managers.py:26-44`) is built on it — but bench installs
+every app with a bare editable install and no extras (`uv pip install -e {app_path}`,
+`~/.local/share/uv/tools/frappe-bench/lib/python3.14/site-packages/bench/app.py:939`), so the `test`
+extra is never pulled in: freezegun is absent on a fresh bench and any test that freezes time errors
+on import. Install it into the bench env, not into this repo:
+
+```bash
+( cd ~/code/flow-bench && uv pip install 'freezegun~=1.5.1' --python env/bin/python )
+```
+
+Measured 19 Sep 2026: bench env has freezegun 1.5.5. It is a *test* dependency only — nothing in
+`flow/` imports it at runtime, and it is deliberately NOT added to this app's `pyproject.toml`,
+because the version that matters is the one the platform already declares.
+
+**Wanted, not done:** `scripts/doctor.sh` has no check for freezegun, so a rebuilt bench would fail
+tests with an ImportError rather than a clear DOCTOR=RED. The harness is owner-only; noted for him.
+
 `root`/`admin` are throwaway local values for a database only this laptop can reach. Never reuse them.
 
 Gotchas measured on 19 Sep 2026:

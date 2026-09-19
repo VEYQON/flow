@@ -1,6 +1,7 @@
 ---
 type: spec
-status: approved        # draft → approved (HUMAN ONLY) → in-progress → implemented
+status: implemented     # draft → approved (HUMAN ONLY) → in-progress → implemented
+implemented: 2026-09-19
 created: 2026-09-19
 upstreamable: yes
 ---
@@ -37,7 +38,7 @@ In `_build_prompt_messages`, alongside the memory block and using the same patte
 context block to the system message (or insert one if absent). Never stored.
 
 ## Model-facing impact
-The model sees, e.g.: "Current context: today is Friday, 2026-09-19. Local time is 10:42
+The model sees, e.g.: "Current context: today is Saturday, 2026-09-19. Local time is 10:42
 (Europe/Berlin). You are speaking with Thivs Gobinath." It must not name any software, framework,
 database, vendor or model.
 
@@ -167,3 +168,41 @@ the spec's non-goals; worth an inbox item if it matters.
 
 **Cost check:** the block is one short paragraph on the system message, ~30 tokens per turn, matching the
 spec's estimate.
+
+---
+## Ship
+
+### What changed
+Two things, in one place each.
+
+**1. Every prompt now carries the turn's context.** `build_turn_context_block()` in
+`flow_session.py` emits one line — weekday + ISO date, 24-hour local time, the IANA zone that time is
+expressed in, and the name of the person being spoken with. `_build_prompt_messages` appends it to
+the system message (or carries it on a system message that exists only for this prompt), in the same
+ephemeral way the memory block already worked: stored rows are never touched, so a session left open
+for days reports today rather than the day it started. Resume goes through the same builder.
+
+**2. The transcript delta stopped being a bare positional slice.** What a run "produced" was
+`full_transcript[stored_row_count:]`, which is only correct while the prompt has exactly one message
+per stored row. Adding an unstored system message broke that and re-persisted the last stored row as
+run output. `ephemeral_prompt_prefix()` derives how many head messages the session never stored, and
+`_new_messages_for_session` offsets by it.
+
+### Why
+Spec [[10-specs/f3-turn-context]] · branch model [[20-adr/ADR-001-fork-flow]].
+A wrong date began the 15 Sep 2026 production incident. Agent Q's prompt currently has to tell the
+model it does not know the date, which costs an exchange on every date-dependent request.
+
+### How it was verified
+- `MIN_TESTS=604 scripts/run-tests.sh` → `GATE=GREEN` (98 unit + 506 integration = 604).
+- Probed both directions. Disabling the ephemeral prefix re-persists the user row
+  (`['user','user','assistant']`). Making the block non-ephemeral trips three assertions, the
+  sharpest being `assertEqual(rows[0].content, "be terse")` — the context text found in a stored row.
+  Restored from byte backups, verified with `sha256sum -c`.
+- `/loop-verify` with three fresh reviewers. See the verify table in the run log.
+- `pre-commit run --files` on every changed file.
+
+### Rollback
+Work is confined to `loop/f3-turn-context`, cut from `veyqon`. Nothing is committed to `veyqon` or
+`develop`, nothing pushed. To undo: delete the branch. `flow/lib/agent.py` is untouched, so the
+write-confirmation path cannot have moved.
