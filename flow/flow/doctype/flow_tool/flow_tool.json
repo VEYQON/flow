@@ -16,6 +16,7 @@
   "section_break_description",
   "description",
   "summary",
+  "confirm_template",
   "section_break_definition",
   "import_path",
   "code"
@@ -90,6 +91,13 @@
    "fieldname": "summary",
    "fieldtype": "Small Text",
    "label": "Summary (human-facing)"
+  },
+  {
+   "depends_on": "requires_confirmation",
+   "description": "Optional. What the person approving this tool is asked, in place of the raw arguments. Write plain language with {{ argument_name }} placeholders, e.g. Post an invoice for {{ amount }} to {{ customer }}. This changes only what the question SAYS, never what the tool does. If it cannot be filled in, the arguments are shown instead.",
+   "fieldname": "confirm_template",
+   "fieldtype": "Small Text",
+   "label": "Approval Question"
   },
   {
    "fieldname": "section_break_definition",

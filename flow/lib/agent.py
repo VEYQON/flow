@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 DEFAULT_MAX_ITERATIONS = 20
 ERROR_MESSAGE_LIMIT = 500
+# An approval question is read by a person before they decide. Past this it stops being read.
+CONFIRM_BODY_LIMIT = 2000
 VALID_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 
@@ -432,15 +434,67 @@ def _assistant_message(response: ChatResponse) -> dict[str, Any]:
 	return message
 
 
+def _render_confirm_template(template: str, arguments: dict[str, Any]) -> str | None:
+	"""State an approval request in plain language, filled in from the call's arguments.
+
+	Returns None whenever the result cannot be trusted — the template refers to something the call
+	did not supply, it failed to render, or it came out empty — so the caller falls back to showing
+	the arguments as they are. It never raises: a badly written template must not be able to stop a
+	person being asked.
+
+	The arguments are values here, never template source, and the renderer is the sandboxed one, so
+	nothing in a template or in a model's arguments executes.
+	"""
+	from jinja2 import meta
+
+	try:
+		from frappe.utils.jinja import get_jenv
+		from frappe.utils.safe_exec import safe_render_template
+
+		# A name the call did not supply would otherwise render as a silent blank where a value
+		# belongs, which is worse than showing the raw arguments.
+		environment = get_jenv(restrict_globals=True)
+		referenced = meta.find_undeclared_variables(environment.parse(template))
+		if referenced - set(arguments) - set(environment.globals):
+			return None
+
+		# The renderer decides "is this a path?" by guessing, and its guess is `is_path or
+		# looks_like_a_path`, so asking for False does not switch the guess off. It fires on any
+		# single-line string whose last dotted segment resembles a file extension, which a
+		# perfectly ordinary question does — "Delete the report for {{ customer }}.txt" — and the
+		# result is a template read off the disk instead of the one written here. It only guesses
+		# when the string has no line break, so give it one and take it back off the result.
+		rendered = safe_render_template(template + "\n", dict(arguments), is_path=False)
+	except Exception:
+		return None
+
+	rendered = (rendered or "").strip()
+	if not rendered:
+		return None
+	return rendered[:CONFIRM_BODY_LIMIT]
+
+
 def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
 	"""Build the approval prompt shown to the user for a `requires_confirmation` tool call.
-	Uses the tool's `confirm_prompt` for a plain-English summary, falling back to a JSON dump."""
+
+	The body is the tool's own `confirm_prompt` when it has one, otherwise its record's plain-language
+	template, otherwise the arguments as they are. Wording only: what executes, and on what answer,
+	is decided elsewhere and is not affected by anything here.
+	"""
+	body = None
 	if tool.confirm_prompt:
 		body = tool.confirm_prompt(call.arguments)
-	else:
+	elif tool.confirm_template:
+		body = _render_confirm_template(tool.confirm_template, call.arguments)
+	if not body:
 		body = json.dumps(call.arguments, indent=2, default=str)
+
+	if tool.title:
+		prompt = _("Approve {0}?\n\n{1}").format(tool.title, body)
+	else:
+		prompt = _("Approve `{0}`?\n\n{1}").format(call.name, body)
 	return Question(
-		prompt=_("Approve `{0}`?\n\n{1}").format(call.name, body),
+		prompt=prompt,
 		options=["Approve", "Deny"],
 		allow_other=True,
 	)

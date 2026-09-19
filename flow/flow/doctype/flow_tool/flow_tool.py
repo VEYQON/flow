@@ -27,6 +27,7 @@ class FlowTool(Document):
 		from frappe.types import DF
 
 		code: DF.Code | None
+		confirm_template: DF.SmallText | None
 		description: DF.LongText
 		enabled: DF.Check
 		import_path: DF.Data | None

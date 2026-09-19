@@ -14,6 +14,7 @@ The hub. If a note isn't linked from here, it's lost.
 ## Work in flight
 - **Specs** → `10-specs/`
   - [[10-specs/f3-turn-context|F3 — per-turn context]] (draft)
+  - [[10-specs/e5-confirm-prompt-field|E5 — plain-language approval questions]] (implemented 2026-09-19, awaiting review)
 - **Inbox** → `00-inbox/`
   - [[00-inbox/instructions-frozen-at-first-turn]]
   - [[00-inbox/worded-refusal-reproposes]]
