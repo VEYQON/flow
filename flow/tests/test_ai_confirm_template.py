@@ -4,240 +4,317 @@
 
 Nothing here touches what executes, or on which answer. That is `TestAgentConfirmation` in
 test_ai_agent.py, which stays green and unmodified.
+
+The question is assembled by substitution, not by an engine. The tests below are mostly attacks:
+each one is a way someone tried, or could try, to make a person approve something other than what
+they were shown.
 """
+
+import json
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from flow.lib.agent import CONFIRM_BODY_LIMIT
+from flow.lib.agent import CONFIRM_VALUE_LIMIT
+
+ARGUMENTS = {"amount": 4200, "customer": "Acme"}
+DUMP = json.dumps(ARGUMENTS, indent=2, default=str)
 
 
-class TestConfirmationQuestionWording(IntegrationTestCase):
-	"""What the approval question SAYS. Nothing here touches what executes, on which answer —
-	that is `TestAgentConfirmation`, which must stay green and unmodified."""
+class TestTheSentenceIsSubstitutedNotEvaluated(IntegrationTestCase):
+	"""`{name}` is replaced by the argument called `name`. That is the whole grammar."""
 
-	def _call(self, arguments=None, name="post_invoice"):
+	def _render(self, template, arguments=None):
+		from flow.lib.agent import _render_confirm_template
+
+		return _render_confirm_template(template, ARGUMENTS if arguments is None else arguments)
+
+	def test_a_placeholder_is_replaced_by_its_argument_in_quotes(self):
+		"""The positive control every refusal below is measured against."""
+		self.assertEqual(self._render("Post {amount} for {customer}."), 'Post "4200" for "Acme".')
+
+	def test_the_sentence_is_one_line_however_the_author_wrote_it(self):
+		self.assertEqual(self._render("Post\n\t{amount}\n  for  {customer}."), 'Post "4200" for "Acme".')
+
+	def test_an_empty_or_whitespace_only_sentence_is_no_sentence(self):
+		for template in ("", "   ", "\n\n", "\t"):
+			with self.subTest(template=repr(template)):
+				self.assertIsNone(self._render(template))
+		self.assertIsNotNone(self._render("Post {amount}."))  # positive control
+
+	def test_an_expression_is_not_evaluated_it_is_literal_text(self):
+		"""The grammar has no expressions, so there is nothing for these to be interpreted as."""
+		for template, must_survive in (
+			("Post {{ amount }}.", "{{ amount }}"),
+			("Post {amount * 2}.", "{amount * 2}"),
+			("Post {amount|upper}.", "{amount|upper}"),
+			("Post {amount.__class__}.", "{amount.__class__}"),
+			("Post {amount[0]}.", "{amount[0]}"),
+			("Post {% if amount %}yes{% endif %}.", "{% if amount %}yes{% endif %}"),
+			("Post {0} and {1}.", "{0}"),
+			("Post {amount!r}.", "{amount!r}"),
+			("Post {amount:>20}.", "{amount:>20}"),
+			("Post {AMOUNT}.", "{AMOUNT}"),
+		):
+			with self.subTest(template=template):
+				rendered = self._render(template)
+				self.assertIsNotNone(rendered)
+				self.assertIn(must_survive, rendered)
+				self.assertNotIn("4200", rendered)
+
+	def test_a_doubled_brace_substitutes_its_inner_name_and_shows_the_outer_braces(self):
+		"""Said plainly rather than left to be discovered: `{{amount}}` is `{` then `{amount}`
+		then `}`, so the name is substituted and the surviving braces show it was not an
+		expression. Only `{{ amount }}`, with the spaces jinja is written with, stays whole."""
+		self.assertEqual(self._render("Post {{amount}}."), 'Post {"4200"}.')
+		self.assertEqual(self._render("Post {{ amount }}."), "Post {{ amount }}.")
+
+	def test_a_database_call_written_into_the_field_stays_literal_text(self):
+		"""Run 1's design ran this. `{{ frappe.db.sql(...) }}` executed inside the question —
+		before anyone approved anything, and even if they went on to refuse."""
+		template = "Delete {{ frappe.db.sql('DROP TABLE tabUser') }} for {customer}."
+
+		def never(*args, **kwargs):
+			raise AssertionError("the question reached the database")
+
+		with (
+			patch.object(frappe.db, "sql", side_effect=never),
+			patch.object(frappe.db, "get_value", side_effect=never),
+			patch.object(frappe.db, "get_all", side_effect=never),
+			patch.object(frappe, "get_all", side_effect=never),
+			patch.object(frappe, "get_doc", side_effect=never),
+		):
+			rendered = self._render(template)
+
+		self.assertEqual(rendered, "Delete {{ frappe.db.sql('DROP TABLE tabUser') }} for \"Acme\".")
+
+	def test_rendering_reads_nothing_at_all_beyond_its_two_arguments(self):
+		"""Not the database, not the session, not the record. Patched to raise, so a read is a
+		failure rather than a silently different answer."""
+
+		def never(*args, **kwargs):
+			raise AssertionError("the question read something it should not have")
+
+		with (
+			patch.object(frappe.db, "sql", side_effect=never),
+			patch.object(frappe.db, "get_value", side_effect=never),
+			patch.object(frappe.db, "get_all", side_effect=never),
+			patch.object(frappe, "get_all", side_effect=never),
+			patch.object(frappe, "get_doc", side_effect=never),
+			patch.object(frappe, "get_cached_doc", side_effect=never),
+		):
+			self.assertEqual(self._render("Post {amount} for {customer}."), 'Post "4200" for "Acme".')
+
+	def test_rendering_never_raises(self):
+		"""A badly written question must not be able to stop a person being asked."""
+		for template, arguments in (
+			("{amount}", {"amount": object()}),
+			("{amount}", {}),
+			("{amount}", {"amount": float("nan")}),
+			("{" * 500 + "amount" + "}" * 500, ARGUMENTS),
+			("{amount}", {"amount": b"bytes"}),
+		):
+			with self.subTest(template=template[:20], arguments=list(arguments)):
+				self._render(template, arguments)  # must not raise
+
+
+class TestAValueCannotChangeTheQuestion(IntegrationTestCase):
+	"""The sentence comes from a person; the values come from the model. These are the attacks
+	found against run 1's design, each kept as its own test."""
+
+	def _render(self, template, arguments):
+		from flow.lib.agent import _render_confirm_template
+
+		return _render_confirm_template(template, arguments)
+
+	def _question(self, template, arguments, **overrides):
+		from flow.lib.agent import _confirmation_question
 		from flow.lib.model import ToolCall
-
-		return ToolCall(id="c1", name=name, arguments=arguments or {"amount": 4200, "customer": "Acme"})
-
-	def _tool(self, **overrides):
 		from flow.lib.tool import Tool
 
 		defaults = dict(
-			name="post_invoice",
-			description="Post an invoice.",
+			name="delete_invoices",
+			description="Delete invoices.",
+			parameters={"type": "object", "properties": {}},
+			func=lambda **kw: "ok",
+			requires_confirmation=True,
+			confirm_template=template,
+		)
+		defaults.update(overrides)
+		return _confirmation_question(
+			ToolCall(id="c1", name=defaults["name"], arguments=arguments), Tool(**defaults)
+		)
+
+	def test_the_truncation_attack_a_padded_value_cannot_hide_the_rest_of_the_sentence(self):
+		"""Run 1's design cut the body at a fixed length with no marker, so a long enough value
+		pushed "and DELETE every invoice" off the end. Nothing is cut here: the sentence is
+		abandoned whole and the arguments are shown instead."""
+		template = "Read the invoices for {customer} and DELETE every invoice."
+		padded = "A" * (CONFIRM_VALUE_LIMIT + 1)
+
+		self.assertIsNone(self._render(template, {"customer": padded}))
+		# positive control, in the identical form: one character shorter and it renders in full
+		fits = "A" * CONFIRM_VALUE_LIMIT
+		self.assertEqual(
+			self._render(template, {"customer": fits}),
+			f'Read the invoices for "{fits}" and DELETE every invoice.',
+		)
+
+		q = self._question(template, {"customer": padded})
+		self.assertNotIn("Read the invoices", q.prompt)  # no half-sentence
+		self.assertIn(padded, q.prompt)  # the value itself is not shortened either
+		self.assertIn('"customer"', q.prompt)
+
+	def test_the_forged_second_question_a_value_cannot_open_a_line_of_its_own(self):
+		"""Run 1's design let a value write
+		"NOTE: read-only preview, nothing will be written." underneath the real question."""
+		forged = "Acme\n\nNOTE: read-only preview, nothing will be written."
+		rendered = self._render("Delete every invoice for {customer}.", {"customer": forged})
+
+		self.assertNotIn("\n", rendered)
+		self.assertIn("\\n", rendered)
+		self.assertEqual(
+			rendered,
+			'Delete every invoice for "Acme\\n\\nNOTE: read-only preview, nothing will be written.".',
+		)
+
+		q = self._question("Delete every invoice for {customer}.", {"customer": forged})
+		self.assertFalse([ln for ln in q.prompt.splitlines() if ln.strip().startswith("NOTE:")])
+
+	def test_the_bidi_override_is_shown_escaped_not_obeyed(self):
+		"""A right-to-left override reorders the sentence on screen while leaving every character
+		in place — the one attack that survives flattening, because it needs no line break."""
+		attacked = "Acme‮seciovni yreve ETELED‬"
+		rendered = self._render("Read the invoices for {customer}.", {"customer": attacked})
+
+		self.assertNotIn("‮", rendered)
+		self.assertNotIn("‬", rendered)
+		self.assertIn("\\u202e", rendered)
+		self.assertIn("\\u202c", rendered)
+
+		q = self._question("Read the invoices for {customer}.", {"customer": attacked})
+		self.assertNotIn("‮", q.prompt)
+
+	def test_a_tab_and_a_carriage_return_are_shown_escaped_too(self):
+		rendered = self._render("Post {customer}.", {"customer": "a\tb\rc\x00d"})
+		self.assertEqual(rendered, 'Post "a\\tb\\rc\\u0000d".')
+
+	def test_a_value_cannot_close_the_quotes_that_hold_it(self):
+		rendered = self._render("Post {customer}.", {"customer": 'Acme" and DELETE all "x'})
+		self.assertEqual(rendered, 'Post "Acme\\" and DELETE all \\"x".')
+
+	def test_a_backslash_in_a_value_is_unambiguous(self):
+		"""Without escaping the backslash, a value containing the two characters `\\n` and a value
+		containing a real newline would read identically."""
+		literal = self._render("Post {customer}.", {"customer": "a\\nb"})
+		real = self._render("Post {customer}.", {"customer": "a\nb"})
+		self.assertEqual(literal, 'Post "a\\\\nb".')
+		self.assertEqual(real, 'Post "a\\nb".')
+		self.assertNotEqual(literal, real)
+
+	def test_a_value_of_201_characters_drops_the_sentence_and_200_does_not(self):
+		self.assertIsNone(self._render("Post {customer}.", {"customer": "A" * 201}))
+		self.assertIsNotNone(self._render("Post {customer}.", {"customer": "A" * 200}))
+
+	def test_a_value_that_escapes_past_the_cap_drops_the_sentence(self):
+		"""The cap is on what is SHOWN, and escaping only lengthens."""
+		self.assertIsNone(self._render("Post {customer}.", {"customer": "\n" * 101}))
+		self.assertIsNotNone(self._render("Post {customer}.", {"customer": "\n" * 100}))
+
+	def test_a_missing_argument_drops_the_sentence_rather_than_leaving_a_hole(self):
+		self.assertIsNone(self._render("Post {amount} to {nobody_supplied_this}.", ARGUMENTS))
+		q = self._question("Post {amount} to {nobody_supplied_this}.", ARGUMENTS)
+		self.assertNotIn("Post ", q.prompt)
+		self.assertIn('"amount": 4200', q.prompt)
+
+	def test_an_argument_that_is_not_a_single_value_drops_the_sentence(self):
+		for value in ([1, 2], {"a": 1}, None, object()):
+			with self.subTest(value=type(value).__name__):
+				self.assertIsNone(self._render("Post {amount}.", {"amount": value}))
+		for value in ("Acme", 4200, 42.5, True):  # positive controls, identical form
+			with self.subTest(value=type(value).__name__):
+				self.assertIsNotNone(self._render("Post {amount}.", {"amount": value}))
+
+	def test_a_number_and_a_boolean_read_the_way_they_will_execute(self):
+		self.assertEqual(self._render("Post {amount}.", {"amount": True}), 'Post "true".')
+		self.assertEqual(self._render("Post {amount}.", {"amount": 42.5}), 'Post "42.5".')
+
+
+class TestTheArgumentsAreAlwaysShown(IntegrationTestCase):
+	"""An administrator's wording is never the only thing a person sees. This rules out the
+	misleading question as a class of attack, rather than trying to detect one."""
+
+	def _question(self, arguments=None, **overrides):
+		from flow.lib.agent import _confirmation_question
+		from flow.lib.model import ToolCall
+		from flow.lib.tool import Tool
+
+		defaults = dict(
+			name="delete_invoices",
+			description="Delete invoices.",
 			parameters={"type": "object", "properties": {}},
 			func=lambda **kw: "ok",
 			requires_confirmation=True,
 		)
 		defaults.update(overrides)
-		return Tool(**defaults)
-
-	def _question(self, **overrides):
-		from flow.lib.agent import _confirmation_question
-
-		return _confirmation_question(self._call(), self._tool(**overrides))
-
-	def _render(self, template, arguments=None, parameters=None):
-		"""The renderer alone. A "the fallback appeared" assertion proves nothing on its own —
-		that is also what happens when the feature is absent — so every refusal below is paired
-		with a positive control in the identical form."""
-		from flow.lib.agent import _render_confirm_template
-
-		return _render_confirm_template(
-			template, arguments or {"amount": 4200, "customer": "Acme"}, parameters
+		return _confirmation_question(
+			ToolCall(id="c1", name=defaults["name"], arguments=ARGUMENTS if arguments is None else arguments),
+			Tool(**defaults),
 		)
 
-	def test_the_renderer_renders_a_good_template(self):
-		"""The positive control the refusal tests are measured against."""
-		self.assertEqual(self._render("Post {{ amount }} for {{ customer }}."), "Post 4200 for Acme.")
+	def test_a_template_that_misdescribes_the_tool_still_shows_what_will_execute(self):
+		arguments = {"customer": "Acme", "delete_all": True, "confirm": "yes"}
+		q = self._question(arguments, confirm_template="Read the invoices for {customer}.")
 
-	# --- the three-way precedence ------------------------------------------------------------
-	def test_a_record_template_is_rendered_from_the_calls_arguments(self):
-		q = self._question(confirm_template="Post an invoice for {{ amount }} to {{ customer }}.")
-		self.assertIn("Post an invoice for 4200 to Acme.", q.prompt)
-		self.assertNotIn("{", q.prompt.split("?", 1)[1])  # no raw JSON, no unrendered braces
+		self.assertIn('Read the invoices for "Acme".', q.prompt)
+		self.assertIn(json.dumps(arguments, indent=2, default=str), q.prompt)
+		self.assertIn('"delete_all": true', q.prompt)
 
-	def test_the_code_callable_wins_over_the_record_template(self):
+	def test_the_sentence_sits_above_the_arguments_not_instead_of_them(self):
+		q = self._question(confirm_template="Post {amount} for {customer}.")
+		self.assertIn(f'Post "4200" for "Acme".\n\n{DUMP}', q.prompt)
+
+	def test_with_no_sentence_the_arguments_are_shown_exactly_as_before(self):
+		self.assertIn(DUMP, self._question().prompt)
+
+	def test_with_a_dropped_sentence_the_arguments_are_shown_alone(self):
+		q = self._question(confirm_template="Post {missing}.")
+		self.assertIn(DUMP, q.prompt)
+		self.assertNotIn("Post ", q.prompt)
+
+	def test_the_code_callable_still_wins_and_is_left_exactly_as_it_was(self):
+		"""`confirm_prompt` is code, written and reviewed with the tool, not data on a record.
+		Upstream's own test asserts its body does not carry the argument shape, so the arguments
+		are NOT appended under it."""
 		q = self._question(
 			confirm_prompt=lambda args: "FROM THE CALLABLE",
-			confirm_template="FROM THE TEMPLATE",
+			confirm_template="Post {amount}.",
 		)
 		self.assertIn("FROM THE CALLABLE", q.prompt)
-		self.assertNotIn("FROM THE TEMPLATE", q.prompt)
+		self.assertNotIn("Post ", q.prompt)
+		self.assertNotIn(DUMP, q.prompt)
 
-	def test_with_neither_the_arguments_are_shown_exactly_as_before(self):
-		import json
-
-		q = self._question()
-		self.assertIn(json.dumps({"amount": 4200, "customer": "Acme"}, indent=2, default=str), q.prompt)
-
-	# --- rendering can never take the question away ------------------------------------------
-	def test_a_template_that_raises_falls_back_to_the_arguments(self):
-		q = self._question(confirm_template="{{ amount / 0 }}")
-		self.assertIn('"amount": 4200', q.prompt)
-		self.assertEqual(q.options, ["Approve", "Deny"])
-
-	def test_a_template_naming_an_argument_the_call_did_not_supply_falls_back(self):
-		"""A blank where a value belongs is worse than the raw arguments — the person would be
-		approving a sentence with a hole in it."""
-		q = self._question(confirm_template="Post {{ amount }} to {{ nobody_supplied_this }}.")
-		self.assertIn('"amount": 4200', q.prompt)
-		self.assertNotIn("Post 4200 to .", q.prompt)
-
-	def test_a_syntactically_broken_template_falls_back(self):
-		q = self._question(confirm_template="Post {{ amount for }}")
-		self.assertIn('"amount": 4200', q.prompt)
-
-	def test_an_empty_render_falls_back(self):
-		# Asserted on the renderer itself: blank is caught in two places, so going through the
-		# question could not tell the two apart and stayed green under every mutation.
-		self.assertIsNone(self._render("{# just a comment #}"))
-		self.assertIsNotNone(self._render("Post {{ amount }}."))
-		q = self._question(confirm_template="{# just a comment #}")
-		self.assertIn('"amount": 4200', q.prompt)
-
-	# --- it must not execute, escape, or read the disk ----------------------------------------
-	def test_a_template_cannot_reach_through_an_attribute_to_escape(self):
-		"""Attribute traversal is refused outright, so nothing about the running process can be
-		reflected back into the question. The person sees the arguments instead."""
-		self.assertIsNone(self._render("{{ amount.__class__.__mro__ }}"))
-		self.assertIsNotNone(self._render("Post {{ amount }}."))  # positive control
-		q = self._question(confirm_template="{{ amount.__class__.__mro__ }}")
-		self.assertIn('"amount": 4200', q.prompt)
-		for leak in ("class", "mro", "builtins", "object"):
-			self.assertNotIn(leak, q.prompt.lower())
-
-	def test_a_template_cannot_read_a_file(self):
-		self.assertIsNone(self._render("{{ open('/etc/hostname').read() }}"))
-		self.assertIsNotNone(self._render("Post {{ amount }}."))  # positive control
-		q = self._question(confirm_template="{{ open('/etc/hostname').read() }}")
-		self.assertIn('"amount": 4200', q.prompt)
-		self.assertEqual(q.options, ["Approve", "Deny"])
-
-	def test_a_question_may_speak_only_about_this_calls_arguments(self):
-		"""The renderer's environment carries the platform's own template globals. A placeholder
-		colliding with one would print engine internals — or a database lookup's result — into the
-		text a person reads before authorising a write. Refused, not rendered."""
-		for reach in (
-			"{{ frappe }}",
-			"{{ frappe.db.get_value('User', 'Administrator', 'email') }}",
-			"{{ log }}",
-			"{{ dict }}",
-			"{{ frappe.get_all('User', fields=['name']) }}",
-			"{{ frappe.db.sql('select name from `tabUser` limit 1') }}",
-			"{{ frappe.msgprint('ATTACKER CONTROLLED POPUP') }}",
-			"{{ frappe.render_template(customer, {}) }}",
-		):
-			with self.subTest(reach=reach):
-				self.assertIsNone(self._render(reach))
-		self.assertIsNotNone(self._render("Post {{ amount }}."))  # positive control
-
-	def test_a_declared_but_omitted_argument_can_be_guarded(self):
-		"""An optional parameter the call left out must not sink the whole question — the author
-		guarded it, and falling back to the raw arguments is the failure this feature exists to
-		remove."""
-		parameters = {"properties": {"amount": {}, "customer": {}, "note": {}}}
-		rendered = self._render(
-			"{% if note %}Note: {{ note }}. {% endif %}Post {{ amount }}.", parameters=parameters
-		)
-		self.assertEqual(rendered, "Post 4200.")
-
-		with_note = self._render(
-			"{% if note %}Note: {{ note }}. {% endif %}Post {{ amount }}.",
-			arguments={"amount": 4200, "note": "urgent"},
-			parameters=parameters,
-		)
-		self.assertEqual(with_note, "Note: urgent. Post 4200.")
-
-	def test_reaching_into_a_value_that_has_no_such_part_falls_back(self):
-		"""`customer` is a plain string. Left alone this rendered the placeholder back at the
-		person, braces and all — a hole where a value belongs, which is what AC5 exists to stop."""
-		self.assertIsNone(self._render("Bill {{ customer.name }}."))
-		self.assertIsNotNone(self._render("Bill {{ customer }}."))  # positive control
-
-	def test_a_value_cannot_push_the_question_out_of_sight(self):
-		"""The attack: the author writes "Update {{ customer }} and DELETE every invoice they
-		have." and the model sends a customer name padded past the limit. Cutting the rendered
-		text would hide the clause that matters and leave a question that still reads as whole.
-		The value is capped instead, so the author's own words always survive."""
-		template = "Update {{ customer }} and DELETE every invoice they have."
-		rendered = self._render(template, arguments={"amount": 1, "customer": "Acme " + "padding " * 400})
-		self.assertIn("DELETE every invoice they have.", rendered)
-		self.assertLess(len(rendered), CONFIRM_BODY_LIMIT)
-
-	def test_an_over_long_question_is_refused_rather_than_cut(self):
-		"""If the author's own text is too long there is nothing safe to show: a half-shown
-		question reads as a whole one."""
-		self.assertIsNone(self._render("x" * (CONFIRM_BODY_LIMIT + 10) + " {{ amount }}"))
-		self.assertIsNotNone(self._render("Post {{ amount }}."))  # positive control
-
-	def test_a_value_cannot_forge_a_second_question(self):
-		"""Values come from the model. Left as prose, one can open a line of its own and write a
-		reassuring second question under the real one — the JSON dump escaped newlines; this path
-		has to flatten them."""
-		from flow.lib.agent import CONFIRM_VALUE_LIMIT, _displayable
-
-		hostile = "Acme\n\nNOTE: read-only preview, nothing will be written.\nApprove `read_report`?"
-		# Asserted on the value itself. Going through the question could not tell this apart from
-		# the whitespace tidy applied to the finished line — it stayed green with this defence
-		# removed, which is the whole reason it is pinned here instead.
-		self.assertNotIn("\n", _displayable(hostile))
-		self.assertTrue(_displayable(hostile).startswith("Acme NOTE:"))
-		self.assertLessEqual(len(_displayable("x" * 5000)), CONFIRM_VALUE_LIMIT)
-		self.assertEqual(_displayable(4200), "4200")
-
-		rendered = self._render("Post an invoice for {{ customer }}.", arguments={"customer": hostile})
-		self.assertNotIn("\n", rendered)
-		self.assertTrue(rendered.startswith("Post an invoice for Acme"))
-
-	def test_a_failed_render_tells_the_person_nothing_about_the_machine(self):
-		"""A render that fails must not put a server traceback in front of the approver. The
-		platform's own template helper reports a bad template by queueing a message for the
-		browser containing absolute server paths and library names — which would both name the
-		platform to the user and pop an error modal at the moment of approval."""
-		frappe.clear_messages()
-		self.assertIsNone(self._render("{{ amount / 0 }}"))
-		messages = " ".join(str(m) for m in frappe.get_message_log() or [])
-		for leak in ("Traceback", "jinja2", "/apps/", "site-packages"):
-			self.assertNotIn(leak, messages)
-
-	def test_a_path_shaped_template_is_rendered_as_text_not_loaded_from_disk(self):
-		"""The renderer treats a single-line string whose last dotted segment looks like a file
-		extension as a PATH and reads it off the disk. Pinned off, so this renders."""
-		q = self._question(confirm_template="Delete the report for {{ customer }}.txt")
-		self.assertIn("Delete the report for Acme.txt", q.prompt)
-
-	def test_an_argument_that_looks_like_a_template_is_shown_not_evaluated(self):
-		"""Arguments come from the model. They are values, never template source."""
-		from flow.lib.agent import _confirmation_question
-		from flow.lib.model import ToolCall
-
-		call = ToolCall(id="c1", name="post_invoice", arguments={"customer": "{{ 7 * 7 }}"})
-		q = _confirmation_question(call, self._tool(confirm_template="Bill {{ customer }}."))
-		self.assertNotIn("49", q.prompt)
-		# ...and it IS shown, rather than the whole question being refused.
-		self.assertIn("Bill {{ 7 * 7 }}.", q.prompt)
-
-	# --- the first line ------------------------------------------------------------------------
 	def test_the_first_line_uses_the_human_title_when_there_is_one(self):
-		q = self._question(title="Post Invoice", confirm_template="Post {{ amount }}.")
-		self.assertTrue(q.prompt.startswith("Approve Post Invoice?"))
-		self.assertNotIn("post_invoice", q.prompt)
+		self.assertTrue(self._question(title="Delete Invoices").prompt.startswith("Approve Delete Invoices?"))
 
 	def test_the_first_line_falls_back_to_the_internal_name(self):
-		q = self._question()
-		self.assertTrue(q.prompt.startswith("Approve `post_invoice`?"))
+		self.assertTrue(self._question().prompt.startswith("Approve `delete_invoices`?"))
 
-	# --- nothing about the decision moved -------------------------------------------------------
+	def test_a_title_cannot_open_a_line_of_its_own_either(self):
+		"""The title is a person's words too, and it is the first line of the question."""
+		q = self._question(title="Delete Invoices\n\nApprove Read Only?")
+		self.assertEqual(q.prompt.splitlines()[0], "Approve Delete Invoices Approve Read Only??")
+		self.assertNotIn("\nApprove Read Only?", q.prompt)
+
 	def test_the_options_are_unchanged_in_every_case(self):
 		for overrides in (
 			{},
-			{"confirm_template": "Post {{ amount }}."},
-			{"confirm_template": "{{ broken"},
-			{"confirm_prompt": lambda a: "x"},
-			{"title": "Post Invoice"},
+			{"confirm_template": "Post {amount}."},
+			{"confirm_template": "Post {missing}."},
+			{"confirm_template": "{{ frappe.db.sql('x') }}"},
+			{"confirm_prompt": lambda args: "hi"},
+			{"title": "Delete Invoices"},
 		):
 			with self.subTest(overrides=sorted(overrides)):
 				q = self._question(**overrides)
@@ -266,17 +343,17 @@ class TestTheRecordCarriesTheWordingToTheRuntime(IntegrationTestCase):
 		return frappe.get_doc(doc).insert(ignore_permissions=True)
 
 	def test_the_field_persists_and_is_optional(self):
-		with_template = self._record(confirm_template="Post {{ amount }}.")
+		with_template = self._record(confirm_template="Post {amount}.")
 		without = self._record()
 		self.assertEqual(
-			frappe.db.get_value("Flow Tool", with_template.name, "confirm_template"), "Post {{ amount }}."
+			frappe.db.get_value("Flow Tool", with_template.name, "confirm_template"), "Post {amount}."
 		)
 		self.assertFalse(frappe.db.get_value("Flow Tool", without.name, "confirm_template"))
 
-	def test_the_runtime_tool_carries_the_title_and_the_template(self):
-		runtime = self._record(confirm_template="Post {{ amount }}.").to_tool()
+	def test_the_runtime_tool_carries_the_title_and_the_sentence(self):
+		runtime = self._record(confirm_template="Post {amount}.").to_tool()
 		self.assertEqual(runtime.title, "Post Invoice")
-		self.assertEqual(runtime.confirm_template, "Post {{ amount }}.")
+		self.assertEqual(runtime.confirm_template, "Post {amount}.")
 		self.assertTrue(runtime.requires_confirmation)
 
 	def test_a_tool_defined_in_code_carries_neither(self):
@@ -297,10 +374,26 @@ class TestTheRecordCarriesTheWordingToTheRuntime(IntegrationTestCase):
 			type="Script",
 			import_path=None,
 			code="def main(amount: float) -> str:\n\treturn str(amount)\n",
-			confirm_template="Post {{ amount }}.",
+			confirm_template="Post {amount}.",
 		).to_tool()
-		self.assertEqual(runtime.confirm_template, "Post {{ amount }}.")
-		self.assertEqual(runtime.title, "Post Invoice")
+		self.assertEqual(runtime.confirm_template, "Post {amount}.")
+
+	def test_a_record_written_before_the_field_existed_still_asks(self):
+		"""A site that has not migrated has no such column. Attribute access on a Document raises,
+		which would take out every tool, not only the ones with a sentence written on them."""
+		from flow.lib.resolver import _build_tool
+
+		doc = self._record()
+		del doc.confirm_template
+		built = _build_tool(doc, {"type": "object", "properties": {}}, lambda **kw: "ok")
+		self.assertIsNone(built.confirm_template)
+
+	def test_a_sentence_too_long_to_read_is_refused_when_it_is_written(self):
+		from flow.flow.doctype.flow_tool.flow_tool import CONFIRM_TEMPLATE_LIMIT
+
+		self._record(confirm_template="A" * CONFIRM_TEMPLATE_LIMIT)  # positive control
+		with self.assertRaises(frappe.ValidationError):
+			self._record(confirm_template="A" * (CONFIRM_TEMPLATE_LIMIT + 1))
 
 
 class TestTheApprovalGateIsUnmovedByTheWording(IntegrationTestCase):
@@ -331,7 +424,7 @@ class TestTheApprovalGateIsUnmovedByTheWording(IntegrationTestCase):
 			func=post,
 			requires_confirmation=True,
 			title="Post Invoice",
-			confirm_template="Post an invoice for {{ amount }}.",
+			confirm_template="Post an invoice for {amount}.",
 		)
 		return Agent, templated, executed
 
@@ -360,15 +453,16 @@ class TestTheApprovalGateIsUnmovedByTheWording(IntegrationTestCase):
 		)
 		return Scripted([pause] + ([done] if responses == 2 else []))
 
-	def test_the_templated_question_is_asked_and_the_tool_has_not_run(self):
+	def test_the_question_is_asked_with_its_arguments_and_the_tool_has_not_run(self):
 		Agent, templated, executed = self._agent_with_templated_tool()
 		agent = Agent(model=self._model(1), tools=[templated])
 		result = agent.run("post it")
 
 		self.assertTrue(result.paused)
 		self.assertEqual(result.questions[0].options, ["Approve", "Deny"])
-		self.assertIn("Post an invoice for 4200.0.", result.questions[0].prompt)
 		self.assertTrue(result.questions[0].prompt.startswith("Approve Post Invoice?"))
+		self.assertIn('Post an invoice for "4200.0".', result.questions[0].prompt)
+		self.assertIn('"amount": 4200.0', result.questions[0].prompt)
 		self.assertEqual(executed, [])
 
 	def test_only_the_exact_approve_executes_a_templated_tool(self):

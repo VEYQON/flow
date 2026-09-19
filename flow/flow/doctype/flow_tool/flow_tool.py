@@ -51,28 +51,18 @@ class FlowTool(Document):
 		validate_immutable(self, ("type", "import_path"))
 
 	def _validate_confirm_template(self):
-		"""Refuse an approval question that cannot be rendered, at the moment it is written.
+		"""Refuse an approval question nobody will read, at the moment it is written.
 
-		Left to the moment of approval, the only sign would be the raw arguments appearing where
-		a sentence was meant to be — and nobody would know why.
+		There is no syntax to check: the question is plain text and `{argument_name}` is replaced
+		by that argument, so nothing in it can be malformed. Length is the one thing that can go
+		wrong here, and left to the moment of approval the only sign would be the raw arguments
+		appearing where a sentence was meant to be, with nobody knowing why.
 		"""
 		template = (self.confirm_template or "").strip()
-		if not template:
-			return
 		if len(template) > CONFIRM_TEMPLATE_LIMIT:
 			frappe.throw(
 				_("Keep the approval question under {0} characters.").format(CONFIRM_TEMPLATE_LIMIT),
 				title=_("Approval Question Too Long"),
-			)
-		from frappe.utils.jinja import get_jenv
-		from jinja2 import TemplateSyntaxError
-
-		try:
-			get_jenv(restrict_globals=True).parse(template)
-		except TemplateSyntaxError as e:
-			frappe.throw(
-				_("The approval question is not valid: {0}").format(e),
-				title=_("Invalid Approval Question"),
 			)
 
 	def on_trash(self):

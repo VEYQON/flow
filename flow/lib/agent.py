@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -19,11 +21,21 @@ if TYPE_CHECKING:
 DEFAULT_MAX_ITERATIONS = 20
 ERROR_MESSAGE_LIMIT = 500
 # An approval question is read by a person before they decide. Past this it stops being read —
-# and a question nobody finishes reading is worse than a plain one, so an over-long render is
+# and a question nobody finishes reading is worse than a plain one, so an over-long sentence is
 # abandoned rather than cut.
 CONFIRM_BODY_LIMIT = 2000
-# No single value may crowd out the sentence around it.
+# No single value may crowd out the sentence around it. A longer one is not shortened; the whole
+# sentence is abandoned, because a value shown in part reads exactly like a value shown in full.
 CONFIRM_VALUE_LIMIT = 200
+# The entire grammar of an approval question: a name in braces, replaced by the argument of that
+# name. There are no expressions, filters, attribute access, indexing, loops or conditionals, and
+# no engine is involved — a general template engine stood here once and could read the database
+# from inside a question nobody had answered yet. A question that can COMPUTE is a question someone
+# can steer, and this one is read by a person about to authorise a write.
+CONFIRM_PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]{0,63})\}")
+# Shown whole, or not at all. `None`, lists and objects are not; the arguments below the sentence
+# show them properly.
+CONFIRM_SCALAR_TYPES = (str, bool, int, float)
 VALID_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 
@@ -438,89 +450,115 @@ def _assistant_message(response: ChatResponse) -> dict[str, Any]:
 	return message
 
 
-def _displayable(value: Any) -> str:
-	"""One short, single-line rendering of a value the model chose.
+def _escaped(text: str) -> str:
+	"""Text made safe to read: every character that could move the cursor is shown, never obeyed.
 
-	The values in an approval question come from the model; the sentence around them comes from a
-	person. Flattened so a value cannot open a line of its own and forge a second question, and
-	capped so it cannot push the part that matters out of sight.
+	The values in an approval question are chosen by the model. A newline in one would start a line
+	of its own and could write a second, friendlier question underneath the real one; a right-to-left
+	override would reorder the sentence around it while leaving every character in place. Both are
+	ways to show a person a question other than the one being asked, so every control and format
+	character is printed as an escape instead.
+
+	The backslash and the quote are escaped too. Without that, `\\n` in the output could be either a
+	real line break or those two characters, and a quote inside a value could close the pair holding
+	it — the point of escaping is that the reader can tell exactly what the value was.
 	"""
-	text = value if isinstance(value, str) else json.dumps(value, default=str)
-	return " ".join(text.split())[:CONFIRM_VALUE_LIMIT]
+	out: list[str] = []
+	for ch in text:
+		if ch in '\\"':
+			out.append("\\" + ch)
+		elif ch == "\n":
+			out.append("\\n")
+		elif ch == "\r":
+			out.append("\\r")
+		elif ch == "\t":
+			out.append("\\t")
+		elif unicodedata.category(ch) in ("Cc", "Cf"):
+			out.append(f"\\u{ord(ch):04x}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08x}")
+		else:
+			out.append(ch)
+	return "".join(out)
 
 
-def _render_confirm_template(
-	template: str, arguments: dict[str, Any], parameters: dict[str, Any] | None = None
-) -> str | None:
-	"""State an approval request in plain language, filled in from the call's arguments.
+def _quoted_argument(value: Any) -> str | None:
+	"""One argument, ready to read: escaped, quoted, and never shortened.
 
-	Returns None whenever the result cannot be trusted, and the caller then shows the arguments as
-	they are. It never raises: a badly written question must not be able to stop a person being
+	None when it cannot be shown whole — not a scalar, or longer than the cap once escaped. The
+	caller then abandons the sentence entirely rather than show a shortened value, because a
+	question holding part of a value reads exactly like one holding all of it, and the part left
+	out is the part someone needed.
+	"""
+	if not isinstance(value, CONFIRM_SCALAR_TYPES):
+		return None
+	shown = _escaped(value if isinstance(value, str) else json.dumps(value))
+	# Escaping only ever lengthens, so this one cap also refuses any raw value over the limit.
+	if len(shown) > CONFIRM_VALUE_LIMIT:
+		return None
+	return f'"{shown}"'
+
+
+def _render_confirm_template(template: str, arguments: dict[str, Any]) -> str | None:
+	"""Fill an administrator's sentence in from this call's own arguments, or give up.
+
+	This is a substitution, not an evaluation: `{name}` becomes the argument called `name` and
+	nothing else happens, so there is nothing here for a value to be interpreted AS. Returns None
+	whenever the sentence cannot be produced in full — a name the call did not supply, a value that
+	is not a scalar or will not fit — and the caller falls back to the arguments as they are.
+
+	Reads `template` and `arguments` and nothing else: no record, no session, no database, no disk.
+	It cannot raise, because a badly written question must never be able to stop a person being
 	asked.
-
-	Two rules make this safe to put in front of someone about to authorise a write.
-
-	A question may speak only about this call's own arguments. The environment a template would
-	otherwise render in carries the platform's template globals — enough to read the database
-	ignoring permissions, or to reach the network — and all of that would run merely because the
-	model proposed a call, before anyone approved it and even if they go on to refuse. So the
-	globals are removed and any name outside the arguments is refused rather than rendered.
-
-	And the values are quoted, not trusted: flattened to a single line and capped, so the model
-	cannot write a second, friendlier question underneath the real one.
 	"""
 	try:
-		from frappe.utils.jinja import get_jenv
-		from jinja2 import StrictUndefined, meta
-
-		# The same textual refusal the platform's own renderer applies before compiling.
-		if ".__" in template:
+		# The author's own line breaks are not the value's: the sentence is one line, so the
+		# arguments printed beneath it can never be mistaken for part of it.
+		sentence = " ".join(template.split())
+		if not sentence:
 			return None
 
-		environment = get_jenv(restrict_globals=True)
-		# Declared-but-omitted optional arguments are allowed and bound to nothing, so a question
-		# can guard them with {% if %}. Anything else it names is a mistake or a reach.
-		declared = set((parameters or {}).get("properties") or {})
-		if meta.find_undeclared_variables(environment.parse(template)) - set(arguments) - declared:
-			return None
+		incomplete = False
 
-		# Rendered from a string, never a path, so there is no chance of a question that happens
-		# to end in something extension-shaped being read off the disk instead. Undefined is
-		# strict, so reaching into a value for a part it does not have fails here rather than
-		# printing the placeholder back at the person.
-		speaks_only_of_arguments = environment.overlay(undefined=StrictUndefined)
-		speaks_only_of_arguments.globals = {}
-		context: dict[str, Any] = dict.fromkeys(declared, "")
-		context.update({name: _displayable(value) for name, value in arguments.items()})
-		rendered = speaks_only_of_arguments.from_string(template).render(context)
+		def substitute(match: re.Match[str]) -> str:
+			nonlocal incomplete
+			shown = _quoted_argument(arguments[match.group(1)]) if match.group(1) in arguments else None
+			if shown is None:
+				incomplete = True
+				return ""
+			return shown
+
+		rendered = CONFIRM_PLACEHOLDER.sub(substitute, sentence)
+		if incomplete or len(rendered) > CONFIRM_BODY_LIMIT:
+			return None
+		return rendered
 	except Exception:
 		return None
-
-	rendered = " ".join(rendered.split()) if "\n" not in template else rendered.strip()
-	if not rendered or len(rendered) > CONFIRM_BODY_LIMIT:
-		# Never cut the author's own words: a half-shown question reads as a whole one, and the
-		# clause that got cut is exactly the one someone needed to see.
-		return None
-	return rendered
 
 
 def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
 	"""Build the approval prompt shown to the user for a `requires_confirmation` tool call.
 
-	The body is the tool's own `confirm_prompt` when it has one, otherwise its record's plain-language
-	template, otherwise the arguments as they are. Wording only: what executes, and on what answer,
-	is decided elsewhere and is not affected by anything here.
+	The body is the tool's `confirm_prompt` when it has one — that is code, written and reviewed
+	alongside the tool itself. Otherwise it is the record's plain-language sentence followed ALWAYS
+	by the arguments that will execute, and the arguments alone when there is no sentence or it
+	could not be filled in whole.
+
+	The sentence never replaces the arguments. Its wording comes from an administrator, and a
+	question reading "Read the invoices" above a call that deletes them must not be the only thing
+	anyone sees. Wording only: what executes, and on which answer, is decided elsewhere and nothing
+	here can reach it.
 	"""
+	dump = json.dumps(call.arguments, indent=2, default=str)
 	body = None
 	if tool.confirm_prompt:
 		body = tool.confirm_prompt(call.arguments)
 	elif tool.confirm_template:
-		body = _render_confirm_template(tool.confirm_template, call.arguments, tool.parameters)
+		sentence = _render_confirm_template(tool.confirm_template, call.arguments)
+		body = f"{sentence}\n\n{dump}" if sentence else None
 	if not body:
-		body = json.dumps(call.arguments, indent=2, default=str)
+		body = dump
 
 	if tool.title:
-		prompt = _("Approve {0}?\n\n{1}").format(tool.title, body)
+		prompt = _("Approve {0}?\n\n{1}").format(_escaped(" ".join(tool.title.split())), body)
 	else:
 		prompt = _("Approve `{0}`?\n\n{1}").format(call.name, body)
 	return Question(

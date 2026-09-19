@@ -1,12 +1,29 @@
 ---
 type: spec
-status: implemented     # draft → approved (HUMAN ONLY) → in-progress → implemented
+status: superseded     # draft → approved (HUMAN ONLY) → in-progress → implemented
 implemented: 2026-09-19
 approved-by: owner pre-approval for unattended run 2026-09-19 — REVIEW BEFORE MERGE
 created: 2026-09-19
 upstreamable: yes
 ---
 # Spec: E5 — plain-language approval questions, configurable on the tool record
+
+> **SUPERSEDED by [[e5-confirm-prompt-field-v2]] on 2026-09-19 (unattended run 2).**
+> This version rendered the question with the platform's template engine. Security review found
+> three HIGH issues against it — a truncation that hid "and DELETE every invoice", a forged second
+> question made with a newline, and `frappe.db.sql` running inside the question before anyone had
+> approved anything. Patching those fixed the symptoms; the design was the problem. v2 replaces the
+> engine with a single regex substitution. The implementation commits for v1 are kept in history.
+>
+> Three entries in this spec's features file were flipped to `passes: false` because v2 no longer
+> makes those claims — nothing else in the file was touched:
+> - **1** — v2 shows the JSON dump ALWAYS, beneath the sentence, so "no JSON dump" is no longer true
+>   and is no longer wanted.
+> - **4** — nothing on the v2 path can raise, so "a template that raises falls back" has no case
+>   left to demonstrate.
+> - **6** — an attribute-escape attempt is now shown back as literal text rather than falling back,
+>   which is stronger, but it is not what this entry says.
+> Entries 2, 3, 5, 7, 8, 9, 10 and 11 still hold in v2 and stay `true`.
 
 ## Problem
 When a tool needs approval, the person is shown the tool's internal slug and a raw dump of the
