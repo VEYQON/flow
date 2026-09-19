@@ -15,6 +15,12 @@ diff with `git diff veyqon...HEAD`:
 
 The agent that wrote the code does not review it.
 
+**Until all three have reported, the builder does not switch branches, edit files, or run anything that
+writes to the working tree** — the reviewers are reading and testing it. Reviewers never edit files.
+Test runs are serialised by the gate's lock, so a reviewer may wait for another's run; that is expected.
+If a reviewer is still running after 40 minutes, message it to report what it has, and wait for that
+report. Do not proceed on the other two reports alone.
+
 Then run `scripts/run-tests.sh` yourself and include its GATE line.
 
 Triage into one table `severity | finding | source | decision`:
