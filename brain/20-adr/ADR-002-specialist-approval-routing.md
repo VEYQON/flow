@@ -7,6 +7,9 @@ created: 2026-09-19
 ---
 # ADR-002 (DRAFT): Routing a specialist's approval request to the person
 
+Prototype: loop/o2-approval-handup-spike — evidence only, not for merge.
+Measurements: [[40-architecture/approval-handup-prototype]].
+
 > **This is a draft for a decision, not a decision.** It was written by the unattended run of
 > 2026-09-19 from the O1 spike and has not been accepted by anyone. Its purpose is to make the
 > choice concrete enough to be argued with.

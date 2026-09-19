@@ -29,6 +29,10 @@ class Question:
 	multi-select. When `allow_other` is true the picker always offers an "Other"
 	choice that opens a textbox for the user to reiterate or redirect.
 	`key` routes the answer back (e.g. the tool_call_id it belongs to).
+
+	`handup` is set only when this question was raised on behalf of a run this run is waiting
+	on; it carries what is needed to route the answer down to that run. Nothing in the approval
+	path reads it.
 	"""
 
 	prompt: str
@@ -36,6 +40,7 @@ class Question:
 	multi_select: bool = False
 	allow_other: bool = True
 	key: str | None = None
+	handup: dict[str, Any] | None = None
 
 
 @dataclass

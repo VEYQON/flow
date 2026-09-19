@@ -1,0 +1,42 @@
+[
+ {
+  "id": 1,
+  "feature": "I1 — a specialist's pause raises exactly one approval question in the caller's conversation, naming the specialist and showing the exact arguments",
+  "passes": true
+ },
+ {
+  "id": 2,
+  "feature": "I2 — only the exact \"Approve\" executes; Deny and free text execute nothing, and the specialist's tool records zero calls before approval",
+  "passes": true
+ },
+ {
+  "id": 3,
+  "feature": "I3 — the arguments executed are byte-for-byte the arguments shown, compared by digest; changed arguments do not execute",
+  "passes": true
+ },
+ {
+  "id": 4,
+  "feature": "I4 — parent run and child run are linked in the stored records both ways",
+  "passes": true
+ },
+ {
+  "id": 5,
+  "feature": "I5 — while anything is pending, the caller never says the work is done or under way",
+  "passes": true
+ },
+ {
+  "id": 6,
+  "feature": "I6 — resume runs as the owner of the parent run only; another user is rejected",
+  "passes": true
+ },
+ {
+  "id": 7,
+  "feature": "I7 — depth is exactly one; a specialist that tries to delegate is refused",
+  "passes": true
+ },
+ {
+  "id": 8,
+  "feature": "The approval gate itself is untouched: _invoke, _resolve_confirmation, _confirmation_question and _has_denial are byte-identical to veyqon, and TestAgentConfirmation is green and unmodified",
+  "passes": true
+ }
+]

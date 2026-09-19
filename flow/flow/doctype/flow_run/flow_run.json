@@ -10,6 +10,7 @@
   "trigger",
   "reference_doctype",
   "reference_name",
+  "parent_run",
   "column_break_meta",
   "status",
   "iterations",
@@ -75,6 +76,15 @@
    "in_standard_filter": 1,
    "label": "Reference Name",
    "options": "reference_doctype"
+  },
+  {
+   "description": "Run that started this one from inside its own tool, when there is one.",
+   "fieldname": "parent_run",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Parent Run",
+   "options": "Flow Run",
+   "read_only": 1
   },
   {
    "fieldname": "column_break_meta",

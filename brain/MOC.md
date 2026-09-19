@@ -10,12 +10,14 @@ The hub. If a note isn't linked from here, it's lost.
 - [[40-architecture/engine-overview|Engine overview]] — how a turn flows through the engine
 - [[70-runbooks/local-setup|Local setup]] — the bench, and how to rebuild it
 - [[40-architecture/agent-handoff-findings|Agent handoff findings]] — what a handoff does today
+- [[40-architecture/approval-handup-prototype|ADR-002 prototype]] — the invariant table, evidence only
 - [[20-adr/ADR-001-fork-flow|ADR-001 Fork Flow]] — why this repo exists and its branch model
 
 ## Work in flight
 - **Specs** → `10-specs/`
   - [[10-specs/f3-turn-context|F3 — per-turn context]] (draft)
   - [[10-specs/o1-agent-handoff-spike|O1 — agent handoff spike]] (spike complete 2026-09-19)
+  - [[10-specs/o2-approval-handup-spike|O2 — handing a specialist's approval up]] (spike complete 2026-09-19, **not for merge**)
 - **Inbox** → `00-inbox/`
   - [[00-inbox/instructions-frozen-at-first-turn]]
   - [[00-inbox/worded-refusal-reproposes]]

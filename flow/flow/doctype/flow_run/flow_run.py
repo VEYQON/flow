@@ -49,6 +49,7 @@ class FlowRun(Document):
 		input: DF.LongText | None
 		iterations: DF.Int
 		output: DF.LongText | None
+		parent_run: DF.Link | None
 		questions: DF.JSON | None
 		reference_doctype: DF.Link | None
 		reference_name: DF.DynamicLink | None
@@ -125,9 +126,13 @@ def create_run(
 	reference_doctype: str | None = None,
 	reference_name: str | None = None,
 	config_snapshot: dict[str, Any] | None = None,
+	parent_run: str | None = None,
 ) -> FlowRun:
 	"""Create a new Flow Run row in the Running state. `session` is required — every run
-	belongs to a Flow Session (which carries the transcript and agent linkage)."""
+	belongs to a Flow Session (which carries the transcript and agent linkage).
+
+	`parent_run` is set when this run was started from inside another run's tool, so a run
+	that pauses is never left unreachable from the conversation that is waiting on it."""
 	doc = frappe.get_doc(
 		{
 			"doctype": "Flow Run",
@@ -137,6 +142,7 @@ def create_run(
 			"reference_doctype": reference_doctype,
 			"reference_name": reference_name,
 			"session": session,
+			"parent_run": parent_run,
 			"config_snapshot": _dump_json(config_snapshot) if config_snapshot else None,
 			"status": "Running",
 		}

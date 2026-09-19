@@ -137,6 +137,7 @@ class FlowSession(Document):
 		reference_name: str | None = None,
 		auto_approve: bool = False,
 		stream: bool = False,
+		parent_run: str | None = None,
 	) -> FlowRun | Generator[Event]:
 		"""Run one turn and persist it as a Flow Run. `attachments` are File names whose text
 		is injected into this turn's prompt. With `stream=True`, returns an event generator.
@@ -160,6 +161,7 @@ class FlowSession(Document):
 			reference_doctype=reference_doctype,
 			reference_name=reference_name,
 			config_snapshot=self._snapshot,
+			parent_run=parent_run,
 		)
 		self._persist_turn(input, attachment_data, run.name)
 		self._index_retrieval_attachments(run.name, {d["file"]: d["extracted_text"] for d in attachment_data})
@@ -296,6 +298,13 @@ class FlowSession(Document):
 		if not run_name:
 			frappe.throw(_("This session has no paused run to resume."), title=_("Nothing to Resume"))
 		run = frappe.get_doc("Flow Run", run_name)
+
+		# PROTOTYPE (ADR-002): an answer to a question this run raised on behalf of a run it is
+		# waiting on goes to that run first; what comes back becomes this turn's tool result.
+		# A denial is passed through untouched, so the engine's own denial halt still applies.
+		from flow.lib.handup import route_answers_down
+
+		answers = route_answers_down(run, answers)
 
 		self.reload()
 		messages = self._build_prompt_messages()
