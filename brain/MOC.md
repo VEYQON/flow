@@ -17,6 +17,7 @@ The hub. If a note isn't linked from here, it's lost.
   - [[10-specs/e2-instructions-per-turn|E2 — instructions per turn]] (implemented 2026-09-19, awaiting review)
   - [[10-specs/e5-confirm-prompt-field-v2|E5 v2 — an approval question a caller cannot steer]] (implemented 2026-09-19, awaiting review)
   - [[10-specs/e5-confirm-prompt-field|E5 v1]] (superseded by v2 — a template engine in the approval path)
+  - [[10-specs/e4-stream-persistence|E4 — what a dropped stream should cost]] (**needs-decision** — two options, nothing built)
 - **Inbox** → `00-inbox/`
   - [[00-inbox/instructions-frozen-at-first-turn]] (resolved by E2)
   - [[00-inbox/worded-refusal-reproposes]]

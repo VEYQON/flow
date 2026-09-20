@@ -1,6 +1,6 @@
 ---
 type: inbox
-status: raw
+status: specced
 created: 2026-09-19
 ---
 # A dropped connection during streaming loses the run's output
