@@ -13,6 +13,13 @@ from frappe.model.document import Document
 from flow.utils.system_generated import block_delete, block_rename, validate_immutable
 
 SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+# Shown when someone tries to save one of the shipped tools that change data with its approval
+# turned off. It says what the approval is FOR, not only that it is required: a message that merely
+# forbids teaches people to look for the way around it.
+GATE_REQUIRED_MESSAGE = (
+	"{0} changes data ({1}), so it always asks the person before it runs. That cannot be turned off "
+	"here. If a particular run should not ask, that is a decision about the run, not about the tool."
+)
 # An approval question is one or two sentences. Anything longer is not being read.
 CONFIRM_TEMPLATE_LIMIT = 1000
 IMPORT_PATH_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)+$")
@@ -46,6 +53,7 @@ class FlowTool(Document):
 		self._validate_slug()
 		self._validate_type_fields()
 		self._validate_confirm_template()
+		self._validate_confirmation_not_removed()
 		if self.type == "Script":
 			self._validate_code()
 		validate_immutable(self, ("type", "import_path"))
@@ -65,6 +73,31 @@ class FlowTool(Document):
 			frappe.throw(
 				_("Keep the approval question under {0} characters.").format(CONFIRM_TEMPLATE_LIMIT),
 				title=_("Approval Question Too Long"),
+			)
+
+	def _validate_confirmation_not_removed(self):
+		"""A shipped tool that changes data always asks first, and no record may say otherwise.
+
+		The runtime reads this row, not the code, so one unchecked box meant the model deleted
+		records with nothing asked from the very next turn — and worse, an ungated call beside a
+		gated one runs DURING the turn that pauses, while the person is reading a question about
+		something else. Until now the only thing that put the gate back was the next deploy.
+
+		Unlike `validate_immutable`, this does NOT step aside for `ignore_permissions`. An approval
+		on a tool that changes data is not an app-configurable value and there is no legitimate
+		caller that turns one off. The sync a migrate runs is unaffected: it writes the approval ON,
+		and it writes through `db.set_value`, which does not come through here at all. That route
+		stays open by construction and is recorded in the spec's Risks rather than papered over.
+
+		One-directional on purpose: turning an approval ON is never refused.
+		"""
+		from flow.tools.builtins import WRITE_CAPABLE
+
+		what = WRITE_CAPABLE.get(self.slug)
+		if what and not self.requires_confirmation:
+			frappe.throw(
+				_(GATE_REQUIRED_MESSAGE).format(self.slug, what),
+				title=_("Approval Required"),
 			)
 
 	def on_trash(self):

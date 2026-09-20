@@ -555,6 +555,27 @@ def run_action(
 	return result
 
 
+# Which builtins can change persistent state, and what each one changes, in words. Maintained by
+# hand, and that is deliberate: the only machine-readable signal available here is
+# `requires_confirmation` itself, so a list derived from it would assert that True implies True and
+# would pass forever. The gate that makes this real is a test asserting the classification is
+# TOTAL — a tool added to BUILTIN_TOOLS and to neither list turns the suite red, so nobody can add
+# a write tool without deciding, in writing, that it writes.
+#
+# Read by `FlowTool.validate`, which refuses to save one of these rows with its approval turned off.
+WRITE_CAPABLE: dict[str, str] = {
+	"create": "inserts records",
+	"update": "saves records",
+	"delete": "deletes records",
+	"run_action": "submits, cancels, amends, renames, moves a workflow, or calls a whitelisted method",
+	"execute": "runs code that can do any of the above, and can send mail",
+	"update_memory": "writes a note the agent is given back on later turns",
+}
+# Listed rather than inferred, so the classification is total and a new tool cannot be quietly
+# neither one nor the other.
+READ_ONLY: frozenset[str] = frozenset({"find_doctypes", "describe", "read", "search_knowledge"})
+
+
 BUILTIN_TOOLS: list[Tool] = [
 	find_doctypes,
 	describe,
