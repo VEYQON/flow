@@ -114,7 +114,13 @@ out with a memory approval pending.
 
 The answer to the question as asked is that it cannot happen: a turn that raises a question RETURNS
 from the loop, so the budget is never spent to nothing with something pending, and a resume resolves
-every pending call before the loop starts again. Both halves are pinned rather than argued.
+every pending call before the loop starts again. An adversarial review traced both loops, both resume
+paths and every write of the status and the questions, and could not break the claim.
+
+Both halves are pinned, and the second only after review pointed out that the first version of this
+sentence claimed a pin it did not have: the resume half is now asserted by the note existing after the
+answer — a pending call that was never resolved could not have written it — and by the iteration count
+being 2 on a run whose per-turn allowance is 1, which is the budget claim in one number.
 
 What the test found instead is a real defect. A run pauses and stores its question; the loop later
 runs out of iterations and the run goes **Failed** — and `mark_failed` did not clear `questions`,
@@ -122,7 +128,13 @@ while `apply_result` beside it always has. Only a Paused run can be resumed, so 
 **nobody could ever answer**, still shown as pending. `mark_failed` now clears it, which is the same
 rule `apply_result` already applies, on the three paths that never reach it: a run that raised, a
 stream cut short, and a person stopping a paused run deliberately. That last one is the clearest case
-for it — a run somebody terminated must not go on asking.
+for it — a run somebody terminated must not go on asking — and it is the one a review found had no
+test anywhere in the repository, so it has one now.
+
+Where the question is actually shown, and the reason this is not a cosmetic field:
+`flow/flow/doctype/flow_run/flow_run_detail.html` renders a **"Pending Questions"** heading from the
+field with **no check on the run's status**, and the field's own description in the doctype already
+claimed "Present only when status is Paused". The contract was written down and not enforced.
 
 Nothing else about failure changes, and a Paused run still carries its question, pinned by a control.
 
@@ -158,9 +170,23 @@ See `s16c-memory-by-construction.features.json`.
   and the turn-context block added to the system message is not counted at all. Both were true before
   this change and are unchanged by it; D4 makes the notes stop being free, not everything. The test
   asserts the **difference** between a turn with notes and the same turn without, so neither of those
-  can hide inside it. **Open question 1.**
-- **R6 — clearing a failed run's question loses the record of what was asked.** Before D5 a failed
-  run kept the question text, which nobody could answer but somebody could read. The transcript still
-  holds the tool call and the run still holds its error, so what was proposed is not lost; what is
-  lost is the rendered question. Judged the right trade: a question shown as pending that cannot be
-  answered is worse than one that has to be read from the transcript.
+  can hide inside it. **Open question 1.** (D4's tests arrive in the commit after this one; until
+  they do, this risk describes what is intended rather than what is asserted.)
+- **R6 — clearing a failed run's question loses more than the rendering, and both reviews said so.**
+  The transcript still holds the tool call and the run still holds its error, so what was *proposed*
+  is not lost. Three things are:
+  the rendered question; **the fail-closed record** — `_asked_questions` reads this field, and with it
+  empty `_prepare_resume` falls back to the tool's current gate, which makes S15's "the gate changed
+  while the question was open" check structurally unable to fire; and **the ability to put the run
+  back** — a Paused run must have a question, so a run failed by a *transient* error (a model
+  timeout on resume) can no longer be returned to Paused for the person to answer. Nothing in the
+  product offers that today, so it is a door closed rather than one broken, and a transient failure is
+  now treated exactly like a deliberate stop. Judged the right trade — a question shown as pending
+  that nobody can answer is worse — but it is three losses, not one.
+- **R7 — the streamed loop's own pause is not pinned by this spec.** The claim about the iteration
+  budget was traced through `_loop_stream` by review and holds there, but every new test drives
+  `_loop`. Stated rather than implied.
+- **R8 — two of `stream_with_persistence`'s lines cannot be reached from any test**, by construction:
+  its two `frappe.db.commit()` calls are guarded by `not frappe.flags.in_test`. They are the reason
+  the streamed path persists at all, and no suite can cover them. Pre-existing; recorded because the
+  streamed pins might otherwise be read as covering that function whole.

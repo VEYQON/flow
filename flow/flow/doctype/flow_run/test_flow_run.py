@@ -206,6 +206,25 @@ class TestFlowRunPersistence(IntegrationTestCase):
 		self.assertEqual(doc.status, "Failed")
 		self.assertEqual(doc.error, "something broke")
 
+	def test_mark_failed_drops_a_pending_question(self):
+		"""A question on a run that is not Paused is one nobody can answer: only a Paused run can be
+		resumed, and the desk's run view renders whatever is in this field as pending. Beside
+		`apply_result`, which has always cleared it whenever a run came back not-paused.
+
+		Here rather than only in a feature module, because this is the file that travels with the
+		controller — a change whose only gate lives elsewhere ships with no gate at all.
+		"""
+		session = _new_session(self.agent)
+		doc = persist_result(_paused_result(), source="Manual", input="email the list", session=session)
+		self.assertEqual(doc.status, "Paused")
+		self.assertTrue(doc.questions)
+
+		doc.mark_failed("the model timed out")
+
+		self.assertEqual(doc.status, "Failed")
+		self.assertFalse(doc.questions)
+		self.assertEqual(doc.error, "the model timed out")
+
 	def test_mark_failed_truncates_long_error(self):
 		session = _new_session(self.agent)
 		doc = create_run(source="Manual", input="hi", session=session)
