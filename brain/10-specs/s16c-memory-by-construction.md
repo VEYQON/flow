@@ -1,0 +1,112 @@
+---
+type: spec
+status: approved  # draft → approved (HUMAN ONLY) → in-progress → implemented
+approved-by: owner pre-approval for unattended run 7 2026-09-20 — REVIEW BEFORE MERGE
+created: 2026-09-20
+upstreamable: yes
+---
+# Spec: S16c — an unattended run keeps no notes by construction, and a kept note is budgeted
+
+## Problem
+S16a decided that a run with nobody to answer an approval keeps no notes. The way that decision is
+enforced is the problem.
+
+Re-verified in this repository at `merge/flow-run6-2026-09-20` before a line was written:
+
+1. **The refusal is a worker-global flag read at call time.** `bind_update_memory(agent,
+   unattended=True)` builds the tool **without its gate** — deliberately, because a question in a
+   run with nobody to answer parks the run in `Paused` forever (S16a D4). The resulting tool is
+   ungated, and the only thing that stops it writing is
+   `if from_conversation and frappe.flags.get("flow_unattended")` in `save_memory`
+   (`flow/memory/memory.py`). So the safety of an **ungated write tool** depends on a flag on
+   `frappe.flags` being correct at the moment the tool body runs.
+2. **The flag and the tool are set by different statements.** `FlowSession.chat` calls
+   `self._rebind_memory_tool(unattended)` and then `_set_active_run(run.name, unattended=unattended)`
+   (`flow/flow/doctype/flow_session/flow_session.py`). Two statements, one derived value, and the
+   dangerous half is the one that survives if the other is wrong: an ungated tool with the flag
+   clear writes.
+3. **`frappe.flags` is per-request worker state, and the engine already had to fix one leak of it.**
+   `stream_with_persistence`'s `finally` clears both flags, with a comment saying why: leaving
+   `flow_unattended` set would carry a trigger's "nobody is here" into the next request this worker
+   serves. The same reasoning applies in the other direction and is not defended anywhere: a flag
+   that fails to be set leaves an ungated memory tool writing in a run nobody is watching.
+
+Separately, and named by S16a as its own Open question 2:
+
+4. **A kept note is not counted in the file-injection budget.** `_file_injection_budget` sums the
+   stored messages plus the instructions delta; the memory block is appended to the last user
+   message *after* the budget has already been spent on files. A large set of notes and a large
+   file are each individually inside the window and can cross it together.
+
+## Goal
+1. An unattended memory tool refuses because of **what it is**, not because of what a flag says.
+2. The flags that carry "which run" and "is anybody there" do not outlive the run that set them, on
+   the non-streaming path, whether the run returns or raises.
+3. A kept note costs what it costs: it is counted against the same budget file text is.
+
+## Non-goals
+- Removing the flag check in `save_memory`. It stays. It is the only defence on any path that did
+  not go through the rebinding, and two independent refusals are the point, not a redundancy to
+  tidy away.
+- Changing when a run counts as unattended. `source == "Trigger"` or `auto_approve`, unchanged.
+- Gating the memory tool in an unattended run. S16a D4 settled that, for the reason it gives.
+- Anything else in the budget. The turn-context block and the instructions delta are unchanged.
+
+## Design
+
+### D1 — the unattended tool's body refuses before it can read anything
+`bind_update_memory`'s closure already knows, at bind time, whether this tool belongs to a run with
+nobody to answer. So the refusal moves into the body's first statement, keyed on the **closure
+variable**:
+
+    if unattended:
+        return dict(MEMORY_NOT_EXECUTED["unattended"])
+
+It reads no flag, touches no database, and cannot be made to write by anything that happens between
+binding and calling. The two objects `bind_update_memory` returns are now different in kind: one can
+write and asks first, one cannot write at all. A caller holding the second one cannot get a write
+out of it whatever the worker's state.
+
+Why this and not "set the flag more carefully": a flag is a claim about the world that some other
+code has to keep true. A closure variable is a property of the object in your hand. The write path
+should not be reachable from an object that was built for a run that may not write.
+
+### D2 — the same refusal, unchanged, in `save_memory`
+Kept exactly as it is. It covers the callers D1 cannot see: a resume (S16a R6 — always treated as
+attended), a session whose runtime was never rebound because it has no agent record, and any future
+caller that binds the tool the attended way inside an unattended run. Two refusals, one for the
+object and one for the path.
+
+### D3 — the flags do not outlive the run, on the non-streaming path either
+`FlowSession.chat`'s non-streaming branch clears both in a `finally` via `_set_active_run(None)`,
+which sets `flow_run = None` and, because `bool(None)` is false, `flow_unattended = False`. That is
+already true and **nothing asserted it**. It is pinned here, for a run that returns and for a run
+that raises, because the streaming path's equivalent was written only after the leak was found once.
+
+### D4 — a kept note is counted in the file-injection budget
+`_file_injection_budget` gains one keyword argument, `memory_chars`, added to the `dialogue` sum it
+already computes. `_build_prompt_messages` builds the memory block **before** it spends the budget
+and passes its length in, then uses the block it already has where it used to build one.
+
+Building the block earlier changes nothing about the block: its inputs are the agent and the latest
+stored user message, neither of which file injection touches.
+
+For a turn with no notes the block is empty, `memory_chars` is 0, and the budget is the number it
+was — asserted by a test that computes the budget with and without the argument on the same session.
+
+## Acceptance criteria
+See `s16c-memory-by-construction.features.json`.
+
+## Risks
+- **R1 — a big memory set now shrinks what a file may inject.** That is the point, and it is a
+  behaviour change: a turn that used to inline a whole file may now switch part of it to retrieval
+  or clamp it. The alternative is the two crossing the window together, which fails the turn.
+- **R2 — `build_memory_block` now runs one step earlier.** It runs exactly once either way, and its
+  inputs do not depend on anything between the two positions. If a future change makes the block
+  depend on injected content, this ordering becomes wrong; the test that pins the block's content
+  unchanged is what would catch it.
+- **R3 — the unattended tool is still ungated.** D1 makes it unable to write; it does not make it
+  gated. An unattended run still offers the model a tool it may call, and still gets a sentence
+  back saying nothing was kept. That is S16a D4's decision and this spec does not reopen it.
+- **R4 — nothing here defends `save_memory` against a direct caller with `from_conversation=False`.**
+  That is the desk's path and is supposed to write.

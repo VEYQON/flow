@@ -240,12 +240,24 @@ def bind_update_memory(agent: str | None, *, unattended: bool = False) -> Tool:
 	config, never the model. The registered builtin binds None, so an unbound call
 	fails closed.
 
-	`unattended` builds the same tool WITHOUT its gate. That reads backwards and is the opposite
-	of what it does. A gate is a question, and a question in a run with nobody to answer it is not
-	a protection — it is a run parked in Paused until somebody notices, holding its session with
-	it. The body refuses to write in such a run anyway, so an ungated tool here means the model
-	gets a plain sentence saying nothing was kept, and the run finishes. The choice is between
-	refusing the write and stranding the run; it is not between refusing and allowing.
+	`unattended` builds a DIFFERENT TOOL: one that cannot write at all, and is not gated.
+
+	Not gated, because a gate is a question and a question in a run with nobody to answer it is not
+	a protection — it is a run parked in Paused until somebody notices, holding its session with it.
+	The choice there is between refusing the write and stranding the run; it is not between
+	refusing and allowing.
+
+	Cannot write, because of what it is rather than because of what it finds when it runs. The
+	refusal is decided here, from the argument this tool was built with, and it is the body's first
+	statement. It reads no flag, so nothing that happens between binding this tool and calling it
+	can turn the refusal off: not a flag another statement failed to set, not one left over from an
+	earlier run on this worker, not one a later request cleared. An ungated tool whose safety
+	depends on worker-global state being right at the moment it runs is a write waiting for one bug
+	somewhere else; an object that has no path to the write cannot be talked into one.
+
+	The equivalent refusal in `save_memory` stays exactly where it is. It covers what a binding
+	cannot see — a resume, which is always treated as attended, and a session with no agent record,
+	which is never rebound. Two refusals, one for the object and one for the path.
 	"""
 
 	def update_memory(
@@ -254,7 +266,11 @@ def bind_update_memory(agent: str | None, *, unattended: bool = False) -> Tool:
 		memory_id: str | None = None,
 		keywords: str | None = None,
 	) -> dict[str, Any]:
-		from flow.memory.memory import save_memory
+		from flow.memory.memory import MEMORY_NOT_EXECUTED, save_memory
+
+		if unattended:
+			# Decided when this tool was built, not read from anywhere now. See the docstring.
+			return dict(MEMORY_NOT_EXECUTED["unattended"])
 
 		if not agent:
 			frappe.throw(_("Memory is not configured for this agent."), title=_("Memory Unavailable"))
