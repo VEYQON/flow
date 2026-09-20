@@ -17,6 +17,7 @@ The hub. If a note isn't linked from here, it's lost.
   - [[10-specs/e2-instructions-per-turn|E2 — instructions per turn]] (implemented 2026-09-19, awaiting review)
   - [[10-specs/e5-confirm-prompt-field-v2|E5 v2 — an approval question a caller cannot steer]] (implemented 2026-09-19, awaiting review)
   - [[10-specs/e5-confirm-prompt-field|E5 v1]] (superseded by v2 — a template engine in the approval path)
+  - [[10-specs/s14-deny-stops-batch|S14 — a Deny in a batch executes nothing]] (implemented 2026-09-20, awaiting review)
 - **Inbox** → `00-inbox/`
   - [[00-inbox/instructions-frozen-at-first-turn]] (resolved by E2)
   - [[00-inbox/worded-refusal-reproposes]]
@@ -26,6 +27,7 @@ The hub. If a note isn't linked from here, it's lost.
   - [[00-inbox/a-users-own-name-can-contain-a-vendor-word]]
   - [[00-inbox/approval-question-never-reaches-the-approver]]
   - [[00-inbox/a-model-can-drop-the-approval-sentence]]
+  - [[00-inbox/a-deny-does-not-stop-the-batch]] (resolved by S14)
 
 ## Decisions
 - **ADRs** → `20-adr/` — immutable. Supersede, never edit.

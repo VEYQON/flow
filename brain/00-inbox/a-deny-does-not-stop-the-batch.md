@@ -1,6 +1,6 @@
 ---
 type: inbox
-status: specced
+status: resolved
 created: 2026-09-20
 ---
 # A Deny beside an Approve does not stop the batch — the approved write runs

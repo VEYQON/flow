@@ -12,15 +12,18 @@ executed" is asserted against a list, never inferred from the result shape.
 """
 
 import ast
+import hashlib
 import json
-import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
+from unittest.mock import patch
 
-from frappe.tests import UnitTestCase
+import frappe
+from frappe.tests import IntegrationTestCase, UnitTestCase
 
+from flow.lib import agent as agent_module
 from flow.lib.agent import Agent, Done, ToolEnded
-from flow.lib.model import ChatResponse, ToolCall
+from flow.lib.model import ChatResponse, Model, ToolCall
 from flow.lib.tool import tool
 
 
@@ -342,54 +345,135 @@ class TestWhatS14MustNotChange(UnitTestCase):
 
 class TestTheLoadBearingFunctionsAreUntouched(UnitTestCase):
 	"""CLAUDE.md rule 4. These four decide what executes and on which answer; S14 reads
-	`_has_denial` and changes none of them."""
+	`_has_denial` and changes none of them.
 
-	LOAD_BEARING = ("_invoke", "_resolve_confirmation", "_confirmation_question", "_has_denial")
+	The expected digests were taken once, from the unmodified engine, and are literals here on
+	purpose. An earlier version resolved the baseline by shelling out to git, which meant the pin
+	quietly skipped itself anywhere the comparison branch was not a local ref — including this
+	project's own CI, which checks out a single ref. A gate whose failure mode has never been
+	observed is a comment, so this one carries its own baseline and cannot opt out.
 
-	def _sources(self, text: str) -> dict[str, str]:
+	If one of these fails, nothing is wrong with the test: a function that must not change has
+	changed, and it needs a spec that names it before it goes any further.
+	"""
+
+	BASELINE_DIGESTS: ClassVar[dict[str, str]] = {
+		"_invoke": "745260a7da1fe7e9221cf6257de98eeb7c7e23edf5eb4e1ce17d4d0505f5fa4f",
+		"_resolve_confirmation": "adbb8b26e0b0fb166a5a9fff1c658c531d081b3bd2f2967e55b8e838b5ab8f47",
+		"_confirmation_question": "32916612298d4ebdb423d9904e268992a2e638b56a67f2ca14fa67deba9cf34c",
+		"_has_denial": "80f799b6827afea159589dcee7889282ad8c376aacc15be424c273cd0e55b209",
+	}
+
+	def _digests(self, text: str) -> dict[str, str]:
 		tree = ast.parse(text)
-		found: dict[str, str] = {}
-		for node in ast.walk(tree):
-			if isinstance(node, ast.FunctionDef) and node.name in self.LOAD_BEARING:
-				found[node.name] = ast.get_source_segment(text, node)
-		return found
+		return {
+			node.name: hashlib.sha256(ast.get_source_segment(text, node).encode()).hexdigest()
+			for node in ast.walk(tree)
+			if isinstance(node, ast.FunctionDef) and node.name in self.BASELINE_DIGESTS
+		}
 
-	def _baseline(self) -> str | None:
-		repo = Path(__file__).resolve().parents[2]
-		try:
-			return subprocess.run(
-				["git", "show", "veyqon:flow/lib/agent.py"],
-				cwd=repo,
-				capture_output=True,
-				text=True,
-				check=True,
-			).stdout
-		except (OSError, subprocess.CalledProcessError):
-			return None
+	def _engine_source(self) -> str:
+		return Path(agent_module.__file__).read_text()
 
-	def test_the_four_functions_are_byte_identical_to_veyqon(self):
-		baseline = self._baseline()
-		if baseline is None:
-			self.skipTest("veyqon not resolvable from this checkout")
-		current = Path(__file__).resolve().parents[1].joinpath("lib", "agent.py").read_text()
+	def test_the_four_functions_are_byte_identical_to_their_reviewed_form(self):
+		found = self._digests(self._engine_source())
 
-		before, after = self._sources(baseline), self._sources(current)
-
-		# Positive control: the comparison must be capable of failing. If a name is missing
-		# from either side, `None == None` would pass silently.
-		self.assertEqual(sorted(before), sorted(self.LOAD_BEARING))
-		self.assertEqual(sorted(after), sorted(self.LOAD_BEARING))
-		for name in self.LOAD_BEARING:
-			self.assertEqual(after[name], before[name], f"{name} changed")
+		# If a name went missing, a dict comparison of what is left would still pass.
+		self.assertEqual(sorted(found), sorted(self.BASELINE_DIGESTS))
+		for name, digest in self.BASELINE_DIGESTS.items():
+			self.assertEqual(found[name], digest, f"{name} changed; rule 4 requires a spec that names it")
 
 	def test_the_comparison_can_fail(self):
-		"""The control for the test above: the same comparison over a deliberately altered
-		copy must report a difference."""
-		current = Path(__file__).resolve().parents[1].joinpath("lib", "agent.py").read_text()
-		altered = current.replace('if answer == "Approve":', 'if answer == "approve":', 1)
+		"""The positive control. The same comparison over a deliberately altered copy must
+		report a difference — otherwise the test above proves nothing."""
+		altered = self._engine_source().replace('if answer == "Approve":', 'if answer == "approve":', 1)
 
-		self.assertNotEqual(altered, current)
-		self.assertNotEqual(
-			self._sources(altered)["_resolve_confirmation"],
-			self._sources(current)["_resolve_confirmation"],
+		digests = self._digests(altered)
+
+		self.assertNotEqual(digests["_resolve_confirmation"], self.BASELINE_DIGESTS["_resolve_confirmation"])
+		self.assertEqual(digests["_has_denial"], self.BASELINE_DIGESTS["_has_denial"])
+
+	def test_the_digests_describe_the_engine_that_is_actually_imported(self):
+		"""The second control: the file being hashed is the module the tests ran against, not
+		some other copy on the path."""
+		self.assertTrue(Path(agent_module.__file__).is_file())
+		self.assertIn("def _resolve_confirmation", self._engine_source())
+
+
+class TestItHoldsThroughTheWholeStack(IntegrationTestCase):
+	"""The tests above drive `Agent.resume` directly. This one goes through the public path a
+	client actually uses — the whitelisted resume endpoint, a record-backed session, and the
+	stored transcript — so a future change to how answers or messages are reshaped on the way in
+	cannot quietly undo the withholding."""
+
+	def setUp(self):
+		self.model_doc = frappe.get_doc(
+			{
+				"doctype": "Flow Model",
+				"title": "Deny Batch Model",
+				"model_id": "openai/gpt-4o-mini",
+				"enabled": 1,
+			}
+		).insert()
+		self.agent_doc = frappe.get_doc(
+			{
+				"doctype": "Flow Agent",
+				"title": "Deny Batch Agent",
+				"model": self.model_doc.name,
+				"instructions": "be terse",
+				"enabled": 1,
+			}
+		).insert()
+
+	def tearDown(self):
+		frappe.db.rollback()
+
+	def test_a_deny_in_the_batch_executes_nothing_through_the_public_resume(self):
+		from flow.api.api import resume_run
+		from flow.lib.session import load_session
+
+		recorder = _Recorder()
+		session = load_session(
+			frappe.get_doc({"doctype": "Flow Session", "agent": self.agent_doc.name})
+			.insert(ignore_permissions=True)
+			.name
 		)
+		session._runtime.tools.extend(recorder.tools)
+		for t in recorder.tools:
+			session._runtime._tools_by_name[t.name] = t
+
+		def pause(messages, tools=None, **_):
+			return _calls(
+				("send_money", {"to": "alice", "amount": 500}, "k1"),
+				("delete_records", {"folder": "invoices"}, "k2"),
+			)
+
+		with patch.object(Model, "chat", side_effect=pause):
+			run = session.chat("pay alice and clear the invoices")
+		self.assertEqual(run.status, "Paused")
+		self.assertEqual(recorder.ran, [])
+
+		# The client answers both questions in one resume, through the whitelisted endpoint —
+		# which reloads the session from the record rather than reusing the object above.
+		load_session(run.session)._runtime.tools.extend(recorder.tools)
+		with patch(
+			"flow.lib.session.load_session",
+			side_effect=lambda name, **kw: _with_tools(load_session(name, **kw), recorder),
+		):
+			resume_run(run.name, {"k1": "Approve", "k2": "Deny"})
+
+		self.assertEqual(recorder.ran, [])
+		rows = frappe.get_doc("Flow Session", run.session).messages
+		results = {r.tool_call_id: r.content for r in rows if r.role == "tool"}
+		self.assertEqual(json.loads(results["k1"]), WITHHELD)
+		self.assertEqual(json.loads(results["k2"]), DENIED)
+
+
+def _with_tools(session, recorder: _Recorder):
+	"""Attach the test's tools to a freshly rebuilt runtime. A record-backed agent resolves its
+	tools from Flow Tool rows; these are code tools, so they are put back by hand."""
+	for t in recorder.tools:
+		if t.name not in session._runtime._tools_by_name:
+			session._runtime.tools.append(t)
+			session._runtime._tools_by_name[t.name] = t
+	return session

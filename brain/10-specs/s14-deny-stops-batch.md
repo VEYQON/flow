@@ -170,3 +170,73 @@ stay byte-identical — CLAUDE.md rule 4) · `flow/tests/test_ai_agent.py`, incl
 backup of that file is taken before the edit and its sha256 recorded here; restoring it and deleting
 the new test module returns the branch to `veyqon`'s behaviour exactly. Nothing else in the engine
 is touched, so there is no migration, no doctype change and no stored data to undo.
+
+---
+## Ship
+
+**What changed.** `_prepare_resume` reads `_has_denial(answers)` once, before it resolves anything.
+If the group holds a denial, an answer of exactly `"Approve"` resolves to a withheld record and
+`_run_tool` is never reached. The run halts exactly as a Deny halts it today, every answer is still
+recorded against its own call, and the model is told why nothing ran.
+
+**Why.** A pause can carry more than one question and they are answered as one group. Refusing one
+of several actions shown together is refusing all of them — it was not. Measured on
+`loop/o1-agent-handoff-spike` @ `83f5620` before it was specified. ADR-003 lists it as required
+work item (b) whichever agent design is chosen. See [[00-inbox/a-deny-does-not-stop-the-batch]].
+
+**How it was verified.**
+- **Red first:** 18 new tests run against the unmodified engine — `GATE=RED`, `EXIT=1 TESTS_RUN=18
+  FAILURE_LINES=7`, `FAILED (failures=5, errors=1)`, log `20260920T114622`. The six red were exactly
+  the six S14 tests; the twelve pins were already green.
+- **Probes**, each restored by byte copy and proved with `sha256sum -c` → OK:
+  A `denied_group = False` → RED on exactly the six S14 tests · B `denied_group = True` → RED on the
+  three pins that assert an Approve still executes (so the pins are gates, not comments) ·
+  C reword the `denied` record inside `_resolve_confirmation` → RED including the rule-4 pin.
+- **Gate:** `MIN_TESTS=670 scripts/run-tests.sh` → **GATE=GREEN**, `EXIT=0 TESTS_RUN=688
+  FAILURE_LINES=0`, `LOCK_WAITED_SECONDS=0`.
+- **Rule 4:** `_invoke`, `_resolve_confirmation`, `_confirmation_question` and `_has_denial` are
+  byte-identical to `veyqon`; `flow/tests/test_ai_agent.py` is unmodified and green
+  (`TESTS_RUN=49`, GATE=GREEN). Verified independently by the security reviewer.
+- **Three reviewers**, launched in one message, rule 14 observed throughout (no branch switch, no
+  tree write until all three reported). One HIGH, fixed and re-verified. Table below.
+
+**Verify table.**
+
+| sev | finding | source | decision |
+|---|---|---|---|
+| HIGH | the rule-4 pin resolved its baseline with `git show veyqon:…` and `skipTest`ed when that failed — so it silently no-opped in this project's own CI (`ci.yml` checks out one ref, no `veyqon`), in a fresh worktree, and in an installed app dir | code-reviewer | **FIXED** — the pin now carries the four functions' sha256 digests as literals and cannot opt out; two controls added (`test_the_comparison_can_fail`, `test_the_digests_describe_the_engine_that_is_actually_imported`) |
+| MED | `brain/MOC.md` and `brain/changelog.md` were in the plan but not yet written | code-reviewer | **FIXED** in this ship commit — they are /loop-ship's own step 2 and the reviewer read the branch mid-loop |
+| MED | the pin class names "S14", "veyqon" and CLAUDE.md, which mean nothing upstream | code-reviewer | **ACCEPTED, and recorded in the upstream section below**: the 16 behavioural tests travel; the pin class is fork-only and stays behind |
+| LOW | three tests are non-regression pins that would stay green if S14 were reverted | code-reviewer | **DISMISSED with reason**: AC 5 and AC 6 *ask* for "byte-identical to today". They discriminate a buggy S14, not the feature's presence, which is their job. Probes B and C show they can go red |
+| LOW | the dict-insertion-order test is low marginal value | code-reviewer | **KEPT**: it is two lines and it is the only thing that would catch an implementation that iterated `answers` instead of `pending`. Cheap tripwire |
+| LOW | Approve + free text still executes the approved one | security-auditor | **NOT A DEFECT — the owner's decision.** Spec Open question 1, pinned by a test so a change to it is visible |
+
+**Rollback plan.** The engine change is one `if` inside `_prepare_resume` and one module-level
+helper. Restore `flow/lib/agent.py` from a byte backup (sha256 `605bf665…de5b8c` is the shipped
+state; `d10a9098…ab7b79` is `veyqon`'s) and delete `flow/tests/test_deny_stops_batch.py`. No
+migration, no doctype change, no stored data to undo.
+
+**Upstream.** `upstreamable: yes`, with one split. Cut from `develop`, engine only:
+- `flow/lib/agent.py` — clean as written: tabs, matching idiom, no fork references.
+- `flow/tests/test_deny_stops_batch.py` — take `TestDenyStopsTheBatch` and
+  `TestWhatS14MustNotChange` (16 tests). **Leave `TestTheLoadBearingFunctionsAreUntouched` behind**:
+  it is a fork tripwire for CLAUDE.md rule 4 and names things upstream has no notion of. Reword the
+  module docstring to drop "S14".
+- Conventional commit message: the one on `3ae3267`, unchanged — it was written for an upstream
+  reader and names nothing internal.
+
+**The QA adversary's one gap, closed.** All 18 original tests drove `Agent.resume` directly; none
+went through the session and API layer a client actually uses. It proved the behaviour holds there
+with a throwaway test and deleted it. That test is now permanent —
+`TestItHoldsThroughTheWholeStack.test_a_deny_in_the_batch_executes_nothing_through_the_public_resume`
+drives `flow.api.api.resume_run` against a record-backed session and reads the stored transcript
+back, so a future reshaping of the answers map or the prompt messages cannot quietly undo the
+withholding. It was probed: reverting `_prepare_resume` turns it **RED**.
+
+**The QA adversary's mutation results, recorded because two of them are honest negatives.** Six
+mutations, each restored by byte copy and verified: `_withheld_confirmation` returning `""` → RED ·
+dropping the `requires_confirmation` condition → RED · reverting `_prepare_resume` → RED on exactly
+the six S14 tests · moving `denied_group` inside the loop → GREEN (a genuinely equivalent mutant —
+`answers` does not change mid-loop) · `is` instead of `==` → GREEN (CPython interns the literal, so
+this mutation cannot be detected by any test; the code uses `==`) · `in ("Approve",)` → GREEN
+(exactly equivalent). The two GREENs are equivalent mutants, not coverage gaps.
