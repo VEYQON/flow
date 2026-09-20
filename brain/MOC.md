@@ -13,11 +13,14 @@ The hub. If a note isn't linked from here, it's lost.
 
 ## Work in flight
 - **Specs** → `10-specs/`
-  - [[10-specs/f3-turn-context|F3 — per-turn context]] (draft)
+  - [[10-specs/f3-turn-context|F3 — per-turn context]] (implemented 2026-09-19, awaiting review)
 - **Inbox** → `00-inbox/`
   - [[00-inbox/instructions-frozen-at-first-turn]]
   - [[00-inbox/worded-refusal-reproposes]]
   - [[00-inbox/stream-disconnect-loses-output]]
+  - [[00-inbox/trigger-runs-name-scheduler-as-the-person]]
+  - [[00-inbox/prompt-prefix-is-inferred-not-declared]]
+  - [[00-inbox/a-users-own-name-can-contain-a-vendor-word]]
 
 ## Decisions
 - **ADRs** → `20-adr/` — immutable. Supersede, never edit.

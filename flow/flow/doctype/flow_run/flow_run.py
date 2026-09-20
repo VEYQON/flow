@@ -224,9 +224,15 @@ def _status_from_result(result: RunResult) -> str:
 
 
 def _new_messages_for_session(session: str, full_transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
-	"""Return new messages produced by this run, excluding the session's prior history."""
+	"""Return new messages produced by this run, excluding the session's prior history and any
+	per-turn messages the prompt carried but the session never stored."""
+	# Local import to match this module's own convention for cross-controller calls (see the
+	# same pattern in `stream_with_persistence`); there is no import cycle to avoid here.
+	from flow.flow.doctype.flow_session.flow_session import ephemeral_prompt_prefix
+
 	existing = frappe.db.count("Flow Session Message", {"parent": session})
-	return list(full_transcript[existing:])
+	prefix = ephemeral_prompt_prefix(session, full_transcript)
+	return list(full_transcript[existing + prefix :])
 
 
 def _dump_json(value: Any) -> str | None:
