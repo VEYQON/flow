@@ -21,6 +21,7 @@ The hub. If a note isn't linked from here, it's lost.
   - [[10-specs/s15-resume-fails-closed|S15 — an approval must never be silently swallowed]] (implemented 2026-09-20, awaiting review)
   - [[10-specs/s16a-memory-is-data|S16a — memory is data, and agent-wide memory is not writable from a conversation]] (implemented 2026-09-20, awaiting review)
   - [[10-specs/s16b-gates-cannot-be-unset|S16b — an approval switch cannot be turned off by accident]] (implemented 2026-09-20, awaiting review)
+  - [[10-specs/s16c-memory-by-construction|S16c — an unattended run keeps no notes by construction, and a kept note is budgeted]] (implemented 2026-09-20, awaiting review)
 - **Inbox** → `00-inbox/`
   - [[00-inbox/instructions-frozen-at-first-turn]] (resolved by E2)
   - [[00-inbox/worded-refusal-reproposes]]
@@ -32,6 +33,7 @@ The hub. If a note isn't linked from here, it's lost.
   - [[00-inbox/a-model-can-drop-the-approval-sentence]]
   - [[00-inbox/a-deny-does-not-stop-the-batch]] (resolved by S14)
   - [[00-inbox/an-approval-is-swallowed-when-the-tool-is-gone]] (resolved by S15)
+  - [[00-inbox/known-defects-ranking]] — the three unclaimed known defects, ranked, with a recommendation for S17
 
 ## Decisions
 - **ADRs** → `20-adr/` — immutable. Supersede, never edit.
