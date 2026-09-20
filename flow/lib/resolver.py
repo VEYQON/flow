@@ -53,7 +53,13 @@ def _resolve_module(doc: FlowTool) -> Tool:
 		)
 
 	if isinstance(obj, Tool):
-		return _build_tool(doc, obj.parameters, obj.func, confirm_prompt=obj.confirm_prompt)
+		return _build_tool(
+			doc,
+			obj.parameters,
+			obj.func,
+			confirm_prompt=obj.confirm_prompt,
+			code_requires_confirmation=obj.requires_confirmation,
+		)
 	if callable(obj):
 		return _build_tool(doc, build_schema(obj), obj)
 	frappe.throw(
@@ -67,13 +73,27 @@ def _resolve_script(doc: FlowTool, *, restrict_commit_rollback: bool = False) ->
 	return _build_tool(doc, schema_from_code(doc.code), runner)
 
 
-def _build_tool(doc: FlowTool, parameters: dict[str, Any], func: Any, *, confirm_prompt: Any = None) -> Tool:
+def _build_tool(
+	doc: FlowTool,
+	parameters: dict[str, Any],
+	func: Any,
+	*,
+	confirm_prompt: Any = None,
+	code_requires_confirmation: bool = False,
+) -> Tool:
 	return Tool(
 		name=doc.slug,
 		description=doc.description,
 		parameters=parameters,
 		func=func,
-		requires_confirmation=bool(doc.requires_confirmation),
+		# A record may turn an approval ON. It may not take one OFF that the imported function
+		# declares for itself. The record decides which tools an agent has and what they are
+		# called; it does not get to decide that the function behind it stopped changing data.
+		#
+		# Without this, a second record importing the same function under a different name ran it
+		# ungated — and nothing repaired that one, because the sync only ever visits records named
+		# for a builtin. The two records ran the identical function object; only the name differed.
+		requires_confirmation=bool(doc.requires_confirmation) or bool(code_requires_confirmation),
 		confirm_prompt=confirm_prompt,
 		title=doc.title,
 		# .get, not attribute access: on a site running this code before its migration the field

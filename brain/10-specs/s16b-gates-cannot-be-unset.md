@@ -88,7 +88,39 @@ nothing that already exists.
 Builtin rows are unaffected: `sync_builtin_tools` passes the flag explicitly on insert, so a read
 tool is still created ungated.
 
-### D5 — the registry test
+### D5 — a code-declared approval is a floor a record cannot lower
+Added during verification, and it is what makes D2's claim true rather than nearly true.
+
+The refusal keys on the **slug**; the runtime executes the **import path**; nothing tied the two.
+So a second Flow Tool record importing `flow.tools.builtins.delete` under a name the
+classification has never heard of ran it **ungated, permanently** — the sync only ever visits
+records named for a builtin, so no deploy repaired it. Both routes to it are ordinary desk saves.
+
+`resolver._build_tool` now takes the imported object's own `requires_confirmation` as a floor:
+a record may turn an approval **on**, and may not take one **off** that the function declares for
+itself. `_resolve_module` already forwarded the imported tool's `confirm_prompt` and pointedly did
+not forward its approval; that asymmetry was the whole defect.
+
+One line, and it closes three things at once: the alias record above, the slug rename below, and
+most of **R1** — a `db.set_value` that unchecks a builtin's record now produces a record that
+disagrees with its own code until the next deploy, rather than an ungated write tool.
+
+`slug` also joins `validate_immutable`'s frozen tuple. It was editable on a system-generated
+record, and the refusal keys on it: renaming the shipped `delete` record's slug moved it out of the
+classification and unchecked the approval **in the same save**, and the rename guard never fired
+because a record keeps its name when its slug changes.
+
+### D6 — the classification cannot be repaired the easy wrong way
+Totality is not enough, and this was demonstrated, not imagined: with `execute` moved from
+`WRITE_CAPABLE` into `READ_ONLY` — the first thing a hurried maintainer does to a failing
+classification test — **the whole module stayed green** while arbitrary code execution lost its
+refusal.
+
+So the two lists are tied to the shipped flags: every write-capable tool ships gated and **every
+read-only one ships ungated**. Moving a tool between the lists now contradicts its own code and
+goes red on the next run.
+
+### D7 — the registry test
 A new file, adapted from the audit's proposal, asserting both halves separately because they are
 different values: the **code** flag (what ships, and what a migrate copies) and the **row** flag
 (what production reads). It carries two controls — the registry is not empty, and a read tool is
@@ -97,6 +129,16 @@ and rolls it back, so the gate is proven red inside the run that proves it green
 
 ## Acceptance criteria
 See `s16b-gates-cannot-be-unset.features.json`.
+
+> **D5 and D6 arrived during verification, after the contract was written and committed, and are
+> deliberately NOT in `features.json`** — that file may only have its `passes` values flipped
+> (workflow rule 4). Each is proved by a named test and by a probe that turned it red:
+> `test_a_second_record_importing_a_write_function_is_still_gated` and
+> `test_a_shipped_records_slug_cannot_be_changed` for D5,
+> `test_nothing_gated_can_be_called_read_only` for D6, plus
+> `test_the_shipped_doctype_declares_the_gated_default` and
+> `test_an_explicit_choice_still_beats_the_default`. **Adding the five entries is a one-line change
+> for a human.**
 
 ## What a real migrate showed
 D4's default only takes effect once the doctype is applied to a site, so the change was measured
@@ -116,13 +158,25 @@ hand-written tool that can write anything was created ungated") and **green** af
 doctype JSON as the only change in between.
 
 ## Risks
-- **R1 — `db.set_value` bypasses `validate`.** Anything that writes the field that way is not
-  refused. That includes `sync_builtin_tools` itself, which is why the sync still works. A
-  determined System Manager with server-script access can still reach it. This raises the cost of
-  an accident from one click to one script; it is not a containment control against someone who can
-  run code, and it is not sold as one.
-- **R2 — the classification is by hand.** `WRITE_CAPABLE` is a list a person maintains. The test
-  that fails when a builtin is in neither list is what keeps it honest, and that test is the gate.
+- **R1 — `db.set_value` bypasses `validate`, and that is now much less interesting.** Anything that
+  writes the column directly is not refused — including `sync_builtin_tools`, which is why the sync
+  still works. **But since D5 the record is no longer the only say:** an imported tool that declares
+  its own approval keeps it, so a column written behind `validate`'s back produces a record that
+  disagrees with its own code until the next deploy, not an ungated write tool. What remains
+  genuinely open is a Script tool, whose code nothing can classify, and anyone who can run server
+  code, who was never contained by any of this. **The first version of this Risk was wrong in the
+  other direction** — it claimed `db.set_value` was "the one route this does not close" while two
+  ordinary desk saves were open. The security review found both.
+- **R2 — the classification is by hand.** `WRITE_CAPABLE` is a list a person maintains. Two tests
+  keep it honest, and it took a reviewer to show that one was not enough: totality (a builtin in
+  neither list is red) **and** agreement with the shipped flags (a read-only tool that ships gated
+  is red). Without the second, the repair for a red classification test was to move the tool.
+- **R5 — a slug listed in `WRITE_CAPABLE` whose tool ships ungated aborts the sync.** The insert
+  branch of `sync_builtin_tools` passes the code flag straight to `insert`, which runs `validate`,
+  which would throw — during `after_migrate`. It cannot happen here (every listed tool ships
+  gated, asserted) but it is the failure mode to know about before adding an entry, and it is why
+  **this change cannot be taken upstream without S16a**: upstream's memory tool ships ungated, so
+  `update_memory` in this list would abort an install there.
 - **R3 — an administrator who genuinely wants a tool ungated now cannot have it.** No override is
   built. **Open question 1.**
 - **R4 — the new default changes what "new Flow Tool" means.** Any existing flow that created a

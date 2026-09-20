@@ -562,12 +562,15 @@ def run_action(
 # TOTAL — a tool added to BUILTIN_TOOLS and to neither list turns the suite red, so nobody can add
 # a write tool without deciding, in writing, that it writes.
 #
-# Read by `FlowTool.validate`, which refuses to save one of these rows with its approval turned off.
+# Read by `FlowTool.validate`, which refuses to save one of these records with its approval turned
+# off. So a slug listed here whose tool ships UNGATED would abort the sync — the insert branch below
+# passes the code flag straight to `insert`, which validates, which would throw during a migrate.
+# A test asserts the two never disagree, in both directions.
 WRITE_CAPABLE: dict[str, str] = {
 	"create": "inserts records",
 	"update": "saves records",
 	"delete": "deletes records",
-	"run_action": "submits, cancels, amends, renames, moves a workflow, or calls a whitelisted method",
+	"run_action": "submits, cancels, amends, renames, moves a workflow, or calls a method a record exposes",
 	"execute": "runs code that can do any of the above, and can send mail",
 	"update_memory": "writes a note the agent is given back on later turns",
 }
