@@ -264,7 +264,21 @@ def run_scenario(scenario: dict[str, Any]) -> Result:
 		tools=_build_tools(scenario.get("tools", []), executed),
 	)
 
-	result = agent.run(scenario["user_message"])
+	try:
+		result = agent.run(scenario["user_message"])
+	except Exception as e:
+		# A scenario that does not behave as written must FAIL, not take the suite down with it.
+		# The commonest shape is the important one: a scenario expecting a pause, run against an
+		# engine that does not pause, walks on to a turn the script does not have. That is exactly
+		# what measuring a scenario against an older engine looks like, and the answer to it is a
+		# red row with the reason on it — not a traceback and no summary line at all.
+		return Result(
+			scenario["name"],
+			scenario.get("description", ""),
+			False,
+			[f"the run raised {type(e).__name__}: {e}"],
+			known_defect=_known_defect(scenario),
+		)
 
 	if expect.get("pauses") is not None and result.paused != bool(expect["pauses"]):
 		failures.append(f"expected paused={expect['pauses']}, saw paused={result.paused}")
