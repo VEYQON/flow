@@ -107,13 +107,40 @@ and no caller text is echoed. See Risks and Open question 2.
   other now has to answer again for the first. That is the cost of the rule and it is the point of
   the decision.
 - **A stray answer key withholds a whole group.** Same direction as S14's, and the same reason.
+  The security review confirmed this is unreachable from the shipped client, which builds the
+  answer map from the current pause's own questions and refuses to send until each is answered.
+- **THE BIGGEST COST, and it was missing from the first draft of this spec.** A pause can hold an
+  approval question *and* a question a tool asked itself — a shape upstream supports on purpose
+  (`TestAgentConsultation`). Under all-or-nothing the group is unanimous only if every answer is
+  exactly `"Approve"`, and the answer to "which folder?" is never the word "Approve". **So there
+  is no answer the person can give that both answers the question and lets the write they
+  approved go ahead.** The run continues and the model can re-ask, so it is a livelock with a
+  human in it rather than a deadlock, and it fails closed — but a model that keeps batching the
+  two keeps producing it. Found by this branch's security review and now pinned by
+  `TestWhatOptionBCosts`, which asserts both what B does and what A would have done.
+  **A variant worth considering if B is chosen:** scope the unanimity test to the *gated* subset
+  of the pause, so a consultation beside an approval does not withhold it. That is a different
+  rule from the one this branch was asked to build, so it is not built here — **Open question 3.**
+- **B binds batches only.** A model that wants three writes approved can emit them one per turn
+  and is entirely unaffected. That is the status quo rather than a regression, but B should not
+  be mistaken for a containment control: it buys coherence of consent in the interface, not a
+  boundary against a model that is trying.
 
 ## Open questions
 1. **This whole branch is the question.** Both options are written up, with the test that pins
    each, in [[10-specs/s14-deny-stops-batch]] Open question 1. Merging this branch chooses B.
 2. **If B is chosen, should the withheld message be reworded** so it does not claim a denial that
-   did not happen? One line, in `_withheld_confirmation` — a rule-4 function, so it needs a spec
-   that names it.
+   did not happen? On this branch that fixed record is emitted for free text and for unanswered
+   questions, where nobody denied anything. The security review noted the tail: the model may
+   tell the person "you denied X" when they only asked a clarifying question, and if that turn is
+   ever distilled into agent memory, a false "this user denies writes" can outlive the session.
+   No injection vector — nothing caller-supplied is echoed — so it is correctness, weighted by
+   the fact that this string is one of very few things the model is told about a human decision.
+   One line, choosing between two literals. **`_withheld_confirmation` is NOT on rule 4's list**,
+   so it can change under a spec that names it.
+3. **If B is chosen, should the unanimity test be scoped to the GATED calls only?** See Risks.
+   It would remove B's largest cost — a consultation beside an approval no longer withholds it —
+   at the price of a rule that is harder to state in one sentence. Not built here.
 
 ## The gate on this branch is RED, on purpose, and it is the deliverable
 `MIN_TESTS=690 scripts/run-tests.sh` → **`EXIT=1 TESTS_RUN=706 FAILURE_LINES=0... GATE=RED`**, with
@@ -129,6 +156,12 @@ being made.
 
 **If option B is adopted**, updating that one test is part of accepting the decision, and it is a
 human's edit to make. **If option A stands**, this branch is dropped and nothing else changes.
+
+**A permanently red branch is easy to merge by accident**, and the gate reports only
+`reason=exit-1,failures-in-output` — the *why* lives in the test's name and in this file. The
+security review's recommendation, which I pass on unchanged: whichever option wins, **delete the
+loser's pin in the same commit that records the decision, citing it**, so the red state never
+outlives the choice.
 
 ## Links
 - [[10-specs/s14-deny-stops-batch]] — Open question 1, which this branch exists to answer.

@@ -24,7 +24,7 @@ from typing import Any, ClassVar
 from frappe.tests import UnitTestCase
 
 from flow.lib import agent as agent_module
-from flow.lib.agent import Agent, Done, ToolEnded
+from flow.lib.agent import Agent, Done, Question, ToolEnded
 from flow.lib.model import ChatResponse, ToolCall
 from flow.lib.tool import tool
 
@@ -219,6 +219,61 @@ class TestEveryAnswerInAGroupMustBeApprove(UnitTestCase):
 		ended = {e.id: e.result for e in events if isinstance(e, ToolEnded)}
 		self.assertEqual(json.loads(ended["k1"]), WITHHELD)
 		self.assertTrue(any(isinstance(e, Done) for e in events))
+
+
+class TestWhatOptionBCosts(UnitTestCase):
+	"""The strongest argument against this rule, pinned as a test rather than left in prose.
+
+	A pause can hold an approval question AND a question a tool asked itself — upstream supports
+	that shape deliberately (`TestAgentConsultation` in `flow/tests/test_ai_agent.py`). Under
+	all-or-nothing, the group is unanimous only if every answer is exactly "Approve", and the
+	answer to "which folder?" is never the word "Approve". So the person has no answer they can
+	give that both answers the question and lets the write they approved go ahead.
+
+	It fails closed and the run continues, so the model can ask again — it is a cost, not a hole.
+	But it is the case where option B is most expensive, and a decision made without it in front
+	of the owner would be a decision made on half the evidence. Found by the security review of
+	this branch.
+	"""
+
+	def _pause_on_a_write_beside_a_consultation(self, recorder: _Recorder, extra=None):
+		@tool
+		def pick_folder(hint: str) -> Question:
+			"""Ask which folder to use."""
+			return Question(prompt="Which folder?", options=["Invoices", "Receipts"])
+
+		model = FakeModel(
+			[
+				_calls(
+					("send_money", {"to": "alice", "amount": 500}, "k1"),
+					("pick_folder", {"hint": "sales"}, "k2"),
+				),
+				*(extra or []),
+			]
+		)
+		agent = Agent(model=model, tools=[*recorder.tools, pick_folder])
+		return agent, agent.run("pay alice, and which folder?")
+
+	def test_answering_the_consultation_withholds_the_write_that_was_approved(self):
+		recorder = _Recorder()
+		agent, paused = self._pause_on_a_write_beside_a_consultation(recorder, [_final("ok")])
+
+		resumed = agent.resume(paused.messages, {"k1": "Approve", "k2": "Invoices"})
+
+		self.assertEqual(recorder.ran, [], "this is what option B costs; see the class docstring")
+		self.assertEqual(json.loads(_tool_results(resumed.messages)["k1"]), WITHHELD)
+		self.assertEqual(_tool_results(resumed.messages)["k2"], "Invoices")
+
+	def test_and_under_option_a_that_same_answer_executes_the_write(self):
+		"""The other half of the comparison, asserted on the same engine by giving the group a
+		second exact "Approve" — the only answer shape under which B lets the write through.
+		Read together, these two say precisely what the decision changes."""
+		recorder = _Recorder()
+		agent, paused = self._pause_on_a_write_beside_a_consultation(recorder, [_final("ok")])
+
+		agent.resume(paused.messages, {"k1": "Approve", "k2": "Approve"})
+
+		self.assertEqual(recorder.ran, [("send_money", {"to": "alice", "amount": 500})])
 
 
 class TestWhatMustNotChange(UnitTestCase):

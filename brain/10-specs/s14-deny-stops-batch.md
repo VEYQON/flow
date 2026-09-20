@@ -152,6 +152,7 @@ plain literal and not translated — matching the file rather than reformatting 
    | `{Approve, Deny}` | nothing executes, run halts | identical |
    | `{Approve, Approve}` | both execute | identical |
    | **one** question, any answer | — | **byte-identical**, and pinned by its own test |
+   | `{Approve, "Invoices"}` — a write beside a question a TOOL asked | `k1` executes, the answer resolves the consultation | **nothing executes, and there is no answer that would work.** B's largest cost; pinned by `TestWhatOptionBCosts` |
    | the diff | — | one predicate and one helper; the four rule-4 functions untouched |
    | pinned by | AC 9 → `test_approve_beside_free_text_still_executes_the_approved_one_and_redirects_the_other` | `flow/tests/test_all_or_nothing.py`, 18 tests |
 

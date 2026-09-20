@@ -28,6 +28,7 @@ The hub. If a note isn't linked from here, it's lost.
   - [[00-inbox/approval-question-never-reaches-the-approver]]
   - [[00-inbox/a-model-can-drop-the-approval-sentence]]
   - [[00-inbox/a-deny-does-not-stop-the-batch]] (resolved by S14)
+  - [[00-inbox/one-approval-can-execute-two-writes]] (pre-existing; found by S14b's review)
 
 ## Decisions
 - **ADRs** → `20-adr/` — immutable. Supersede, never edit.
