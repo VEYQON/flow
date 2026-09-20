@@ -208,19 +208,34 @@ class Agent:
 		self, messages: list[dict[str, Any]], answers: dict[str, Any]
 	) -> tuple[list[dict[str, Any]], list[tuple[ToolCall, str]]]:
 		"""Append a tool result for each pending call. Returns the new messages plus the
-		(call, content) pairs resolved, so a streaming resume can replay them as events."""
+		(call, content) pairs resolved, so a streaming resume can replay them as events.
+
+		A pause can hold several questions, and they are answered as one group. If any answer
+		in the group is a denial, nothing in the group runs: an "Approve" beside it is recorded
+		as approved and withheld rather than executed. Refusing one of several actions shown
+		together is refusing all of them, not leaving the rest to go ahead.
+
+		The denial is read from the same `_has_denial` the caller uses to halt the run, so the
+		halt and the withholding can never disagree about what the answers said.
+		"""
 		_validate_messages(messages)
 		messages = list(messages)
 		pending = self._pending_calls(messages)
 		if not pending:
 			raise ValueError("No questions awaiting an answer in the provided messages")
 
+		denied_group = _has_denial(answers)
 		resolved: list[tuple[ToolCall, str]] = []
 		for call in pending:
 			answer = answers.get(call.id)
 			tool = self._tools_by_name.get(call.name)
 			if tool is not None and tool.requires_confirmation:
-				content = self._resolve_confirmation(call, answer)
+				# Only the exact "Approve" ever executes, so that is the only answer the group's
+				# denial has to hold back; everything else resolves exactly as it always has.
+				if denied_group and answer == "Approve":
+					content = _withheld_confirmation()
+				else:
+					content = self._resolve_confirmation(call, answer)
 			else:
 				content = _serialize_tool_result(answer)
 			messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
@@ -578,6 +593,22 @@ def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
 		prompt=_("Approve {0}?").format(title or f"`{call.name}`") + "\n\n" + body,
 		options=["Approve", "Deny"],
 		allow_other=True,
+	)
+
+
+def _withheld_confirmation() -> str:
+	"""Result for a call the user approved inside a group that also held a denial.
+
+	It says approved-and-not-run, which is not the same as denied and not the same as never
+	asked. `user_answer` is a fixed literal, not the value from the answers map: nothing a
+	caller supplies is echoed back into the model's context from here.
+	"""
+	return json.dumps(
+		{
+			"status": "not_executed",
+			"message": "Nothing in this group ran. The user approved this action but denied another action in the same group.",
+			"user_answer": "Approve",
+		}
 	)
 
 
