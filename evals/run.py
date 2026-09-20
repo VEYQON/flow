@@ -160,6 +160,29 @@ def _check_tool_calls(expected: list[dict[str, Any]], actual, failures: list[str
 				)
 
 
+def _check_tool_results(expected: dict[str, Any], messages, label: str, failures: list[str]) -> None:
+	"""Assert on what each pending call was told, by tool_call_id.
+
+	`executed` says what ran; this says what the model was handed. They are different questions,
+	and the defect that motivated this one is invisible to the first: nothing ran, and the
+	person's own answer was written in as the tool's output.
+	"""
+	results = {m["tool_call_id"]: m["content"] for m in messages if m.get("role") == "tool"}
+	for call_id, checks in expected.items():
+		if call_id not in results:
+			failures.append(f"[{label}] no tool result was recorded for {call_id!r}")
+			continue
+		content = results[call_id]
+		for text in checks.get("contains") or []:
+			if text not in content:
+				failures.append(f"[{label}] {call_id} result does not contain {text!r}: {content!r}")
+		for text in checks.get("absent") or []:
+			if text in content:
+				failures.append(f"[{label}] {call_id} result must not contain {text!r}: {content!r}")
+		if "equals" in checks and content != checks["equals"]:
+			failures.append(f"[{label}] {call_id} result is {content!r}, expected {checks['equals']!r}")
+
+
 def _check_absent_text(forbidden: list[str], haystack: str, where: str, failures: list[str]) -> None:
 	for text in forbidden:
 		if text.lower() in haystack.lower():
@@ -210,7 +233,13 @@ def run_scenario(scenario: dict[str, Any]) -> Result:
 
 
 def _run_answer_case(scenario, label, case, paused, forbidden, failures) -> None:
-	"""Replay the pause with one answer set, on a fresh agent, and assert what actually ran."""
+	"""Replay the pause with one answer set, on a fresh agent, and assert what actually ran.
+
+	A case may give its own `tools`, which replace the scenario's for the resume only. That is
+	not a convenience: the runtime that resumes a run is rebuilt from a record and is not
+	necessarily the one that paused it, so a tool can be gone, renamed or no longer gated by the
+	time a person's answer arrives. A scenario cannot describe that without saying it.
+	"""
 	from flow.lib.agent import Agent
 
 	executed: list[tuple[str, dict[str, Any]]] = []
@@ -219,13 +248,18 @@ def _run_answer_case(scenario, label, case, paused, forbidden, failures) -> None
 		model=model,
 		name=scenario["name"],
 		instructions=scenario.get("agent", {}).get("instructions"),
-		tools=_build_tools(scenario.get("tools", []), executed),
+		tools=_build_tools(case.get("tools", scenario.get("tools", [])), executed),
 	)
 	try:
+		# Deliberately no record of what was asked: a scenario must run against any engine in
+		# this repository's history, so the runner uses only the call every version has. The
+		# missing-tool case below needs no such record — that is part of what it establishes.
 		resumed = agent.resume([dict(m) for m in paused.messages], case["answers"])
 	except Exception as e:  # a scenario that cannot even resume is a failure, not a crash
 		failures.append(f"[{label}] resume raised {type(e).__name__}: {e}")
 		return
+
+	_check_tool_results(case.get("tool_results") or {}, resumed.messages, label, failures)
 
 	ran = [name for name, _args in executed]
 	if sorted(ran) != sorted(case.get("executed", [])):

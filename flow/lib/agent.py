@@ -36,6 +36,24 @@ CONFIRM_PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]{0,63})\}")
 # Shown whole, or not at all. `None`, lists and objects are not; the arguments below the sentence
 # show them properly.
 CONFIRM_SCALAR_TYPES = (str, bool, int, float)
+# Every approval question the engine raises carries exactly these options, in this order —
+# `_confirmation_question` builds them and nothing else in the engine does. At resume they are how
+# a question the person was asked to APPROVE is told apart from a question a tool asked itself.
+CONFIRM_ANSWER_OPTIONS = ["Approve", "Deny"]
+# Said to the model when a pending call will not be acted on. Both are literals and neither carries
+# the person's answer: recording that answer as the call's result is the defect these exist to
+# stop, because the model then reads its own tool call as having returned the word a person typed.
+NOT_EXECUTED_MESSAGES = {
+	"unavailable": (
+		"This action was not carried out and nothing was done. It is no longer available. "
+		"Do not report it as done. Tell the user it did not happen."
+	),
+	"approval_no_longer_applies": (
+		"This action was not carried out and nothing was done. What it requires changed while the "
+		"question was open, so the answer that was given no longer applies to it. "
+		"Do not report it as done. Ask again before doing it."
+	),
+}
 VALID_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 
@@ -152,25 +170,34 @@ class Agent:
 		answers: dict[str, Any],
 		*,
 		stream: bool = False,
+		asked: list[Any] | None = None,
 	) -> RunResult | Generator[Event]:
 		"""Continue a run that paused on a question.
 
 		`answers` maps each pending tool_call_id to the user's answer: "Approve" runs
 		the tool, "Deny" records the rejection and stops the run, and any other free
 		text is returned to the LLM as redirect feedback so it can adjust and retry.
+
+		`asked` is the questions this pause raised, as they were recorded when it paused —
+		`Question`s or the rows stored from them. The runtime resuming a run is not always the
+		one that paused it, so what the person was asked cannot be re-derived from the tools
+		present now; it is read from the record or not at all. Passing nothing is supported and
+		safe: see `_prepare_resume`.
 		"""
 		if stream:
-			return self._resume_stream(messages, answers)
-		messages, _ = self._prepare_resume(messages, answers)
+			return self._resume_stream(messages, answers, asked)
+		messages, _ = self._prepare_resume(messages, answers, asked)
 		if _has_denial(answers):
 			return self._stopped_result(messages)
 		return self._loop(messages, self._answered_calls(messages))
 
-	def _resume_stream(self, messages: list[dict[str, Any]], answers: dict[str, Any]) -> Generator[Event]:
+	def _resume_stream(
+		self, messages: list[dict[str, Any]], answers: dict[str, Any], asked: list[Any] | None = None
+	) -> Generator[Event]:
 		"""Stream a resume: first replay the just-resolved tool results so the UI can fill in
 		the tool cards that were awaiting an answer, then continue the agent loop (or stop
 		if the user denied)."""
-		messages, resolved = self._prepare_resume(messages, answers)
+		messages, resolved = self._prepare_resume(messages, answers, asked)
 		for call, content in resolved:
 			yield ToolEnded(id=call.id, name=call.name, result=content)
 		if _has_denial(answers):
@@ -205,7 +232,7 @@ class Agent:
 		}
 
 	def _prepare_resume(
-		self, messages: list[dict[str, Any]], answers: dict[str, Any]
+		self, messages: list[dict[str, Any]], answers: dict[str, Any], asked: list[Any] | None = None
 	) -> tuple[list[dict[str, Any]], list[tuple[ToolCall, str]]]:
 		"""Append a tool result for each pending call. Returns the new messages plus the
 		(call, content) pairs resolved, so a streaming resume can replay them as events.
@@ -217,6 +244,22 @@ class Agent:
 
 		The denial is read from the same `_has_denial` the caller uses to halt the run, so the
 		halt and the withholding can never disagree about what the answers said.
+
+		The runtime that resumes a run is rebuilt from the record and is not always the one that
+		paused it, so a pending call's tool may be gone, or may no longer be gated. Neither may be
+		acted on and neither may be closed out with the person's own answer as the tool's result —
+		a person who approved something and was told it was done, when nothing ran, has been
+		misled by the engine rather than by anyone. Both fail closed, in that order:
+
+		1. the tool is not here at all — nothing can honour the answer, whatever it said;
+		2. the tool is here and gated — today's path, unchanged, group rule included;
+		3. the tool is here, is not gated, and the person was nonetheless asked to approve it, so
+		   the gate was turned off while the question was open — the basis of the answer is gone;
+		4. anything else — the tool asked its own question, and the answer is its result, as ever.
+
+		Row 3 reads `asked`, because it is the only thing that still knows what was asked. With
+		no record it cannot fire and behaviour is exactly what it was, which is the right
+		fallback for a run that paused before any of this existed; rows 1 and 2 need no record.
 		"""
 		_validate_messages(messages)
 		messages = list(messages)
@@ -225,17 +268,22 @@ class Agent:
 			raise ValueError("No questions awaiting an answer in the provided messages")
 
 		denied_group = _has_denial(answers)
+		approval_keys = _approval_question_keys(asked)
 		resolved: list[tuple[ToolCall, str]] = []
 		for call in pending:
 			answer = answers.get(call.id)
 			tool = self._tools_by_name.get(call.name)
-			if tool is not None and tool.requires_confirmation:
+			if tool is None:
+				content = _not_executed("unavailable")
+			elif tool.requires_confirmation:
 				# Only the exact "Approve" ever executes, so that is the only answer the group's
 				# denial has to hold back; everything else resolves exactly as it always has.
 				if denied_group and answer == "Approve":
 					content = _withheld_confirmation()
 				else:
 					content = self._resolve_confirmation(call, answer)
+			elif call.id in approval_keys:
+				content = _not_executed("approval_no_longer_applies")
 			else:
 				content = _serialize_tool_result(answer)
 			messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
@@ -594,6 +642,40 @@ def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
 		options=["Approve", "Deny"],
 		allow_other=True,
 	)
+
+
+def _approval_question_keys(asked: list[Any] | None) -> frozenset[str]:
+	"""The keys of the questions in a pause that asked a person to APPROVE something.
+
+	Read from the questions the pause raised, never from the runtime — the runtime is the thing
+	that may have changed. An approval question is known by its options: every one the engine
+	raises carries `CONFIRM_ANSWER_OPTIONS`, in that order, and nothing else in the engine does.
+
+	Accepts `Question`s or the rows stored from them, because the caller that has this record is
+	usually reading it back from storage. Anything it cannot read is simply not an approval
+	question here: the branch this guards only ever withholds, so failing to recognise one costs
+	today's behaviour and never an unasked execution.
+	"""
+	keys: set[str] = set()
+	for question in asked or []:
+		if isinstance(question, dict):
+			key, options = question.get("key"), question.get("options")
+		else:
+			key, options = getattr(question, "key", None), getattr(question, "options", None)
+		if isinstance(key, str) and options == CONFIRM_ANSWER_OPTIONS:
+			keys.add(key)
+	return frozenset(keys)
+
+
+def _not_executed(reason: str) -> str:
+	"""Result for a pending call the engine will not act on, because the tool is gone or because
+	the approval that was given no longer applies to it.
+
+	Every part of this is a literal. The person's answer is deliberately absent: writing it here
+	is the defect this exists to stop, since the model then reads its own tool call as having
+	returned the word a person typed, and may report the action done when nothing ran.
+	"""
+	return json.dumps({"status": "not_executed", "reason": reason, "message": NOT_EXECUTED_MESSAGES[reason]})
 
 
 def _withheld_confirmation() -> str:
