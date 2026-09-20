@@ -1,9 +1,10 @@
 ---
 type: spec
-status: approved     # draft → approved (HUMAN ONLY) → in-progress → implemented
+status: implemented  # draft → approved (HUMAN ONLY) → in-progress → implemented
 approved-by: owner pre-approval for unattended run 5 2026-09-20 — REVIEW BEFORE MERGE
 created: 2026-09-20
-upstreamable: yes
+implemented: 2026-09-20
+upstreamable: partly
 ---
 # Spec: S15 — an approval must never be silently swallowed
 
