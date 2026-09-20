@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,26 @@ class Result:
 	description: str
 	passed: bool
 	failures: list[str] = field(default_factory=list)
+	known_defect: str | None = None
+
+	@property
+	def verdict(self) -> str:
+		"""Four outcomes, not two.
+
+		A scenario carrying `known_defect` describes something this project has PROVEN is wrong
+		and has not fixed. It asserts the RIGHT behaviour and is expected to fail. It must not be
+		allowed to look like a pass — that would bury the defect — and it must not be allowed to
+		make the suite red either, because a defect already written down is not news and a suite
+		that is permanently red stops being read.
+
+		The fourth outcome is the one that earns the machinery: a known defect that starts
+		PASSING. Someone fixed the code and did not update the record, so the record is now
+		lying about the state of the system. That fails the suite, and it is the only one of the
+		four whose fix is to edit a scenario rather than the engine.
+		"""
+		if self.known_defect:
+			return "KNOWN-DEFECT" if not self.passed else "FIXED"
+		return "PASS" if self.passed else "FAIL"
 
 
 def load_scenarios(directory: Path = SCENARIO_DIR) -> list[dict[str, Any]]:
@@ -160,6 +181,38 @@ def _check_tool_calls(expected: list[dict[str, Any]], actual, failures: list[str
 				)
 
 
+def _as_list(value) -> list[str]:
+	"""A bare string in the YAML means one string, not a sequence of characters. Iterating it
+	directly would assert that a result contains "n", "o", "t"... which nearly anything does — a
+	check that cannot fail, written by a typo."""
+	if value is None:
+		return []
+	return [value] if isinstance(value, str) else list(value)
+
+
+def _check_tool_results(expected: dict[str, Any], messages, label: str, failures: list[str]) -> None:
+	"""Assert on what each pending call was TOLD, by tool_call_id.
+
+	`executed` says what ran; this says what the model was handed. They are different questions,
+	and some defects are invisible to the first: nothing runs, and the person's own answer is
+	written in as the tool's output.
+	"""
+	results = {m["tool_call_id"]: m["content"] for m in messages if m.get("role") == "tool"}
+	for call_id, checks in expected.items():
+		if call_id not in results:
+			failures.append(f"[{label}] no tool result was recorded for {call_id!r}")
+			continue
+		content = results[call_id]
+		for text in _as_list(checks.get("contains")):
+			if text not in content:
+				failures.append(f"[{label}] {call_id} result does not contain {text!r}: {content!r}")
+		for text in _as_list(checks.get("absent")):
+			if text in content:
+				failures.append(f"[{label}] {call_id} result must not contain {text!r}: {content!r}")
+		if "equals" in checks and content != checks["equals"]:
+			failures.append(f"[{label}] {call_id} result is {content!r}, expected {checks['equals']!r}")
+
+
 def _check_absent_text(forbidden: list[str], haystack: str, where: str, failures: list[str]) -> None:
 	for text in forbidden:
 		if text.lower() in haystack.lower():
@@ -206,11 +259,40 @@ def run_scenario(scenario: dict[str, Any]) -> Result:
 	for label, case in (expect.get("after") or {}).items():
 		_run_answer_case(scenario, label, case, result, forbidden, failures)
 
-	return Result(scenario["name"], scenario.get("description", ""), not failures, failures)
+	return Result(
+		scenario["name"],
+		scenario.get("description", ""),
+		not failures,
+		failures,
+		known_defect=_known_defect(scenario),
+	)
+
+
+def _known_defect(scenario: dict[str, Any]) -> str | None:
+	"""The recorded reason a scenario is expected to fail, or None.
+
+	A bare `true` is refused. A known defect that does not say what it is, and where it is written
+	down, is indistinguishable from a scenario somebody silenced.
+	"""
+	note = scenario.get("known_defect")
+	if note is None or note is False:
+		return None
+	if not isinstance(note, str) or not note.strip():
+		raise ValueError(
+			f"{scenario['name']}: known_defect must be a non-empty description of the defect, not {note!r}"
+		)
+	return " ".join(note.split())
 
 
 def _run_answer_case(scenario, label, case, paused, forbidden, failures) -> None:
-	"""Replay the pause with one answer set, on a fresh agent, and assert what actually ran."""
+	"""Replay the pause with one answer set, on a fresh agent, and assert what actually ran.
+
+	The agent is always fresh — never the one that paused — which is what a client reloading a
+	conversation produces. A case may also give its own `tools`, replacing the scenario's for the
+	resume only: the runtime that resumes a run is rebuilt from a record and is not necessarily
+	the one that paused it, so a tool can be gone, renamed or no longer gated by the time an
+	answer arrives, and a scenario cannot describe that without saying it.
+	"""
 	from flow.lib.agent import Agent
 
 	executed: list[tuple[str, dict[str, Any]]] = []
@@ -219,13 +301,17 @@ def _run_answer_case(scenario, label, case, paused, forbidden, failures) -> None
 		model=model,
 		name=scenario["name"],
 		instructions=scenario.get("agent", {}).get("instructions"),
-		tools=_build_tools(scenario.get("tools", []), executed),
+		tools=_build_tools(case.get("tools", scenario.get("tools", [])), executed),
 	)
 	try:
+		# Deliberately no record of what was asked: a scenario must run against any engine in
+		# this repository's history, so the runner uses only the call every version has.
 		resumed = agent.resume([dict(m) for m in paused.messages], case["answers"])
 	except Exception as e:  # a scenario that cannot even resume is a failure, not a crash
 		failures.append(f"[{label}] resume raised {type(e).__name__}: {e}")
 		return
+
+	_check_tool_results(case.get("tool_results") or {}, resumed.messages, label, failures)
 
 	ran = [name for name, _args in executed]
 	if sorted(ran) != sorted(case.get("executed", [])):
@@ -244,15 +330,31 @@ def _run_answer_case(scenario, label, case, paused, forbidden, failures) -> None
 
 def report(results: list[Result], out=sys.stdout) -> int:
 	width = max((len(r.name) for r in results), default=4)
-	print(f"{'SCENARIO'.ljust(width)}  RESULT  DESCRIPTION", file=out)
-	print(f"{'-' * width}  ------  -----------", file=out)
+	pad = " " * (width + 2)
+	print(f"{'SCENARIO'.ljust(width)}  RESULT        DESCRIPTION", file=out)
+	print(f"{'-' * width}  ------------  -----------", file=out)
 	for r in results:
-		print(f"{r.name.ljust(width)}  {'PASS  ' if r.passed else 'FAIL  '}  {r.description}", file=out)
+		print(f"{r.name.ljust(width)}  {r.verdict.ljust(12)}  {r.description}", file=out)
+		if r.verdict == "KNOWN-DEFECT":
+			print(f"{pad}              ! {r.known_defect}", file=out)
+		elif r.verdict == "FIXED":
+			print(
+				f"{pad}              ! this no longer reproduces. Drop `known_defect` from the "
+				f"scenario — the record now says something untrue. It was: {r.known_defect}",
+				file=out,
+			)
 		for failure in r.failures:
-			print(f"{' ' * width}          - {failure}", file=out)
-	passed = sum(1 for r in results if r.passed)
-	print(f"\nEVALS={len(results)} PASSED={passed} FAILED={len(results) - passed}", file=out)
-	return 0 if passed == len(results) else 1
+			print(f"{pad}              - {failure}", file=out)
+
+	counts = Counter(r.verdict for r in results)
+	print(
+		f"\nEVALS={len(results)} PASSED={counts['PASS']} FAILED={counts['FAIL']} "
+		f"KNOWN_DEFECT={counts['KNOWN-DEFECT']} FIXED={counts['FIXED']}",
+		file=out,
+	)
+	# A known defect does not fail the suite: it is already written down. A known defect that has
+	# started passing DOES, because the record is now wrong and only a person can correct it.
+	return 0 if not counts["FAIL"] and not counts["FIXED"] else 1
 
 
 def main(argv: list[str] | None = None) -> int:

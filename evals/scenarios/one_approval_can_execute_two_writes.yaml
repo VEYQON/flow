@@ -1,0 +1,38 @@
+name: one_approval_can_execute_two_writes
+description: Two tool calls sharing one id are both pending, and a single Approve executes the tool twice.
+known_defect: >-
+  Reproduces today, on veyqon and on develop. The transcript scan that finds pending calls does not
+  deduplicate by tool_call_id, so a model that emits a colliding id gets two pending calls, one
+  answer key covers both, and one "Approve" runs the tool twice. The interface stamps only the
+  first card, so a person sees one action and two happen. Captured at
+  brain/00-inbox/one-approval-can-execute-two-writes.md; no spec has claimed it yet.
+user_message: pay alice
+agent:
+  instructions: Be terse. Use the tools you are given.
+tools:
+  - name: send_money
+    description: Send money to someone.
+    requires_confirmation: true
+    result: sent
+    parameters:
+      type: object
+      properties:
+        to: {type: string}
+        amount: {type: integer}
+      required: [to, amount]
+model_script:
+  - tool_calls:
+      - {id: c1, name: send_money, arguments: {to: alice, amount: 500}}
+      - {id: c1, name: send_money, arguments: {to: alice, amount: 500}}
+expect:
+  pauses: true
+  tool_calls: []
+  after:
+    approved_once:
+      answers: {c1: Approve}
+      # THE CLAIM: one approval, one execution. Today the tool runs twice.
+      executed: [send_money]
+      model_script:
+        - content: paid
+      output: paid
+  absent_text: [frappe, erpnext, mariadb, openai, anthropic, gpt-, claude]

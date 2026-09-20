@@ -31,14 +31,22 @@ run.main($ARGS)
 # runner's table and nothing else.
 echo "$OUT" | sed -E 's/^In \[[0-9]+\]: //' | sed -n '/^SCENARIO/,/^EVALS=/p'
 
-SUMMARY="$(echo "$OUT" | grep -oE 'EVALS=[0-9]+ PASSED=[0-9]+ FAILED=[0-9]+' | tail -1)"
+SUMMARY="$(echo "$OUT" | grep -oE 'EVALS=[0-9]+ PASSED=[0-9]+ FAILED=[0-9]+ KNOWN_DEFECT=[0-9]+ FIXED=[0-9]+' | tail -1)"
 if [ -z "$SUMMARY" ]; then
 	echo "EVALS_GATE=RED reason=no-summary-line"
 	exit 1
 fi
-if [ "${SUMMARY##* }" = "FAILED=0" ]; then
-	echo "EVALS_GATE=GREEN"
-	exit 0
-fi
+
+# KNOWN_DEFECT is deliberately NOT part of the verdict. Those scenarios describe things this
+# project has proven are wrong and has not fixed; they are written down, so they are not news, and
+# letting them hold the gate red forever would make it stop being read. They are still printed,
+# with the reason, every single run.
+#
+# FIXED IS part of the verdict. A known defect that has started passing means the code was fixed
+# and the record was not — the suite is now asserting something untrue about the system, and only
+# a person can correct that.
+case "$SUMMARY" in
+	*"FAILED=0 "*"FIXED=0") echo "EVALS_GATE=GREEN"; exit 0 ;;
+esac
 echo "EVALS_GATE=RED reason=${SUMMARY// /,}"
 exit 1
