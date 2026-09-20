@@ -101,6 +101,23 @@ def _memory_call(content: str = "Widget A maps to WGT-001.", call_id: str = "m1"
 	)
 
 
+def _personal_memory_call(content: str = "Widget A maps to WGT-001.", call_id: str = "m1") -> ChatResponse:
+	"""A response that calls update_memory for a PERSONAL note, which pauses for approval.
+
+	Added beside `_memory_call` rather than changing it: that helper shapes the agent-scope call and
+	is not this run's to edit. Since the memory tool became a gated, personal-only write, a call from
+	a conversation asks for `scope="user"` and the run pauses instead of writing inline.
+	"""
+	return ChatResponse(
+		content=None,
+		tool_calls=[
+			ToolCall(id=call_id, name="update_memory", arguments={"content": content, "scope": "user"})
+		],
+		finish_reason="tool_calls",
+		usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+	)
+
+
 class TestStartRun(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
@@ -768,14 +785,27 @@ class TestSubmitFeedback(IntegrationTestCase):
 			submit_feedback(run, "Up")
 
 	def test_down_comment_saved_as_memory(self):
+		"""The subject is unchanged: a thumbs-down comment becomes a note stamped with the run.
+		What moved is who it belongs to. A thumbs-down is one person's opinion about one run, and it
+		used to become standing context that every user of the agent was then told, with nobody
+		asked. The scope assertion is replaced by a stronger pair: the note belongs to the person who
+		gave the feedback, and no shared note exists at all. The feedback is given by a named person
+		rather than the administrator, so "owned by whoever gave it" is measured and not assumed.
+		"""
+		person = _ensure_user("feedback-author@example.com")
+		frappe.set_user(person)
 		run = self._run()
 		result = submit_feedback(run, "Down", comment="Widget A maps to WGT-001.")
+
+		frappe.set_user("Administrator")
 		memory = frappe.get_doc("Flow Agent Memory", result["memory"])
 		self.assertEqual(memory.agent, self.agent.name)
-		self.assertEqual(memory.scope, "Agent")
+		self.assertEqual(memory.scope, "User")
+		self.assertEqual(memory.user, person)
 		self.assertEqual(memory.source, "Feedback")
 		self.assertEqual(memory.source_run, run)
 		self.assertEqual(memory.content, "Widget A maps to WGT-001.")
+		self.assertFalse(frappe.db.exists("Flow Agent Memory", {"agent": self.agent.name, "scope": "Agent"}))
 
 	def test_down_comment_without_memory_tool_records_but_skips_memory(self):
 		other = frappe.get_doc(_agent_doc(self.model.name, title="Feedback No Memory Agent")).insert()
@@ -828,14 +858,31 @@ class TestMemoryRunProvenance(IntegrationTestCase):
 		memory_store.drop_table()
 
 	def test_agent_memory_stamped_with_run_then_flag_cleared(self):
-		with patch.object(Model, "chat", side_effect=[_memory_call(), _final("done")]):
-			payload = start_run("remember the mapping", agent=self.agent.name)
+		"""The subject is unchanged: a note the agent writes carries the run that produced it, and
+		the run flag does not outlive the run. What moved is that keeping a note is now a write the
+		person is asked about first, and only a personal note may be kept from a conversation. So the
+		turn that proposes the note pauses and writes nothing, and the exact "Approve" performs the
+		write. Both halves are asserted here, and the flag is checked after each of them.
+		"""
+		with patch.object(Model, "chat", side_effect=[_personal_memory_call()]):
+			paused = start_run("remember the mapping", agent=self.agent.name)
 
-		self.assertEqual(payload["status"], "Completed")
+		# The proposing turn: it pauses, it writes nothing, and it leaves no flag behind.
+		self.assertEqual(paused["status"], "Paused")
+		self.assertFalse(frappe.db.exists("Flow Agent Memory", {"agent": self.agent.name}))
+		self.assertIsNone(frappe.flags.get("flow_run"))
+
+		with patch.object(Model, "chat", side_effect=[_final("done")]):
+			resumed = resume_run(paused["name"], {"m1": "Approve"})
+
+		self.assertEqual(resumed["status"], "Completed")
 		memory = frappe.get_doc("Flow Agent Memory", {"agent": self.agent.name})
+		self.assertEqual(memory.scope, "User")
+		self.assertEqual(memory.user, frappe.session.user)
 		self.assertEqual(memory.source, "Agent")
-		self.assertEqual(memory.source_run, payload["name"])
-		# The flag must not linger past the run that set it.
+		self.assertEqual(memory.source_run, paused["name"])
+		self.assertEqual(memory.content, "Widget A maps to WGT-001.")
+		# The flag must not linger past the run that set it, on the resume path either.
 		self.assertIsNone(frappe.flags.get("flow_run"))
 
 	def test_flag_cleared_when_run_fails(self):
