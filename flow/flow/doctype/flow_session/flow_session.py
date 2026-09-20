@@ -37,11 +37,19 @@ RETRIEVAL_TOP_K = 8
 MAX_USER_NAME_LENGTH = 100
 
 
-def _set_active_run(run: str | None) -> None:
+def _set_active_run(run: str | None, *, unattended: bool = False) -> None:
 	"""Record which run is executing, so memories the update_memory tool creates during it
 	are stamped with this run as their source_run. flow.memory.memory reads this flag;
-	stream_with_persistence clears it when a streamed run ends."""
+	stream_with_persistence clears it when a streamed run ends.
+
+	`unattended` records the other thing that tool needs to know: whether there is anybody to
+	answer a question. It is derived here from the run's own configuration — a trigger, or an
+	explicit auto-approve — and nothing the model says can reach it. A run with nobody to answer
+	keeps no notes, because the alternative is parking it in Paused forever or writing memory
+	with every gate turned off.
+	"""
 	frappe.flags.flow_run = run
+	frappe.flags.flow_unattended = bool(run) and unattended
 
 
 class FlowSession(Document):
@@ -181,7 +189,7 @@ class FlowSession(Document):
 
 		# The update_memory tool reads this to stamp source_run. Scope tightly to the runtime
 		# call and clear after, so a stale run never leaks onto a later write in this request.
-		_set_active_run(run.name)
+		_set_active_run(run.name, unattended=bool(auto_approve) or source == "Trigger")
 		if stream:
 			return stream_with_persistence(lambda: self._runtime.run(run_input, stream=True), run)
 
@@ -398,24 +406,39 @@ class FlowSession(Document):
 			else:
 				messages.insert(0, {"role": "system", "content": instructions})
 
-		# Ephemeral, in this order: what is true now, then what the agent remembers. Added to the
+		# Ephemeral: what is true now. This one belongs in the instruction voice — it is not written
+		# by anyone, it is the platform stating the date, the zone and who is speaking. Added to the
 		# stored system message when there is one, otherwise carried by a system message that
 		# exists only for this prompt (see `ephemeral_prompt_prefix`).
-		blocks = [
-			block
-			for block in (
-				build_turn_context_block(),
-				build_memory_block(self.agent, query=self._latest_user_content()),
-			)
-			if block
-		]
-		if blocks:  # always true today: the context block is unconditional. Guarded for the day it is not.
-			joined = "\n\n".join(blocks)
+		context = build_turn_context_block()
+		if context:
 			# `messages` is non-empty: the early return above already handled a session with no rows.
 			if messages[0]["role"] == "system":
-				messages[0]["content"] = f"{messages[0]['content']}\n\n{joined}"
+				messages[0]["content"] = f"{messages[0]['content']}\n\n{context}"
 			else:
-				messages.insert(0, {"role": "system", "content": joined})
+				messages.insert(0, {"role": "system", "content": context})
+
+		# Ephemeral: what the agent has been asked to remember. Notes are written BY a model and
+		# read back BY a model, so they are the one thing here that an attacker can reach: a single
+		# successful manipulation could otherwise leave a standing instruction in the same voice as
+		# the agent's own, for every later conversation and every user of that agent. They are
+		# handed over as quoted data inside the user's own turn instead, where they read as
+		# material and not as orders.
+		#
+		# Appended to a message that already exists rather than added as a new one, and that is
+		# load-bearing: `ephemeral_prompt_prefix` counts the messages a prompt carried but the
+		# session never stored, and `_new_messages_for_session` slices the transcript positionally
+		# by that count. A new message at the head changes the count; one at the tail is re-stored
+		# as though the run had produced it. Appending changes neither. It is also what file
+		# injection above already does with per-turn material.
+		memory = build_memory_block(self.agent, query=self._latest_user_content())
+		if memory:
+			last_user = next((m for m in reversed(messages) if m["role"] == "user"), None)
+			# Every path that reaches here has one: chat stores the turn before building the
+			# prompt, and a resume replays a transcript containing it. Pinned by a test, so the
+			# day that stops being true the notes going missing is loud rather than silent.
+			if last_user is not None:
+				last_user["content"] = f"{last_user['content'] or ''}\n\n{memory}".lstrip()
 		return messages
 
 	def _current_instructions(self) -> str | None:

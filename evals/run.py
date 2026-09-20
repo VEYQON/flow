@@ -153,16 +153,45 @@ def _build_tools(spec: list[dict[str, Any]], executed: list[tuple[str, dict[str,
 	tools = []
 	for t in spec:
 		name, result = t["name"], t.get("result", "ok")
+		shipped = _shipped_tool(t.get("builtin"))
 		tools.append(
 			Tool(
 				name=name,
-				description=t["description"],
-				parameters=t.get("parameters", {"type": "object", "properties": {}}),
+				description=t.get("description") or (shipped.description if shipped else ""),
+				parameters=t.get("parameters")
+				or (shipped.parameters if shipped else {"type": "object", "properties": {}}),
+				# The body is ALWAYS the recording stub, even for a shipped tool: a scenario must
+				# never write anything. What a `builtin:` entry borrows is the tool's declared
+				# surface — whether it is gated, and the question it raises — which is exactly the
+				# part a registry change can break without any test noticing.
 				func=make(name, result),
-				requires_confirmation=bool(t.get("requires_confirmation", False)),
+				requires_confirmation=bool(
+					t["requires_confirmation"]
+					if "requires_confirmation" in t
+					else (shipped.requires_confirmation if shipped else False)
+				),
+				confirm_prompt=shipped.confirm_prompt if shipped else None,
+				title=shipped.title if shipped else None,
 			)
 		)
 	return tools
+
+
+def _shipped_tool(name: str | None):
+	"""The engine's own tool of that name, or None.
+
+	A scenario naming one is asserting about the REGISTRY — the flag and the question a tool ships
+	with — rather than about a tool the scenario invented. Those are the two halves that can
+	disagree, and a suite of invented tools can never see it.
+	"""
+	if not name:
+		return None
+	from flow.tools.builtins import BUILTIN_TOOLS
+
+	for tool in BUILTIN_TOOLS:
+		if tool.name == name:
+			return tool
+	raise ValueError(f"no builtin tool named {name!r}")
 
 
 def _check_tool_calls(expected: list[dict[str, Any]], actual, failures: list[str]) -> None:
@@ -248,6 +277,12 @@ def run_scenario(scenario: dict[str, Any]) -> Result:
 		for q in result.questions:
 			if "options" in questions and q.options != questions["options"]:
 				failures.append(f"question options were {q.options}, expected {questions['options']}")
+			for text in _as_list(questions.get("contains")):
+				if text not in q.prompt:
+					failures.append(f"the approval question does not contain {text!r}: {q.prompt!r}")
+			for text in _as_list(questions.get("absent")):
+				if text in q.prompt:
+					failures.append(f"the approval question must not contain {text!r}: {q.prompt!r}")
 			_check_absent_text(forbidden, q.prompt, "an approval question", failures)
 
 	if result.paused:
