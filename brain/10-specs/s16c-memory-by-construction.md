@@ -72,16 +72,30 @@ code has to keep true. A closure variable is a property of the object in your ha
 should not be reachable from an object that was built for a run that may not write.
 
 ### D2 — the same refusal, unchanged, in `save_memory`
-Kept exactly as it is. It covers the callers D1 cannot see: a resume (S16a R6 — always treated as
-attended), a session whose runtime was never rebound because it has no agent record, and any future
-caller that binds the tool the attended way inside an unattended run. Two refusals, one for the
-object and one for the path.
+Kept exactly as it is, for the caller D1 cannot see: **a session with no agent record is never
+rebound** (`_rebind_memory_tool` returns early on `not self.agent`) while `chat` still marks the run
+as having nobody in it, so the tool in hand is the writing one and the flag is the only thing left.
+Any future caller that binds the tool the attended way inside an unattended run is covered the same
+way. Two refusals, one for the object and one for the path.
+
+**Neither refusal fires on a resume**, and the first version of this section said the flag covered it,
+which is false: `resume` records its run with `unattended=False`, so the flag is clear throughout. It
+is deliberate, not a gap — somebody has just answered a question in that run — and S16a R6 already
+says so. Recording it wrongly here would have been worse than not recording it, because it is the
+justification for keeping a defence: a maintainer who checks the resume path and finds the claim
+false has reason to think the whole flag check is decorative. Found by review. See Open question 2.
 
 ### D3 — the flags do not outlive the run, on the non-streaming path either
 `FlowSession.chat`'s non-streaming branch clears both in a `finally` via `_set_active_run(None)`,
 which sets `flow_run = None` and, because `bool(None)` is false, `flow_unattended = False`. That is
-already true and **nothing asserted it**. It is pinned here, for a run that returns and for a run
-that raises, because the streaming path's equivalent was written only after the leak was found once.
+already true and **nothing asserted it**. It is pinned here for a run that returns, one that raises,
+and one that pauses, because the streaming path's equivalent was written only after the leak was
+found once.
+
+The pins assert the flags were **set** first, read from inside the model call, and then assert the
+exact value `False` rather than mere falsiness. Both halves came from review: without the first, a
+change that stopped setting the flags at all would leave every pin green, and that is the mutation
+that matters most, because the flag is what still carries the rule on the one path D1 cannot reach.
 
 ### D4 — a kept note is counted in the file-injection budget
 `_file_injection_budget` gains one keyword argument, `memory_chars`, added to the `dialogue` sum it

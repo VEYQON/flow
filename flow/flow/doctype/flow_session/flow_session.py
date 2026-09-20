@@ -262,6 +262,12 @@ class FlowSession(Document):
 		so replacing an entry in it affects this run and nothing else. Both the list the model is
 		offered and the map the runtime dispatches on are updated, because a tool present in one and
 		not the other is a worse state than either.
+
+		It does not rebind BACK, and that asymmetry is deliberate. An in-process caller that runs an
+		unattended turn and then an attended one on the same object leaves the unattended tool in
+		place, so that person's note is not kept — a loss of function, and the safe direction. The
+		same sequence used to leave an UNGATED tool in place with the flag clear, which was a write
+		with nobody asked. Not reachable over the request path, where a runtime dies with its request.
 		"""
 		if not unattended or not self.agent:
 			return

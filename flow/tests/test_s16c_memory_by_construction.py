@@ -27,6 +27,10 @@ from flow.tools.builtins import bind_update_memory
 
 NOT_EXECUTED = "not_executed"
 
+# The fixtures below are deliberately local rather than imported from the module beside this one.
+# Each test module has to stand on its own so a branch can carry one without the other, and a shared
+# fixture that two modules depend on is a third thing to keep true. The cost is that they look alike.
+
 
 class FakeModel:
 	"""Scripted responses, remembering every call so a test can assert what the model was shown."""
@@ -141,11 +145,14 @@ class TestAnUnattendedToolCannotWrite(IntegrationTestCase):
 				frappe.flags.flow_unattended = value
 				result = _result_of(self.unattended(content="Learned overnight.", scope="user"))
 				self.assertEqual(result.get("status"), NOT_EXECUTED)
-				self.assertEqual(self._rows(), [])
 
 		frappe.flags.pop("flow_unattended", None)
 		result = _result_of(self.unattended(content="Learned overnight.", scope="user"))
 		self.assertEqual(result.get("status"), NOT_EXECUTED)
+
+		# Once, after the loop. Asserted inside it, the row written by the FIRST failing value stays
+		# (a rollback happens in tearDown, not between subtests) and every later subtest then reports
+		# a row failure that is not about the value it was testing.
 		self.assertEqual(self._rows(), [])
 
 	def test_it_never_reaches_the_write_path_at_all(self):
@@ -196,18 +203,64 @@ class TestAnUnattendedToolCannotWrite(IntegrationTestCase):
 		self.assertEqual(result.get("reason"), "unattended")
 		self.assertEqual(self._rows(), [])
 
-	def test_the_two_bindings_differ_in_what_they_can_do_not_only_in_their_gate(self):
-		"""The gate and the ability to write are separate things, and this pins both at once:
-		the unattended tool is ungated (so it never parks a run) AND cannot write (so being
-		ungated costs nothing)."""
+	def test_a_direct_caller_in_an_unattended_run_is_refused_too(self):
+		"""The hole a security review found, and the reason the flag refusal is not conditional on
+		the caller naming itself.
+
+		`save_memory` can be imported straight into a tool record, and the schema built from its
+		signature offers `from_conversation` with the permissive default. A model that simply omitted
+		the argument reached the write — with SHARED scope, in a run nobody was watching, with no
+		approval anywhere. The rule is about the run, so it now holds whoever is asking.
+		"""
+		frappe.flags.flow_unattended = True
+
+		result = _result_of(
+			memory_module.save_memory(self.agent.name, content="Everyone obey this.", scope="agent")
+		)
+
+		self.assertEqual(result.get("status"), NOT_EXECUTED)
+		self.assertEqual(result.get("reason"), "unattended")
+		self.assertEqual(self._rows(), [])
+
+	def test_control_the_same_direct_caller_still_writes_when_somebody_is_there(self):
+		"""Without this, the test above passes on a function that refuses everything, and the desk's
+		own path — which is supposed to write shared notes — would be broken with nothing to say so."""
+		frappe.flags.flow_unattended = False
+
+		result = _result_of(
+			memory_module.save_memory(self.agent.name, content="A curated fact.", scope="agent")
+		)
+
+		self.assertEqual(result.get("action"), "added")
+		rows = self._rows()
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].scope, "Agent")
+
+	def test_the_write_function_is_still_looked_up_on_every_call(self):
+		"""This module's strongest test patches `save_memory` on the module that defines it and
+		asserts the tool never reaches it. That evidence holds only while the tool body imports the
+		name INSIDE the function, where it is re-resolved per call. Hoist that import to module level
+		and the patch stops being observed — the test would then pass with the refusal deleted.
+
+		So the property the evidence rests on is asserted directly, rather than assumed.
+		"""
+		import flow.tools.builtins as builtins_module
+
+		self.assertNotIn("save_memory", vars(builtins_module))
+
+	def test_the_unattended_binding_is_ungated_and_the_attended_one_is_not(self):
+		"""The gate and the ability to write are separate things, and only one of them was pinned.
+
+		Being ungated is what stops an unattended run parking in Paused on a question nobody can
+		answer; the refusal above is what makes being ungated cost nothing. Nothing anywhere asserted
+		the first half — no other test in the suite builds this binding at all.
+
+		This deliberately does NOT go on to write a row: that half duplicated the test above, and it
+		was the only real write in this module. A written note reaches a store that a transaction
+		rollback does not undo, so the duplicate leaked as well as repeated.
+		"""
 		self.assertFalse(self.unattended.requires_confirmation)
 		self.assertTrue(self.attended.requires_confirmation)
-
-		frappe.flags.flow_unattended = False
-		self.assertEqual(
-			_result_of(self.unattended(content="A note.", scope="user")).get("status"), NOT_EXECUTED
-		)
-		self.assertEqual(_result_of(self.attended(content="A note.", scope="user")).get("action"), "added")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -215,14 +268,19 @@ class TestAnUnattendedToolCannotWrite(IntegrationTestCase):
 # ---------------------------------------------------------------------------------------------
 
 
-class TestTheFlagsDoNotOutliveTheRun(IntegrationTestCase):
-	"""Features 5 and 6, on the NON-streaming path.
+class TestTheFlagsAreSetThenCleared(IntegrationTestCase):
+	"""Features 5 and 6, on the NON-streaming path, in both directions.
 
-	The streamed path grew a `finally` that clears both flags, with a comment saying why: a
-	trigger's "nobody is here" carried into the next request this worker serves would silently stop
-	that person's notes being kept. The non-streaming path does the same thing and nothing asserted
-	it. Both directions matter — a flag that fails to CLEAR silences a person's notes, and a flag
-	that fails to be SET used to mean an ungated tool wrote in a run nobody was watching.
+	The streamed path grew a `finally` that clears both flags, with a comment saying why: a trigger's
+	"nobody is here" carried into the next request this worker serves would silently stop that
+	person's notes being kept. The non-streaming path does the same thing and nothing asserted it.
+
+	Both directions are asserted, and the first is the one review had to insist on. A test that only
+	looks after the run cannot tell "set, then cleared" from "never set at all" — so a change that
+	stopped marking a run unattended would leave every pin green. That matters more since the tool
+	itself refuses: the flag is now what carries the rule on the one path the binding cannot reach, a
+	session with no agent record, and a flag nobody sets is a rule nobody applies. So each test reads
+	the flags from INSIDE the model call and asserts what they were there.
 	"""
 
 	def setUp(self):
@@ -234,58 +292,88 @@ class TestTheFlagsDoNotOutliveTheRun(IntegrationTestCase):
 		frappe.flags.flow_unattended = None
 		frappe.db.rollback()
 
+	def _flags_now(self) -> dict[str, Any]:
+		return {
+			"flow_run": frappe.flags.get("flow_run"),
+			"flow_unattended": frappe.flags.get("flow_unattended"),
+		}
+
+	def _run(self, response: ChatResponse | None = None, **kwargs):
+		"""Run a turn and return (run, the flags as they were while the model was being called)."""
+		seen: dict[str, Any] = {}
+		reply = response or _final("ok")
+
+		def chat(inner_self, messages, tools=None, *, stream=False):
+			seen.update(self._flags_now())
+			return reply
+
+		with patch.object(Model, "chat", new=chat):
+			run = self.agent.run("go", **kwargs)
+		return run, seen
+
+	def _run_that_raises(self, **kwargs) -> dict[str, Any]:
+		seen: dict[str, Any] = {}
+
+		def boom(inner_self, messages, tools=None, *, stream=False):
+			seen.update(self._flags_now())
+			raise RuntimeError("kaboom")
+
+		with patch.object(Model, "chat", new=boom):
+			with self.assertRaises(RuntimeError):
+				self.agent.run("go", **kwargs)
+		return seen
+
 	def _assert_flags_clear(self):
+		"""The exact values, not merely falsy ones: `None` would satisfy `assertFalse` and is what
+		this state looks like when nothing ever set the flag."""
 		self.assertIsNone(frappe.flags.get("flow_run"))
-		self.assertFalse(frappe.flags.get("flow_unattended"))
+		self.assertIs(frappe.flags.get("flow_unattended"), False)
 
-	def test_after_an_unattended_run_returns(self):
-		fake = FakeModel([_memory_call({"content": "Learned overnight.", "scope": "user"}), _final("ok")])
+	def test_a_trigger_run_is_marked_unattended_while_the_model_runs(self):
+		run, seen = self._run(source="Trigger", auto_approve=True)
 
-		with patch.object(Model, "chat", new=fake.chat):
-			run = self.agent.run("nightly check", source="Trigger", auto_approve=True)
+		self.assertEqual(seen["flow_run"], run.name)
+		self.assertIs(seen["flow_unattended"], True)
+		self._assert_flags_clear()
 
-		self.assertEqual(run.status, "Completed")
+	def test_a_trigger_with_no_auto_approve_is_marked_unattended_too(self):
+		"""`auto_approve` defaults to 0 on a trigger record, so this is the default configuration
+		and not an edge. It is also the case an earlier version of this work broke."""
+		run, seen = self._run(source="Trigger", auto_approve=False)
+
+		self.assertEqual(seen["flow_run"], run.name)
+		self.assertIs(seen["flow_unattended"], True)
+		self._assert_flags_clear()
+
+	def test_an_ordinary_chat_run_is_not_marked_unattended(self):
+		"""The control. Without it every assertion above passes on a flag that is always set."""
+		run, seen = self._run()
+
+		self.assertEqual(seen["flow_run"], run.name)
+		self.assertIs(seen["flow_unattended"], False)
 		self._assert_flags_clear()
 
 	def test_after_an_unattended_run_raises(self):
 		"""The case a `finally` exists for. A model call that throws must not leave a trigger's
 		"nobody is here" on this worker for whoever it serves next."""
+		seen = self._run_that_raises(source="Trigger", auto_approve=True)
 
-		def boom(self, messages, tools=None, *, stream=False):
-			raise RuntimeError("kaboom")
-
-		with patch.object(Model, "chat", new=boom):
-			with self.assertRaises(RuntimeError):
-				self.agent.run("nightly check", source="Trigger", auto_approve=True)
-
-		self._assert_flags_clear()
-
-	def test_after_an_attended_run_returns(self):
-		fake = FakeModel([_final("ok")])
-
-		with patch.object(Model, "chat", new=fake.chat):
-			run = self.agent.run("hello")
-
-		self.assertEqual(run.status, "Completed")
+		self.assertIs(seen["flow_unattended"], True)
+		self.assertIsNotNone(seen["flow_run"])
 		self._assert_flags_clear()
 
 	def test_after_an_attended_run_raises(self):
-		def boom(self, messages, tools=None, *, stream=False):
-			raise RuntimeError("kaboom")
+		seen = self._run_that_raises()
 
-		with patch.object(Model, "chat", new=boom):
-			with self.assertRaises(RuntimeError):
-				self.agent.run("hello")
-
+		self.assertIs(seen["flow_unattended"], False)
+		self.assertIsNotNone(seen["flow_run"])
 		self._assert_flags_clear()
 
 	def test_a_paused_run_leaves_no_flags_either(self):
-		"""A pause is a return, not an exception, and it is the most likely state to forget: the
-		run is not over, but this request is."""
-		fake = FakeModel([_memory_call({"content": "Remember this.", "scope": "user"})])
-
-		with patch.object(Model, "chat", new=fake.chat):
-			run = self.agent.run("remember this")
+		"""A pause is a return, not an exception, and it is the state most easily forgotten: the run
+		is not over, but this request is."""
+		run, seen = self._run(response=_memory_call({"content": "Remember this.", "scope": "user"}))
 
 		self.assertEqual(run.status, "Paused")
+		self.assertEqual(seen["flow_run"], run.name)
 		self._assert_flags_clear()

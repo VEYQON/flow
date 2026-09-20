@@ -92,11 +92,17 @@ def save_memory(
 	Two things a conversation may not do, both refused with a fixed record and no write:
 	  - write a note everyone who uses this agent will be given, and
 	  - edit one, which is the same write reached by its id.
-	A run with nobody to answer an approval writes nothing at all: gating this tool would otherwise
-	park such a run in Paused forever, and letting it through unattended would be the ungated write
-	this rule exists to remove.
+
+	A run with nobody to answer an approval writes nothing at all, **whoever is asking**. That
+	refusal is deliberately NOT conditional on `from_conversation`, and it was, until a security
+	review showed what that cost: this function can be imported directly by a tool record, and the
+	schema built from this signature offers `from_conversation` to the model with the permissive
+	default. A model that simply omitted the argument skipped the refusal and wrote a SHARED note, in
+	a run nobody was watching, with no approval anywhere on the path. The rule is about the run, not
+	about who is asking — so it is written that way. The desk and the tests run with the flag unset
+	and are unaffected.
 	"""
-	if from_conversation and frappe.flags.get("flow_unattended"):
+	if frappe.flags.get("flow_unattended"):
 		return dict(MEMORY_NOT_EXECUTED["unattended"])
 
 	scope_value = _SCOPE_BY_ARG.get(scope)
