@@ -88,3 +88,34 @@ One YAML file per scenario in `scenarios/`. The fields:
 `expect.after` is where the approval contract is actually checked: a scenario names what happens
 after "Approve", after "Deny", and after free text, and the runner asserts on what executed rather
 than on what the run said.
+
+## Scenarios that are expected to fail
+
+Some scenarios describe a defect this project has **proven** and has **not fixed**. They assert the
+behaviour that *should* happen and are expected to fail until someone claims the defect with a
+spec. Such a scenario carries a `known_defect:` key whose value says what the defect is and where
+it is written down:
+
+```yaml
+known_defect: >-
+  Reproduces today, on veyqon and on develop. ... Captured at brain/00-inbox/<slug>.md;
+  no spec has claimed it yet.
+```
+
+A bare `known_defect: true` is **refused**. A known defect that does not say what it is is
+indistinguishable from a scenario somebody silenced.
+
+There are four outcomes, not two, and the summary line counts all of them:
+
+| verdict | meaning | holds the gate red? |
+|---|---|---|
+| `PASS` | asserted behaviour happened | no |
+| `FAIL` | asserted behaviour did not happen | **yes** |
+| `KNOWN-DEFECT` | a marked scenario failed, as recorded | **no** — it is already written down, and a permanently red suite stops being read |
+| `FIXED` | **a marked scenario PASSED** | **yes** — the code was fixed and the record was not, so the suite is now asserting something untrue. Delete the `known_defect` key |
+
+`FIXED` is the outcome that earns the machinery. It is the only one of the four whose fix is to
+edit a scenario rather than the engine.
+
+**Never turn a failing scenario into a passing one by rewriting it to assert the defect.** That
+produces a pin on broken behaviour that nobody will ever read as a problem. Mark it and say why.
