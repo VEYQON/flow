@@ -110,9 +110,17 @@ class FlowRun(Document):
 			session.append_run_messages(new_messages, run=self.name)
 
 	def mark_failed(self, error: str) -> None:
-		"""Mark a run as failed with the given error message."""
+		"""Mark a run as failed with the given error message. The questions go with it.
+
+		Only a Paused run can be resumed, so a question still on a failed one is a question nobody
+		can ever answer — and it is what a person is shown as pending. `apply_result` already clears
+		them whenever a run comes back not-paused; this is the same rule on the paths that never
+		reach it: a run that raised, a stream cut short, and a person stopping a paused run
+		deliberately.
+		"""
 		self.status = "Failed"
 		self.error = str(error)[:5000]
+		self.questions = None
 		self.save(ignore_permissions=True)
 
 

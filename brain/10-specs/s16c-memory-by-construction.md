@@ -108,8 +108,37 @@ stored user message, neither of which file injection touches.
 For a turn with no notes the block is empty, `memory_chars` is 0, and the budget is the number it
 was — asserted by a test that computes the budget with and without the argument on the same session.
 
+### D5 — a run that failed does not keep asking
+Added during the work, from a test written to find out what happens when the iteration budget runs
+out with a memory approval pending.
+
+The answer to the question as asked is that it cannot happen: a turn that raises a question RETURNS
+from the loop, so the budget is never spent to nothing with something pending, and a resume resolves
+every pending call before the loop starts again. Both halves are pinned rather than argued.
+
+What the test found instead is a real defect. A run pauses and stores its question; the loop later
+runs out of iterations and the run goes **Failed** — and `mark_failed` did not clear `questions`,
+while `apply_result` beside it always has. Only a Paused run can be resumed, so the question was one
+**nobody could ever answer**, still shown as pending. `mark_failed` now clears it, which is the same
+rule `apply_result` already applies, on the three paths that never reach it: a run that raised, a
+stream cut short, and a person stopping a paused run deliberately. That last one is the clearest case
+for it — a run somebody terminated must not go on asking.
+
+Nothing else about failure changes, and a Paused run still carries its question, pinned by a control.
+
 ## Acceptance criteria
 See `s16c-memory-by-construction.features.json`.
+
+## Open questions for the owner
+1. **Should the file framing and the per-turn context block be budgeted too?** See R5. Counting them
+   is a bigger change with a smaller payoff — the framing is tens of characters, the notes were
+   thousands — and doing it silently inside this spec would have made "nothing else in the budget
+   changes" untrue.
+2. **Should a resume be able to tell that its run was unattended?** S16a R6 says a resume is always
+   attended. D1 makes the binding the thing that refuses, and a resume never rebinds, so a trigger
+   run resumed by its owner can keep notes for the rest of that call. That is a person answering, so
+   it is the intended reading — but it is now the ONLY path where the flag is what decides, and the
+   spec says so out loud rather than leaving it to be discovered.
 
 ## Risks
 - **R1 — a big memory set now shrinks what a file may inject.** That is the point, and it is a
@@ -124,3 +153,14 @@ See `s16c-memory-by-construction.features.json`.
   back saying nothing was kept. That is S16a D4's decision and this spec does not reopen it.
 - **R4 — nothing here defends `save_memory` against a direct caller with `from_conversation=False`.**
   That is the desk's path and is supposed to write.
+- **R5 — the file's own framing and the per-turn context block are still unbudgeted.** The budget is
+  decremented by the file *text*, not by the markers around it or the "attached the following" line,
+  and the turn-context block added to the system message is not counted at all. Both were true before
+  this change and are unchanged by it; D4 makes the notes stop being free, not everything. The test
+  asserts the **difference** between a turn with notes and the same turn without, so neither of those
+  can hide inside it. **Open question 1.**
+- **R6 — clearing a failed run's question loses the record of what was asked.** Before D5 a failed
+  run kept the question text, which nobody could answer but somebody could read. The transcript still
+  holds the tool call and the run still holds its error, so what was proposed is not lost; what is
+  lost is the rendered question. Judged the right trade: a question shown as pending that cannot be
+  answered is worse than one that has to be read from the transcript.

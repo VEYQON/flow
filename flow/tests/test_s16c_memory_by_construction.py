@@ -15,15 +15,21 @@ write, whatever any flag says, because its body decides from the value it was bo
 The flag refusal is kept as well, for the callers a binding cannot see, and that is asserted too.
 """
 
+import json
 from typing import Any
 from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
+from werkzeug.wrappers import Response
 
+from flow.api import start_run
 from flow.lib.model import ChatResponse, Model, ToolCall
+from flow.lib.session import load_session
 from flow.memory import memory as memory_module
-from flow.tools.builtins import bind_update_memory
+from flow.memory import store as memory_store
+from flow.memory.memory import MEMORY_BLOCK_CLOSE, MEMORY_BLOCK_OPEN, save_memory
+from flow.tools.builtins import bind_update_memory, sync_builtin_tools
 
 NOT_EXECUTED = "not_executed"
 
@@ -87,10 +93,54 @@ def _agent_doc(model_name: str, **overrides: Any) -> dict:
 	return doc
 
 
+def _streaming_chat(fake: FakeModel):
+	"""A `Model.chat` replacement that streams when it is asked to, recording every call.
+
+	The streamed path is a different function from the non-streaming one and persists through a
+	different one again, so a test that only ever drives `stream=False` says nothing about it.
+	"""
+
+	def chat(self, messages, tools=None, *, stream=False):
+		response = fake.chat(messages, tools=tools, stream=stream)
+		if not stream:
+			return response
+
+		def events():
+			if response.content:
+				yield response.content
+			return response
+
+		return events()
+
+	return chat
+
+
+def _sse_events(response: Response) -> list[dict[str, Any]]:
+	"""The events of a server-sent-events body, in order."""
+	body = b"".join(response.iter_encoded()).decode()
+	events = []
+	for block in body.split("\n\n"):
+		block = block.strip()
+		if not block:
+			continue
+		data_lines = [line[6:] for line in block.split("\n") if line.startswith("data: ")]
+		if data_lines:
+			events.append(json.loads("\n".join(data_lines)))
+	return events
+
+
+def _read_call(call_id: str = "r1") -> ChatResponse:
+	"""A call to a tool that needs no approval, so the loop executes it and keeps going."""
+	return ChatResponse(
+		content=None,
+		tool_calls=[ToolCall(id=call_id, name="read", arguments={"doctype": "Flow Model"})],
+		finish_reason="tool_calls",
+		usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+	)
+
+
 def _result_of(value: Any) -> dict[str, Any]:
 	"""A tool's return value as a dict, whether it came back as one or as serialised JSON."""
-	import json
-
 	if isinstance(value, dict):
 		return value
 	try:
@@ -377,3 +427,234 @@ class TestTheFlagsAreSetThenCleared(IntegrationTestCase):
 		self.assertEqual(run.status, "Paused")
 		self.assertEqual(seen["flow_run"], run.name)
 		self._assert_flags_clear()
+
+
+# ---------------------------------------------------------------------------------------------
+# The streamed path, with a note present
+# ---------------------------------------------------------------------------------------------
+
+
+class TestAStreamedTurnWithAKeptNote(IntegrationTestCase):
+	"""Features 8 and 9. A gap the previous run's adversary ran out of budget for.
+
+	Every test that proved the block arrives once, in the right message, and is not re-stored drove
+	the NON-streaming path. The streamed path builds the prompt with the same function but persists
+	through a different one — `stream_with_persistence`, iterated by the server after the request
+	handler has returned — so "the transcript stores exactly what the run produced" is a separate
+	claim there, and nothing measured it.
+	"""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		sync_builtin_tools()
+
+	def setUp(self):
+		self.model_doc = frappe.get_doc(_model_doc()).insert()
+		self.agent = frappe.get_doc(_agent_doc(self.model_doc.name)).insert()
+
+	def tearDown(self):
+		frappe.flags.flow_run = None
+		frappe.flags.flow_unattended = False
+		frappe.db.rollback()
+		memory_store.drop_table()
+
+	def _note(self, content: str) -> None:
+		save_memory(self.agent.name, content=content, scope="user")
+
+	def test_the_block_reaches_the_model_once_in_the_last_user_message_and_the_run_completes(self):
+		self._note("Prefers metric units.")
+		fake = FakeModel([_final("noted")])
+
+		with patch.object(Model, "chat", new=_streaming_chat(fake)):
+			response = start_run("what units do I use?", agent=self.agent.name, stream=True)
+			events = _sse_events(response)
+
+		self.assertEqual(events[-1]["type"], "done")
+		self.assertEqual(events[-1]["status"], "Completed")
+
+		self.assertTrue(fake.calls, "the model was never called")
+		self.assertTrue(fake.calls[-1]["stream"], "this test says nothing unless the call streamed")
+		messages = fake.calls[-1]["messages"]
+		carrying = [m for m in messages if MEMORY_BLOCK_OPEN in (m.get("content") or "")]
+		self.assertEqual(len(carrying), 1, "the block must arrive exactly once")
+		self.assertEqual(carrying[0]["role"], "user")
+		self.assertIs(carrying[0], [m for m in messages if m["role"] == "user"][-1])
+		self.assertIn("Prefers metric units.", carrying[0]["content"])
+		self.assertEqual(carrying[0]["content"].count(MEMORY_BLOCK_OPEN), 1)
+		self.assertEqual(carrying[0]["content"].count(MEMORY_BLOCK_CLOSE), 1)
+
+	def test_no_system_message_of_a_streamed_turn_carries_the_block(self):
+		"""The property the whole design rests on, asserted on the path that had no test."""
+		self._note("Prefers metric units.")
+		fake = FakeModel([_final("noted")])
+
+		with patch.object(Model, "chat", new=_streaming_chat(fake)):
+			_sse_events(start_run("what units do I use?", agent=self.agent.name, stream=True))
+
+		for message in fake.calls[-1]["messages"]:
+			if message["role"] == "system":
+				self.assertNotIn(MEMORY_BLOCK_OPEN, message.get("content") or "")
+				self.assertNotIn("Prefers metric units.", message.get("content") or "")
+
+	def test_the_transcript_a_streamed_run_stores_holds_no_block_and_no_message_twice(self):
+		self._note("Prefers metric units.")
+		fake = FakeModel([_final("noted")])
+
+		with patch.object(Model, "chat", new=_streaming_chat(fake)):
+			events = _sse_events(start_run("what units do I use?", agent=self.agent.name, stream=True))
+
+		session = frappe.get_doc("Flow Session", events[0]["session"])
+		stored = [(m.role, m.content) for m in session.messages]
+		self.assertTrue(stored)
+		for role, content in stored:
+			self.assertNotIn(MEMORY_BLOCK_OPEN, content or "", f"a {role} message was stored with the block")
+			self.assertNotIn(MEMORY_BLOCK_CLOSE, content or "")
+			self.assertNotIn("Prefers metric units.", content or "")
+		self.assertEqual(len(stored), len(set(stored)), f"a message was stored twice: {stored}")
+		self.assertEqual([role for role, _ in stored], ["system", "user", "assistant"])
+
+	def test_a_second_streamed_turn_still_stores_only_what_it_produced(self):
+		"""Two turns, because what can go wrong is positional: the prefix a run skips comes from how
+		many messages the prompt carried that the session never stored, and a block delivered at the
+		tail would be re-stored as though the run had produced it."""
+		self._note("Prefers metric units.")
+		fake = FakeModel([_final("first"), _final("second")])
+
+		with patch.object(Model, "chat", new=_streaming_chat(fake)):
+			first = _sse_events(start_run("turn one", agent=self.agent.name, stream=True))
+			session_name = first[0]["session"]
+			_sse_events(start_run("turn two", agent=self.agent.name, session=session_name, stream=True))
+
+		session = frappe.get_doc("Flow Session", session_name)
+		stored = [(m.role, m.content) for m in session.messages]
+		self.assertEqual([role for role, _ in stored], ["system", "user", "assistant", "user", "assistant"])
+		self.assertEqual([c for _, c in stored][1:], ["turn one", "first", "turn two", "second"])
+		for _role, content in stored:
+			self.assertNotIn(MEMORY_BLOCK_OPEN, content or "")
+
+	def test_control_a_streamed_turn_with_no_note_carries_no_block(self):
+		"""Without this the assertions above could all be passing on a block that is never built."""
+		fake = FakeModel([_final("noted")])
+
+		with patch.object(Model, "chat", new=_streaming_chat(fake)):
+			_sse_events(start_run("anything", agent=self.agent.name, stream=True))
+
+		joined = "".join(m.get("content") or "" for m in fake.calls[-1]["messages"])
+		self.assertNotIn(MEMORY_BLOCK_OPEN, joined)
+
+
+# ---------------------------------------------------------------------------------------------
+# The iteration budget, and a pending approval
+# ---------------------------------------------------------------------------------------------
+
+
+class TestTheIterationBudgetAndAPendingApproval(IntegrationTestCase):
+	"""Features 10 and 11.
+
+	The question was "what happens when the iteration budget runs out while a memory approval is
+	pending?", and the answer turned out to be that it cannot: a turn that raises a question RETURNS
+	from the loop, so the budget is never spent to nothing with something still pending, and a resume
+	resolves every pending call before the loop starts again. Both halves are pinned rather than
+	argued, because "it cannot happen" is the kind of claim this project has a Lesson about.
+
+	What DOES happen is a run that exhausts the budget with everything resolved. That path had a real
+	defect: the run went Failed while still carrying the question from its earlier pause, and a resume
+	refuses any run that is not Paused — so it was a question nobody could ever answer, shown as
+	pending forever.
+	"""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		sync_builtin_tools()
+
+	def setUp(self):
+		self.model_doc = frappe.get_doc(_model_doc()).insert()
+		self.agent = frappe.get_doc(
+			_agent_doc(
+				self.model_doc.name,
+				max_iterations=1,
+				tools=[{"tool": "update_memory"}, {"tool": "read"}],
+			)
+		).insert()
+		self.session = self.agent.new_session()
+
+	def tearDown(self):
+		frappe.flags.flow_run = None
+		frappe.flags.flow_unattended = False
+		frappe.db.rollback()
+		memory_store.drop_table()
+
+	def _notes(self) -> int:
+		return frappe.db.count("Flow Agent Memory", {"agent": self.agent.name})
+
+	def _run_row(self):
+		names = frappe.get_all(
+			"Flow Run", filters={"session": self.session.name}, pluck="name", order_by="creation desc"
+		)
+		self.assertTrue(names, "no run was created")
+		return frappe.get_doc("Flow Run", names[0])
+
+	def test_a_pending_memory_approval_is_never_consumed_by_the_iteration_budget(self):
+		"""Feature 11. With a budget of exactly one iteration, the turn that proposes a note still
+		pauses and asks. It does not spend the budget and fail, and the pause is not an iteration
+		that was 'used up' with a question left over."""
+		fake = FakeModel([_memory_call({"content": "Remember this.", "scope": "user"})])
+
+		with patch.object(Model, "chat", new=fake.chat):
+			run = self.agent.run("remember this", session=self.session.name)
+
+		self.assertEqual(run.status, "Paused")
+		self.assertEqual(len(json.loads(run.questions)), 1)
+		self.assertEqual(self._notes(), 0)
+
+	def test_a_run_that_exhausts_its_budget_writes_no_note_and_fails(self):
+		"""Feature 10, first half. The exhaustion path proper: every call resolves, so the loop keeps
+		going until the budget is gone. The run's stated outcome is Failed, with the reason recorded."""
+		fake = FakeModel([_read_call()])
+
+		with patch.object(Model, "chat", new=fake.chat):
+			with self.assertRaisesRegex(RuntimeError, "max_iterations"):
+				self.agent.run("read everything", session=self.session.name)
+
+		run = self._run_row()
+		self.assertEqual(run.status, "Failed")
+		self.assertIn("max_iterations", run.error)
+		self.assertEqual(self._notes(), 0)
+		self.assertFalse(run.questions)
+
+	def test_a_run_that_exhausts_its_budget_after_a_pause_leaves_no_unanswerable_question(self):
+		"""Feature 10, second half, and the defect this test was written to find.
+
+		A run pauses on the note; the person redirects it in their own words; the loop then runs out
+		of iterations and the run goes Failed. `resume_run` refuses any run that is not Paused, so a
+		question still sitting on a Failed run is one nobody can ever answer — and it is what a
+		person is shown as pending.
+		"""
+		fake = FakeModel([_memory_call({"content": "Remember this.", "scope": "user"}), _read_call()])
+
+		with patch.object(Model, "chat", new=fake.chat):
+			run = self.agent.run("remember this", session=self.session.name)
+			self.assertEqual(run.status, "Paused")
+			self.assertTrue(run.questions)
+
+			with self.assertRaisesRegex(RuntimeError, "max_iterations"):
+				load_session(self.session.name).resume({"m1": "say it shorter"})
+
+		run.reload()
+		self.assertEqual(run.status, "Failed")
+		self.assertFalse(run.questions, "a Failed run still carries a question nobody can answer")
+		self.assertEqual(self._notes(), 0)
+
+	def test_a_paused_run_still_carries_its_question(self):
+		"""The control. Clearing a question when a run fails must not clear one that is still live —
+		without this, a change that simply never stored questions would look correct."""
+		fake = FakeModel([_memory_call({"content": "Remember this.", "scope": "user"})])
+
+		with patch.object(Model, "chat", new=fake.chat):
+			run = self.agent.run("remember this", session=self.session.name)
+
+		self.assertEqual(run.status, "Paused")
+		self.assertTrue(run.questions)
+		self.assertEqual(json.loads(run.questions)[0]["key"], "m1")
