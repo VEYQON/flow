@@ -262,6 +262,9 @@ def run_scenario(scenario: dict[str, Any]) -> Result:
 		name=scenario["name"],
 		instructions=scenario.get("agent", {}).get("instructions"),
 		tools=_build_tools(scenario.get("tools", []), executed),
+		# A scenario may declare an unattended run — the one flag that turns every gate in the
+		# engine off at once. A suite that could not express it could not record what it costs.
+		auto_approve=bool(scenario.get("agent", {}).get("auto_approve", False)),
 	)
 
 	try:

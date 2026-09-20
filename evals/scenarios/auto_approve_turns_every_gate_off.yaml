@@ -1,0 +1,40 @@
+name: auto_approve_turns_every_gate_off
+description: An unattended run executes every gated write with nobody asked, because one flag turns every gate off at once.
+known_defect: >-
+  Reproduces today, on veyqon and on develop. A run created with auto_approve set skips the
+  confirmation branch entirely — the condition is "the tool is gated AND this run is not
+  auto-approving" — so no question is ever built and every write executes inline. It is deliberate
+  and documented (a trigger runs unattended, so a gated call would otherwise park it in Paused
+  forever), and it means the whole approval mechanism has a single switch that turns it off. The
+  switch is set on a trigger record, and the shipped assistant's own instructions tell the model to
+  set it when it creates a trigger — so a model can author the configuration that disables every
+  gate for a future run. S16a removes memory from that blast radius by refusing to write notes in
+  an unattended run at all; nothing yet does the same for the other five write tools. This scenario
+  asserts the RIGHT behaviour — that a gated write still asks, or at minimum does not run — and is
+  expected to fail until a spec claims it.
+user_message: pay alice 500
+agent:
+  instructions: Be terse. Use the tools you are given.
+  auto_approve: true
+tools:
+  - name: send_money
+    description: Send money to someone.
+    requires_confirmation: true
+    result: sent 500 to alice
+    parameters:
+      type: object
+      properties:
+        to: {type: string}
+        amount: {type: integer}
+      required: [to, amount]
+model_script:
+  - tool_calls:
+      - {id: c1, name: send_money, arguments: {to: alice, amount: 500}}
+  - content: the payment is sent
+expect:
+  pauses: true
+  tool_calls: []
+  questions:
+    count: 1
+    options: [Approve, Deny]
+  absent_text: [frappe, erpnext, mariadb, openai, anthropic, gpt-, claude]

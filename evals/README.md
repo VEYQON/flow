@@ -119,3 +119,29 @@ edit a scenario rather than the engine.
 
 **Never turn a failing scenario into a passing one by rewriting it to assert the defect.** That
 produces a pin on broken behaviour that nobody will ever read as a problem. Mark it and say why.
+
+## Two scenarios that assert about the engine's own tools
+
+Most scenarios here invent their tools, which is right for testing the loop: the loop does not care
+what a tool does. Two do not, and they use a `builtin:` key that takes a tool's **shipped surface** —
+whether it is gated, and the approval question it raises — from the registry itself, while the body
+stays a recording stub so nothing is written.
+
+That distinction is the point. A suite of invented tools can never notice that a shipped tool's
+approval was turned off, or that its question stopped saying what it authorises. These two can:
+
+- `keeping_a_note_is_approved_first` — the tool for keeping notes asks first, and the question shows
+  the exact wording that would be kept.
+- `an_approved_execute_shows_its_code` — the code-running tool's question shows the code in full.
+  It has to: that tool's sandbox holds the write tools unwrapped, so nothing inside it is asked
+  about again and the question is the only place a person sees what will happen. **The code IS the
+  approval.**
+
+## One scenario asserts a defect nobody has claimed
+
+`auto_approve_turns_every_gate_off` is a `known_defect`: one flag on a trigger record skips the
+confirmation branch for every tool at once, so an unattended run performs every gated write with
+nobody asked. It is deliberate and documented — an unattended run has nobody to answer a question —
+and it still means the whole approval mechanism has a single switch. It is reported, with its
+reason, on every run, and it holds nothing red until a spec claims it.
+
