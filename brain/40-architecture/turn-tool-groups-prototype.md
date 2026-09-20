@@ -45,6 +45,7 @@ against what a result says about itself.
 | **T2** | a pause and resume in that turn sees exactly the same tool set, rebuilt from the record | **VERIFIED** | `test_t2_a_resume_in_that_turn_sees_exactly_the_same_tool_set` — **all three tools are re-attached by hand before the narrowing runs**, so the narrowing demonstrably comes from the record and not from what is registered |
 | **T3** | a tool outside the turn's group is refused and nothing executes | **VERIFIED** | `test_t3_a_tool_outside_the_group_is_refused_and_nothing_executes` — the stored tool result is `Unknown tool`, the recorder is empty, and **this needed no engine change at all**: a tool absent from `_tools_by_name` never reaches `_run_tool` (`flow/lib/agent.py:421-422`) |
 | **T4** | a gated tool inside a group keeps `requires_confirmation` and the exact-Approve path | **VERIFIED** | `test_t4_a_gated_tool_inside_the_group_still_asks_and_still_needs_the_exact_approve` (options are exactly `["Approve","Deny"]`, nothing runs before the answer, the exact "Approve" executes) and `test_t4_a_denial_inside_a_group_still_executes_nothing` |
+| **hazard** | a group is a new way to lose a pending approval on an engine without S15 | **REPRODUCED** | `test_narrowing_is_a_new_way_to_lose_a_pending_approval` — asserts the broken behaviour on purpose |
 | **T5** | the next turn may use a different group, and a paused call from the previous turn is still resolved against ITS turn's group | **VERIFIED** | `test_t5_the_next_turn_may_use_a_different_group` and `test_t5_a_paused_call_is_resolved_against_its_own_turns_group` |
 
 **Nothing FAILED. Nothing NOT ATTEMPTED** among T1–T5.
@@ -63,13 +64,70 @@ against what a result says about itself.
 **`git diff veyqon --stat -- flow/lib/` is EMPTY** — the prototype changes no approval code, no
 `_prepare_resume`, none of the four rule-4 functions.
 
+## THE RESULT THAT CHANGES THE ORDER OF WORK
+**A tool group is a new, supported way to make a pending call's tool disappear at resume — and on
+an engine without S15 that means a person's approval is silently swallowed.**
+
+Found by this branch's security review, which measured it out of tree before I reproduced it in
+one: with the run's group no longer containing the tool its question was about, the resume narrows
+the tool away, `_prepare_resume` takes the branch written for an ordinary answered question, and
+**the literal string `"Approve"` is stored as that tool call's result.** Nothing runs, nothing is
+denied, the run completes, and the model is handed the person's own word as though the transfer
+returned it. Pinned by `test_narrowing_is_a_new_way_to_lose_a_pending_approval`, which **asserts
+the broken behaviour on purpose** — this branch is cut from `veyqon` and deliberately does not
+carry S15.
+
+Three ways to reach it, none needing an attacker:
+1. **A shared code `Agent` object.** `load_session(name, agent=agent_obj)` returns that same
+   object, and `_narrow_runtime` mutates it **in place and monotonically**. Two turns with disjoint
+   groups leave the shared runtime with **zero** tools for every later session in that worker.
+2. A group definition edited while a run is paused — the ordinary production analogue.
+3. A tampered `config_snapshot` (System Manager only, so not an escalation — but it is a
+   silent-deception primitive against a lower-privileged owner's conversation).
+
+**THE ORDERING REQUIREMENT, and it is this note's main recommendation: S15 first, groups second.**
+Until a resume fails closed on a pending call whose tool it cannot find, every group mechanism
+multiplies the reachability of a dropped approval. Building groups before the guard is building the
+hazard before the guard. With S15 in place the same sequence yields a not-executed record, and the
+hazard test above goes red — which is the correct signal and not a regression.
+
+## What the security review found besides
+| sev | finding | disposition |
+|---|---|---|
+| MED | narrowing is a new route to the swallow (above) | **pinned by a test; drives the ordering requirement** |
+| MED | `_narrow_runtime` mutates a possibly-shared runtime, monotonically and irreversibly | already called out as prototype-grade; the review makes it a **security** reason, not only hygiene. Unreachable over HTTP (every request rebuilds the agent; no module-level `Agent`, no cache holds one), reachable on the code-`Agent` path |
+| LOW | the recorded snapshot can over-state a run's tools: an ungrouped turn after a grouped one on the same in-memory session records the FULL list while the runtime is still narrow | real. Production must derive `"tools"` from the runtime that actually ran, never merge over a stale snapshot |
+| LOW | narrowing rebuilds `_tools_by_name` with a last-wins comprehension, dropping `Agent.__init__`'s duplicate-name check | latent today (no production path can build a duplicate); exactly what a "load a group from a record" feature would break. Build through the constructor |
+| LOW | no validation of `tool_group` — a bare string narrows to zero, a dict narrows by its keys, an unhashable element raises | acceptable in a spike, mandatory before any exposure. Where it raises, it raises **before** `create_run` and before `_set_active_run`, so no orphan Running run |
+
+**What it verified safe, by measurement:** narrowing **can never widen** — exercised with `[]`,
+duplicates, unknown names, a bare string, a dict, `[None]`, wrong case and an unhashable element;
+every result was a subset or a raise, and the advertised set and the executable set are rebuilt
+from the same filtered list so they cannot diverge. `None` skips narrowing, `[]` narrows to
+nothing; both fail safe. No approval code changed; the four rule-4 functions byte-identical.
+`auto_approve` still reachable only from a Flow Trigger. **`tool_group` is not client-reachable** —
+no whitelisted method accepts or forwards it. **`config_snapshot` is not user-writable**: role
+`All` has read-with-`if_owner` and **no write**, so a run owner cannot rewrite their own group.
+`assert_run_owner` and `_assert_session_owner` unchanged. Nothing about the group reaches the
+model — `_build_prompt_messages` never reads the snapshot.
+
+**Its verdict on the design:** the core idea is right and is "the safer half of the pair", but it
+is not safe to build yet, in this order — (1) S15 first; (2) the group belongs in `Agent.__init__`
+via `assemble()`, never in-place mutation; (3) groups defined server-side on a Flow Agent child
+table, provably a subset of the agent's tools, with callers passing a group NAME rather than a list
+of tool names; (4) the snapshot derived from the runtime that actually ran; (5) if ever exposed on
+a whitelisted method, type-validated and resolved server-side — a client-chosen group can only
+remove, so it is not an escalation, but it is a browser-reachable trigger for (1).
+
 ## The result worth reading
-**T5 is the one that earns the branch, and it is the complement of S15, not an alternative to it.**
+**T5 is the one that earns the branch, and it is the complement of S15 — but the review turned
+"complement" into an ORDER.** They are not interchangeable and they are not independent:
 Run 4's swallow, and S15's whole reason to exist, is a resume that cannot find the tool its
 question was about. **With the turn's group on the record, the resume rebuilds the set the question
 was asked against, so the tool is there and the loss does not happen.** S15 makes the loss *safe*;
-this makes it *not occur*. Either alone is worth having; together, a dropped approval needs both
-the record to be missing and the tool to be gone.
+this makes it *not occur*. **S15 alone is worth having. This alone is NOT** — on its own it adds a
+new route to the very loss it prevents elsewhere, as the hazard above shows. Together, a dropped
+approval needs both the record to be missing and the tool to be gone.
 
 The second result is smaller and useful: **T3 needed no engine change.** Scoping already refuses
 out-of-group calls correctly, because a tool absent from the registry never reaches execution.
@@ -104,8 +162,9 @@ Whatever ADR-003 becomes, that part of it is already true.
 - **The streaming path is not covered.** `chat(stream=True)` and `resume(stream=True)` share the
   narrowing, which runs before either branches — so it is very likely identical, and **"very
   likely" is not evidence.** INFERRED, not VERIFIED.
-- **No reviewer read this note's conclusions**; one security reviewer saw the branch, and its scope
-  was the prototype's safety, not whether ADR-003 is a good idea.
+- **One security reviewer read the branch** and its findings are folded in above; its scope was the
+  prototype's safety, not whether ADR-003 is a good idea. It did not run the bench gate (budget),
+  so its dynamic evidence is an out-of-tree probe; the gate numbers here are mine.
 - **The `auto_approve` (trigger) path** was not exercised with a group.
 
 ## Links

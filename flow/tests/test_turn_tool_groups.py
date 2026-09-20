@@ -257,6 +257,57 @@ class TestTheTurnsToolGroupIsFixedBeforeTheRun(IntegrationTestCase):
 
 		self.assertEqual(self.advertised, [sorted(FINANCE)])
 
+	# -- THE HAZARD ---------------------------------------------------------------------------
+
+	def test_narrowing_is_a_new_way_to_lose_a_pending_approval(self):
+		"""**This test asserts BROKEN behaviour on purpose, and it is the most important result
+		on this branch.** Found by its security review, which measured it before I did.
+
+		A group is a supported way to make a tool disappear. If the group a paused run is
+		resolved against no longer contains the tool its question was about — a group definition
+		edited, a shared runtime narrowed twice, a tampered record — then the pending call's tool
+		is absent at resume, and on THIS branch's engine that means the person's own answer is
+		written in as the tool's result. Nothing runs, nothing is denied, and the model is handed
+		the word "Approve" as though the transfer returned it.
+
+		This branch is cut from `veyqon`, so it does NOT carry S15's fail-closed rows. That is
+		the whole point: **a group mechanism must not ship before the guard.** With S15 in place
+		the same sequence produces a not-executed record instead, and this test would go red —
+		which is the correct signal, and the note says so.
+		"""
+		from flow.api.api import resume_run
+		from flow.lib.session import load_session
+
+		session = self._session()
+		run = self._chat(
+			session, "pay alice", [_call("send_money", {"to": "alice", "amount": 500}, "c1")], FINANCE
+		)
+		self.assertEqual(run.status, "Paused")
+
+		# The group this run is resolved against no longer holds the tool it asked about.
+		snapshot = json.loads(run.config_snapshot)
+		snapshot["tool_group"] = ["read_balance"]
+		run.db_set("config_snapshot", json.dumps(snapshot))
+
+		with (
+			patch(
+				"flow.lib.session.load_session",
+				side_effect=lambda n, **k: self._with_all_tools(load_session(n, **k)),
+			),
+			patch.object(Model, "chat", side_effect=lambda *a, **k: _final("all done")),
+		):
+			resume_run(run.name, {"c1": "Approve"})
+
+		self.assertEqual(self.tools.ran, [], "nothing ran, which is the safe half")
+		rows = frappe.get_doc("Flow Session", run.session).messages
+		result = next(r.content for r in rows if r.role == "tool" and r.tool_call_id == "c1")
+		self.assertEqual(
+			result,
+			"Approve",
+			"the person's own answer is the tool's result: this is the swallow, and it is why "
+			"S15 must ship before any group mechanism",
+		)
+
 	# -- T5 -----------------------------------------------------------------------------------
 
 	def test_t5_the_next_turn_may_use_a_different_group(self):
