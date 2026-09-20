@@ -323,12 +323,20 @@ class FlowSession(Document):
 		if not messages:
 			frappe.throw(_("This session has no transcript to resume from."))
 
+		# What the person was asked, as it was recorded when the run paused. The runtime rebuilt
+		# above is not necessarily the one that asked, so this is the only thing that still knows;
+		# without it a question whose tool has since been un-gated would be answered on the old
+		# approval. Unreadable rows resolve to nothing, which is the pre-existing behaviour.
+		asked = _asked_questions(run)
+
 		_set_active_run(run.name)
 		if stream:
-			return stream_with_persistence(lambda: self._runtime.resume(messages, answers, stream=True), run)
+			return stream_with_persistence(
+				lambda: self._runtime.resume(messages, answers, stream=True, asked=asked), run
+			)
 
 		try:
-			result = self._runtime.resume(messages, answers)
+			result = self._runtime.resume(messages, answers, asked=asked)
 		except Exception as e:
 			run.mark_failed(str(e))
 			raise
@@ -525,6 +533,25 @@ def _is_known_zone(zone: str) -> bool:
 	except (ZoneInfoNotFoundError, ValueError):
 		return False
 	return True
+
+
+def _asked_questions(run) -> list[Any]:
+	"""The questions a paused run raised, as they were stored when it paused.
+
+	The resume path needs these to tell a question a person was asked to approve from a question
+	a tool asked itself — a distinction the rebuilt runtime can no longer make on its own. Rows
+	that cannot be read resolve to nothing, which leaves the behaviour that existed before this
+	was read at all rather than failing a resume over a malformed record.
+	"""
+	stored = run.get("questions")
+	if not stored:
+		return []
+	if isinstance(stored, str):
+		try:
+			stored = json.loads(stored)
+		except (TypeError, ValueError):
+			return []
+	return stored if isinstance(stored, list) else []
 
 
 def _display_name(name: str | None) -> str:
