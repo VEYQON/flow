@@ -292,14 +292,20 @@ class FlowSession(Document):
 		"""Max characters of file text to inline before switching a file to retrieval."""
 		return int(self._context_window() * CHARS_PER_TOKEN * RETRIEVAL_FRACTION)
 
-	def _file_injection_budget(self) -> int:
+	def _file_injection_budget(self, memory_chars: int = 0) -> int:
 		"""Characters left for file content this turn: the context window minus the reply
 		reservation and the conversation text actually being sent. Shrinks as the conversation
-		grows, so inline files yield to the dialogue rather than overflow it."""
+		grows, so inline files yield to the dialogue rather than overflow it.
+
+		`memory_chars` is the length of the kept-notes block this turn will deliver. It rides on a
+		stored message but is not in one, so summing the rows does not see it, and a large set of
+		notes plus a large file were each inside the window and could cross it together. Zero when
+		there are no notes, which is why a turn without them budgets exactly what it always did.
+		"""
 		window_chars = self._context_window() * CHARS_PER_TOKEN
 		reserved = RESERVED_OUTPUT_TOKENS * CHARS_PER_TOKEN
 		dialogue = sum(len(m.content or "") for m in self.messages) + self._instructions_delta()
-		return max(0, window_chars - reserved - dialogue)
+		return max(0, window_chars - reserved - dialogue - memory_chars)
 
 	def _instructions_delta(self) -> int:
 		"""How much longer (or shorter) the system message being sent is than the stored row it
@@ -412,7 +418,13 @@ class FlowSession(Document):
 		attachments_by_run = self._group_attachments_by_run()
 		last_user_run = self._latest_user_run()
 		query = self._latest_user_content() if any(a.mode == "Retrieval" for a in self.attachments) else None
-		budget = self._file_injection_budget()
+
+		# Built here rather than where it is attached, below, because file injection spends a budget
+		# and this block is part of what the turn costs. Its inputs are the agent and the latest
+		# stored user message; neither is touched by anything between here and there, so building it
+		# earlier changes the block not at all. It is still built exactly once.
+		memory = build_memory_block(self.agent, query=self._latest_user_content())
+		budget = self._file_injection_budget(memory_chars=len(memory or ""))
 
 		messages: list[dict[str, Any]] = []
 		for row in self.messages:
@@ -468,7 +480,6 @@ class FlowSession(Document):
 		# by that count. A new message at the head changes the count; one at the tail is re-stored
 		# as though the run had produced it. Appending changes neither. It is also what file
 		# injection above already does with per-turn material.
-		memory = build_memory_block(self.agent, query=self._latest_user_content())
 		if memory:
 			last_user = next((m for m in reversed(messages) if m["role"] == "user"), None)
 			# Every path that reaches here has one: chat stores the turn before building the

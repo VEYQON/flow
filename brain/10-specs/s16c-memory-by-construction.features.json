@@ -13,9 +13,9 @@
     { "id": 9, "description": "The transcript stored by a streamed run with a note present contains no memory block and no message twice.", "passes": true },
     { "id": 10, "description": "A run that exhausts its iteration budget writes no note and leaves no question a person can no longer answer.", "passes": true },
     { "id": 11, "description": "A pending memory approval is never consumed by the iteration budget: the pausing turn returns Paused rather than exhausting it.", "passes": true },
-    { "id": 12, "description": "The file-injection budget is reduced by exactly the length of the memory block delivered this turn.", "passes": false },
-    { "id": 13, "description": "For a turn with no notes the budget is the number it was before this change, computed on the same session.", "passes": false },
-    { "id": 14, "description": "_invoke, _resolve_confirmation, _confirmation_question and _has_denial are unchanged, and upstream's TestAgentConfirmation is unmodified and green.", "passes": false },
-    { "id": 15, "description": "No text this change puts in front of the model or a person names the platform, a vendor or a model.", "passes": false }
+    { "id": 12, "description": "The file-injection budget is reduced by exactly the length of the memory block delivered this turn.", "passes": true },
+    { "id": 13, "description": "For a turn with no notes the budget is the number it was before this change, computed on the same session.", "passes": true },
+    { "id": 14, "description": "_invoke, _resolve_confirmation, _confirmation_question and _has_denial are unchanged, and upstream's TestAgentConfirmation is unmodified and green.", "passes": true },
+    { "id": 15, "description": "No text this change puts in front of the model or a person names the platform, a vendor or a model.", "passes": true }
   ]
 }

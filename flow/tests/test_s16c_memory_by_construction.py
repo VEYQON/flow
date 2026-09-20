@@ -24,14 +24,29 @@ from frappe.tests import IntegrationTestCase
 from werkzeug.wrappers import Response
 
 from flow.api import start_run
+from flow.flow.doctype.flow_session.flow_session import CHARS_PER_TOKEN, RESERVED_OUTPUT_TOKENS
 from flow.lib.model import ChatResponse, Model, ToolCall
 from flow.lib.session import load_session
 from flow.memory import memory as memory_module
 from flow.memory import store as memory_store
-from flow.memory.memory import MEMORY_BLOCK_CLOSE, MEMORY_BLOCK_OPEN, save_memory
+from flow.memory.memory import (
+	MEMORY_BLOCK_CLOSE,
+	MEMORY_BLOCK_OPEN,
+	build_memory_block,
+	save_memory,
+)
 from flow.tools.builtins import bind_update_memory, sync_builtin_tools
 
 NOT_EXECUTED = "not_executed"
+
+# A small window and a file bigger than any budget it can produce, so the characters the prompt
+# actually carries ARE the budget rather than a number inferred from it.
+WINDOW_TOKENS = 8000
+FILE_CHARS = 20000
+# The fill character has to be one the file's own framing cannot contain. "F" was wrong by exactly 2:
+# the injected body is wrapped in "--- File: … ---" and a "[File truncated …]" marker, so counting it
+# counted the framing as file content and the no-notes budget read 15591 instead of 15589.
+FILE_FILL = "ø"
 
 # The fixtures below are deliberately local rather than imported from the module beside this one.
 # Each test module has to stand on its own so a branch can carry one without the other, and a shared
@@ -767,3 +782,145 @@ class TestTheIterationBudgetAndAPendingApproval(IntegrationTestCase):
 		self.assertEqual(run.status, "Paused")
 		self.assertTrue(run.questions)
 		self.assertEqual(json.loads(run.questions)[0]["key"], "m1")
+
+
+# ---------------------------------------------------------------------------------------------
+# A kept note costs what it costs
+# ---------------------------------------------------------------------------------------------
+
+
+class TestTheMemoryBlockIsBudgeted(IntegrationTestCase):
+	"""Features 12 and 13. S16a's Open question 2, answered.
+
+	The block rides on a stored message but is not in one, so the budget — which sums the stored
+	rows and the instructions delta — never saw it. A large set of notes and a large file were each
+	inside the window and could cross it together.
+	"""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		sync_builtin_tools()
+
+	def setUp(self):
+		self.model_doc = frappe.get_doc(_model_doc()).insert()
+		frappe.db.set_value("Flow Model", self.model_doc.name, "context_window", WINDOW_TOKENS)
+		self.agent = frappe.get_doc(_agent_doc(self.model_doc.name)).insert()
+
+	def tearDown(self):
+		frappe.flags.flow_run = None
+		frappe.flags.flow_unattended = False
+		frappe.db.rollback()
+		memory_store.drop_table()
+
+	def _session_with_a_file(self, file_chars: int):
+		"""A session with one user turn and one inline file bigger than any budget, so the text that
+		is injected is exactly the budget — which makes the budget observable instead of inferred."""
+		session = self.agent.new_session()
+		file_doc = frappe.get_doc(
+			{"doctype": "File", "file_name": "f.txt", "content": "x", "is_private": 1}
+		).insert(ignore_permissions=True)
+		session.append("messages", {"role": "user", "content": "summarise the file", "run": None})
+		session.append(
+			"attachments",
+			{
+				"file": file_doc.name,
+				"file_name": "f.txt",
+				"file_size": file_chars,
+				"extracted_text": FILE_FILL * file_chars,
+				"mode": "Inline",
+			},
+		)
+		session.save(ignore_permissions=True)
+		return session
+
+	def _injected_file_chars(self, session) -> int:
+		"""How many characters of the file's text the prompt actually carried."""
+		content = next(m for m in session._build_prompt_messages() if m["role"] == "user")["content"]
+		return content.count(FILE_FILL)
+
+	def _old_formula(self, session) -> int:
+		"""The budget as it was computed before a note cost anything: the window, less the reply
+		reservation, less the conversation text actually being sent. Spelled out rather than called,
+		so a change that subtracts anything ELSE from the budget turns the no-notes test red."""
+		window_chars = session._context_window() * CHARS_PER_TOKEN
+		reserved = RESERVED_OUTPUT_TOKENS * CHARS_PER_TOKEN
+		dialogue = sum(len(m.content or "") for m in session.messages) + session._instructions_delta()
+		return max(0, window_chars - reserved - dialogue)
+
+	def test_a_turn_with_no_notes_budgets_exactly_what_it_did_before(self):
+		"""Feature 13. Nothing else in the budget changes."""
+		session = self._session_with_a_file(FILE_CHARS)
+		self.assertIsNone(build_memory_block(self.agent.name, query="summarise the file"))
+
+		self.assertEqual(self._injected_file_chars(session), self._old_formula(session))
+
+	def test_the_budget_loses_exactly_the_block_this_turn_delivers(self):
+		"""Feature 12. Measured as the difference between two turns that differ only in the notes."""
+		without = self._session_with_a_file(FILE_CHARS)
+		injected_without = self._injected_file_chars(without)
+
+		save_memory(self.agent.name, content="Prefers metric units.", scope="user")
+		save_memory(self.agent.name, content="Works in the Pune office.", scope="user")
+		block = build_memory_block(self.agent.name, query="summarise the file")
+		self.assertTrue(block)
+
+		with_notes = self._session_with_a_file(FILE_CHARS)
+		injected_with = self._injected_file_chars(with_notes)
+
+		self.assertEqual(injected_without - injected_with, len(block))
+
+	def test_the_budget_is_told_what_the_block_costs(self):
+		"""The same claim from the other side: the value the prompt builder hands the budget is the
+		length of the block it is about to deliver, not an estimate and not zero."""
+		save_memory(self.agent.name, content="Prefers metric units.", scope="user")
+		block = build_memory_block(self.agent.name, query="summarise the file")
+		session = self._session_with_a_file(FILE_CHARS)
+
+		seen: list[tuple[int, int]] = []
+		original = type(session)._file_injection_budget
+
+		def spy(inner_self, memory_chars: int = 0) -> int:
+			value = original(inner_self, memory_chars=memory_chars)
+			seen.append((memory_chars, value))
+			return value
+
+		with patch.object(type(session), "_file_injection_budget", spy):
+			session._build_prompt_messages()
+
+		self.assertEqual(len(seen), 1, "the budget is computed once per turn")
+		self.assertEqual(seen[0][0], len(block))
+		self.assertEqual(seen[0][1], self._old_formula(session) - len(block))
+
+	def test_adding_notes_no_longer_grows_the_turn(self):
+		"""The reason any of this matters, asserted on the whole prompt rather than on the budget.
+
+		Before, a note was free at build time and paid for at the window: the file text was clamped
+		to a budget that did not know about the block, and then the block was appended on top. So
+		adding notes grew the turn by the size of the block. Now it grows it by the two characters
+		that separate the block from the message, and nothing else — the file gives the room up.
+
+		What is still unbudgeted, and deliberately out of this change's scope: the file's own framing
+		(the markers and the "attached the following" line) and the per-turn context block. Both were
+		unbudgeted before and are unbudgeted now. This asserts the DIFFERENCE, so neither can hide in
+		it.
+		"""
+		without = self._session_with_a_file(FILE_CHARS)
+		total_without = sum(len(m.get("content") or "") for m in without._build_prompt_messages())
+
+		for i in range(12):
+			save_memory(self.agent.name, content=f"Fact number {i}: " + "n" * 200, scope="user")
+		block = build_memory_block(self.agent.name, query="summarise the file")
+		self.assertGreater(len(block), 2000, "this test needs a block big enough to matter")
+
+		with_notes = self._session_with_a_file(FILE_CHARS)
+		total_with = sum(len(m.get("content") or "") for m in with_notes._build_prompt_messages())
+
+		# The two newlines that join the block to the message it rides on, and nothing else.
+		self.assertEqual(total_with, total_without + 2)
+
+	def test_control_the_file_is_what_fills_the_budget(self):
+		"""Without this, every assertion above could be passing on a prompt that carries no file at
+		all — zero injected characters satisfies "inside the window" perfectly."""
+		session = self._session_with_a_file(FILE_CHARS)
+		self.assertGreater(self._injected_file_chars(session), 1000)

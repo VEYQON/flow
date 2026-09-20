@@ -1,8 +1,9 @@
 ---
 type: spec
-status: approved  # draft → approved (HUMAN ONLY) → in-progress → implemented
+status: implemented  # draft → approved (HUMAN ONLY) → in-progress → implemented
 approved-by: owner pre-approval for unattended run 7 2026-09-20 — REVIEW BEFORE MERGE
 created: 2026-09-20
+implemented: 2026-09-20
 upstreamable: yes
 ---
 # Spec: S16c — an unattended run keeps no notes by construction, and a kept note is budgeted
@@ -170,8 +171,7 @@ See `s16c-memory-by-construction.features.json`.
   and the turn-context block added to the system message is not counted at all. Both were true before
   this change and are unchanged by it; D4 makes the notes stop being free, not everything. The test
   asserts the **difference** between a turn with notes and the same turn without, so neither of those
-  can hide inside it. **Open question 1.** (D4's tests arrive in the commit after this one; until
-  they do, this risk describes what is intended rather than what is asserted.)
+  can hide inside it. **Open question 1.**
 - **R6 — clearing a failed run's question loses more than the rendering, and both reviews said so.**
   The transcript still holds the tool call and the run still holds its error, so what was *proposed*
   is not lost. Three things are:
