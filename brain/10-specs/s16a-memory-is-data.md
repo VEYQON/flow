@@ -63,9 +63,14 @@ of truth; the row is a copy. (R8 Q7 — answered.)
 
 ### D2 — the approval question shows the exact note, its scope, and whether it adds or replaces
 `update_memory` gets a `confirm_prompt` callable, which `_confirmation_question` uses as the body.
-It states, in this order: that this will be remembered and read back in later conversations; whether
-it **adds** a new note or **replaces** an existing one (decided by whether `memory_id` was given);
-who will be able to read it; and then the note itself on its own line, quoted and escaped.
+It states, in this order: whether it **adds** a new note or **replaces** an existing one (decided by
+whether `memory_id` was given) **and, when it replaces, the id of the note whose wording is lost** —
+a question showing only the replacement text asks somebody to destroy a note they were never shown;
+**the scope the call actually asked for**, not a fixed reassurance, because a call asking for a
+shared note must not be described as "only you"; that this will be read back in later conversations;
+and then the note itself on its own line, quoted and escaped. Nothing on this path reads the
+database: what a person is asked must not depend on a query, and a question must never be the thing
+that runs first (E5 v1's lesson).
 
 The note is model-authored text placed in a question a person answers. E5 v2's lesson applies
 without amendment: **every control and format character is shown escaped, never obeyed**, so a
@@ -73,8 +78,10 @@ newline cannot write a second, friendlier question underneath the real one and a
 cannot reorder the sentence. S16a reuses the engine's own `escape_for_display` rather than writing
 a second escaper — one rule, one implementation, one set of tests.
 
-No truncation: the content cap is 500 characters (the controller's `validate`), which is shown in
-full. Nothing is elided.
+No truncation, ever: a note shown in part reads exactly like a note shown in full. A note longer
+than the stored limit (the controller's `MAX_CONTENT_CHARS`, imported rather than copied) **cannot
+be kept at all**, so the question says that instead of showing it — nobody is asked to approve text
+that would throw the moment they did.
 
 ### D3 — a conversation may write personal memories only
 The refusal lives in `save_memory`, the one function both the add and the edit funnel through, as an
@@ -109,6 +116,19 @@ tool **pauses with nobody to answer**, and parks in `Paused` forever. Every trig
 carries the memory tool would be exposed to it.
 
 **A trigger run may not write memory.** It receives a fixed not-executed result and does not pause.
+
+> **Corrected during verification, and this is the most important line in the spec.** The first
+> implementation put the refusal in `save_memory` — and the runtime decides to ask from the tool's
+> flag *before any tool body runs*, so a gated memory tool in a trigger with the doctype default
+> `auto_approve = 0` raised a question nobody could answer and **parked the run in `Paused`
+> forever, holding its session with it.** The gate meant to prevent the stranding caused it. All
+> three reviewers found it independently.
+> The fix: in an unattended run the memory tool is **rebound without its gate**
+> (`bind_update_memory(agent, unattended=True)`, swapped into this session's own runtime by
+> `FlowSession._rebind_memory_tool`). That reads backwards and is the opposite of what it does — a
+> question in a run with nobody to answer is not a protection. Ungated, the body runs, returns the
+> fixed not-kept record, and the run finishes. Nothing is written either way; the only thing the
+> gate decided there was whether the run survived.
 The reasons, in order:
 - A stalled trigger is worse than a lost memory. The run prompt says never strand a trigger.
 - A trigger with `auto_approve=1` would otherwise write memory *with every gate off* — the exact
@@ -142,9 +162,20 @@ Three reasons this shape and not a new message:
    own turn, is plainly not the operator's instruction. Moving it out of the system message and into
    a *second* system message would have kept it in the instruction voice.
 
-The fence cannot be forged. Memory content and ids are escaped on the way in, so a memory holding
-the closing marker, or a newline followed by a fake header, is shown as escaped characters and
-closes nothing. This is the same rule as D2, and the same function.
+The fence cannot be forged, from either side.
+ - **From inside a note**: content and ids are flattened on the way in, so a note holding the
+   closing marker, or a newline followed by a fake header, closes nothing and adds no line.
+ - **From the rest of the message**, found by the security review and fixed: the block now shares a
+   message with text the engine did not write — the person's words, an attached file's extracted
+   text, a retrieved chunk. A typed message cannot carry a forged block (the platform's sanitiser
+   strips it, measured on this bench), but **injected text does not pass through that sanitiser**,
+   and a document carrying a complete, well-formed block would have sat beside the real one in the
+   same role and the same shape. While the block lived in the system message nothing could reach
+   it; moving it created the vector. `neutralise_memory_markers` is applied to what is already in
+   the message as well, so **exactly one block in it is the engine's: the one it just wrote.**
+ - The neutraliser is a **pattern, not a pair of literals**. The first version replaced the two
+   exact strings and let `</AGENT_MEMORY>` and `</agent_memory >` through — a blacklist of
+   spellings, the shape of rule this project has already been bitten by.
 
 The turn-context block stays in the system message: it is not model-authored, it is the platform
 stating what is true now, and it is exactly the kind of thing the instruction voice is for.
@@ -191,8 +222,24 @@ See `s16a-memory-is-data.features.json`. Every one is a named test.
   (R8 Q10 — answered: not in this spec, and said out loud rather than fixed silently.)
 - **R5 — a prompt with no user message delivers no memory.** The block rides on the last user
   message; every path that reaches `_build_prompt_messages` has one (chat stores the turn before
-  building, resume replays a transcript that contains it). Pinned by a test so the day it is false,
-  it is loud.
+  building, resume replays a transcript that contains it). Pinned by
+  `test_a_prompt_with_no_user_message_carries_no_block_and_does_not_raise`, added during
+  verification — until then the claim was a comment, which this project has a Lesson about.
+- **R6 — a resume is treated as attended, always.** `resume` sets the active run with
+  `unattended=False`, so a person answering a question can have the note kept — which is the point.
+  A *trigger* run that paused on some other gated tool and is later resumed by its owner is
+  therefore able to keep notes for the rest of that call. That is a person answering, so it is the
+  intended reading, but it is stated here rather than left to be discovered.
+- **R7 — the approval body may not be what the person actually sees.** The security review found
+  that the web client renders the tool's argument table for any call that has arguments and shows
+  the shipped `confirm_prompt` body only when there are none. If that is so in production, none of
+  D2's wording or escaping reaches the approver, and a note's control characters are rendered by
+  the browser instead. **No frontend file is touched by this branch**, and this was not verified in
+  a running app. **Open question 5**, and the first thing to check before shipping.
+- **R8 — a note at the 100-note ceiling makes a thumbs-down lose its rating.** `_add` throws at the
+  cap and that throw now happens inside `submit_feedback` before the rating is recorded. It counts
+  against the person's own bucket now rather than the shared one, so it is reachable sooner.
+  Pre-existing in shape, newly reachable — recorded, not fixed here.
 
 ## Open questions for the owner
 1. **Should a thumbs-down create a pending review row an administrator promotes to shared memory,
@@ -203,7 +250,11 @@ See `s16a-memory-is-data.features.json`. Every one is a named test.
 3. **Should an administrator be able to approve a shared memory the model proposes?** S16a removes
    the model's ability to write one and offers nothing in its place. A "propose a shared memory"
    flow may be wanted; it is not built here.
-4. **Should `update_memory`'s gate be bypassable for a trusted agent?** D4 refuses for unattended
+4. **Should the memory block be counted against the file-injection budget** now that it shares a
+   message with injected files? See R4.
+5. **Does the approval body actually reach the approver in the web client?** See R7. If it does not,
+   D2's whole design is dark on the path that matters and a small frontend change is needed.
+6. **Should `update_memory`'s gate be bypassable for a trusted agent?** D4 refuses for unattended
    runs. An agent whose whole purpose is unattended curation cannot do it any more.
 
 ## The tests this spec changes, named

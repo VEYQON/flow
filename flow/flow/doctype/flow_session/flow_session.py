@@ -189,7 +189,9 @@ class FlowSession(Document):
 
 		# The update_memory tool reads this to stamp source_run. Scope tightly to the runtime
 		# call and clear after, so a stale run never leaks onto a later write in this request.
-		_set_active_run(run.name, unattended=bool(auto_approve) or source == "Trigger")
+		unattended = bool(auto_approve) or source == "Trigger"
+		self._rebind_memory_tool(unattended)
+		_set_active_run(run.name, unattended=unattended)
 		if stream:
 			return stream_with_persistence(lambda: self._runtime.run(run_input, stream=True), run)
 
@@ -243,6 +245,35 @@ class FlowSession(Document):
 				},
 			)
 		self.save(ignore_permissions=True)
+
+	def _rebind_memory_tool(self, unattended: bool) -> None:
+		"""Take the gate off the memory tool when nobody is there to answer it.
+
+		The refusal to keep a note in an unattended run lives in the tool's body, and the body is
+		never reached: the runtime decides to ask from the tool's flag alone, before any tool runs.
+		So a gated memory tool in a trigger run raised a question nobody could answer and parked the
+		run in Paused, holding its session — the failure the spec exists to prevent, caused by the
+		gate meant to prevent it.
+
+		Ungated, the body runs, returns the fixed not-kept record, and the run finishes. Nothing is
+		written either way; the only thing this decides is whether the run survives.
+
+		The runtime is this session's own — rebuilt from the record every time a session is loaded —
+		so replacing an entry in it affects this run and nothing else. Both the list the model is
+		offered and the map the runtime dispatches on are updated, because a tool present in one and
+		not the other is a worse state than either.
+		"""
+		if not unattended or not self.agent:
+			return
+		from flow.memory import memory as memory_module
+		from flow.tools.builtins import bind_update_memory
+
+		runtime = self._runtime
+		for index, existing in enumerate(runtime.tools):
+			if existing.name == memory_module.MEMORY_TOOL_SLUG:
+				replacement = bind_update_memory(self.agent, unattended=True)
+				runtime.tools[index] = replacement
+				runtime._tools_by_name[replacement.name] = replacement
 
 	def _context_window(self) -> int:
 		"""The effective model's context window in tokens (a default when unknown)."""
@@ -360,14 +391,14 @@ class FlowSession(Document):
 		- Inline files: full text re-injected on their turn, clamped to the remaining budget.
 		- Retrieval files: a short note marks where each was attached; for the latest user turn
 		  the most relevant chunks (by that turn's query) are injected in place of the full text.
-		- Agent memory: the agent's saved memories are appended to the system message.
+		- Agent memory: the agent's kept notes are appended to the last user message, fenced, as data.
 		- Per-turn context: the current date, time, zone and user, rebuilt every turn.
 
 		An empty transcript stays empty: nothing was said yet, so there is nothing to send,
 		and resume relies on that to tell an unstarted session from a resumable one.
 		"""
 		from flow.knowledge.retriever import retrieve_attachments
-		from flow.memory.memory import build_memory_block
+		from flow.memory.memory import build_memory_block, neutralise_memory_markers
 
 		if not self.messages:
 			return []
@@ -438,7 +469,16 @@ class FlowSession(Document):
 			# prompt, and a resume replays a transcript containing it. Pinned by a test, so the
 			# day that stops being true the notes going missing is loud rather than silent.
 			if last_user is not None:
-				last_user["content"] = f"{last_user['content'] or ''}\n\n{memory}".lstrip()
+				# Everything already in this message — the person's own words, an attached file's
+				# text, a retrieved chunk — is text the engine did not write, and some of it can be
+				# chosen by whoever wrote the document. While the block lived in the system message
+				# none of that could reach it. Here it shares a message with it, so a file
+				# containing a complete, well-formed block would sit beside the real one in the same
+				# role and the same shape. The markers are neutralised in what is already there, for
+				# the same reason they are neutralised inside a note: exactly one block in this
+				# message is the engine's, and it is the one it just wrote.
+				before = neutralise_memory_markers(last_user["content"] or "")
+				last_user["content"] = f"{before}\n\n{memory}".lstrip()
 		return messages
 
 	def _current_instructions(self) -> str | None:

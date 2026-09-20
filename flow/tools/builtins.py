@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from typing import Any
 
 import frappe
 from frappe import _
@@ -181,35 +181,72 @@ def _memory_confirm_prompt(args: dict[str, Any]) -> str:
 	and a right-to-left override would reorder the sentence around it. That is E5 v2's rule and
 	this uses E5 v2's own function, not a second copy of it.
 
-	Nothing here is taken from the note: whether this adds or replaces comes from whether an id was
-	given, and who will be able to read it is fixed text. A note claiming to be "shared with
-	everyone" changes nothing about what the person is told.
+	Everything except the note itself and the two identifiers is a literal chosen by an `if`.
+	Nothing is interpolated into a formatter and nothing here reads the database: what a person is
+	asked must not depend on a query, and a question must never be the thing that runs first.
+
+	Three facts the answer depends on, all shown: whether this ADDS or REPLACES and, if it
+	replaces, the id of the note that will be overwritten — a question showing only the replacement
+	text asks somebody to destroy a note they were never shown. The scope the call asked for, as
+	the call asked for it, because a fixed sentence saying "only you" would be a false reassurance
+	the moment a call asked for something else. And a note too long to be kept at all says so
+	instead of being shown: no truncation, ever, and no approving text that cannot be saved.
 	"""
+	from flow.flow.doctype.flow_agent_memory.flow_agent_memory import MAX_CONTENT_CHARS
 	from flow.lib.agent import escape_for_display
 
 	content = args.get("content")
 	content = content if isinstance(content, str) else str(content)
-	replacing = bool(args.get("memory_id"))
-	return "\n".join(
-		[
-			_("Replace a note kept about you with this one?")
-			if replacing
-			else _("Add this note about you, and keep it?"),
-			"",
+	memory_id = args.get("memory_id")
+	memory_id = memory_id.strip() if isinstance(memory_id, str) else ""
+	scope = args.get("scope")
+
+	lines = [
+		_("Replace a note kept about you with this one?")
+		if memory_id
+		else _("Add this note about you, and keep it?"),
+		"",
+	]
+	if memory_id:
+		lines.append(
+			_("It replaces the note {0}, whose wording is lost.").format(escape_for_display(memory_id))
+		)
+	if scope == "user":
+		lines.append(_("Only you will be able to read it."))
+	else:
+		# The call asked for something other than a note of this person's own. It will be refused,
+		# and a question that said "only you" here would be reassuring about the wrong thing.
+		lines.append(
+			_("It asks to be kept as {0}, which is not something a conversation may do.").format(
+				escape_for_display(str(scope))
+			)
+		)
+	lines.append(_("It will be given back on later turns, including in future conversations."))
+	lines.append("")
+	if len(content) > MAX_CONTENT_CHARS:
+		lines.append(
 			_(
-				"It will be given back on later turns, including in future conversations. Only you "
-				"will be able to read it."
-			),
-			"",
-			f'"{escape_for_display(content)}"',
-		]
-	)
+				"The note is {0} characters and nothing longer than {1} can be kept, so approving this "
+				"saves nothing."
+			).format(len(content), MAX_CONTENT_CHARS)
+		)
+	else:
+		lines.append(f'"{escape_for_display(content)}"')
+	return "\n".join(lines)
 
 
-def bind_update_memory(agent: str | None) -> Tool:
+def bind_update_memory(agent: str | None, *, unattended: bool = False) -> Tool:
 	"""Build an `update_memory` tool bound to `agent`. The binding comes from the agent's
 	config, never the model. The registered builtin binds None, so an unbound call
-	fails closed."""
+	fails closed.
+
+	`unattended` builds the same tool WITHOUT its gate. That reads backwards and is the opposite
+	of what it does. A gate is a question, and a question in a run with nobody to answer it is not
+	a protection — it is a run parked in Paused until somebody notices, holding its session with
+	it. The body refuses to write in such a run anyway, so an ungated tool here means the model
+	gets a plain sentence saying nothing was kept, and the run finishes. The choice is between
+	refusing the write and stranding the run; it is not between refusing and allowing.
+	"""
 
 	def update_memory(
 		content: str,
@@ -239,8 +276,8 @@ def bind_update_memory(agent: str | None) -> Tool:
 	return tool(
 		update_memory,
 		description=_UPDATE_MEMORY_DESCRIPTION,
-		requires_confirmation=True,
-		confirm_prompt=_memory_confirm_prompt,
+		requires_confirmation=not unattended,
+		confirm_prompt=None if unattended else _memory_confirm_prompt,
 	)
 
 

@@ -17,6 +17,7 @@ user's own notes (`from_conversation`).
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import Any
 
@@ -32,7 +33,6 @@ SEARCH_TOP_K = 12
 RECENT_ALWAYS = 3
 # Hard ceiling per (agent, scope) bucket — past it, adds are refused to force consolidation.
 MAX_ACTIVE_MEMORIES = 100
-
 _SCOPE_BY_ARG = {"agent": "Agent", "user": "User"}
 
 # The fence around the notes handed to the model. Its closing marker is the only thing telling the
@@ -101,11 +101,15 @@ def save_memory(
 
 	scope_value = _SCOPE_BY_ARG.get(scope)
 	if not scope_value:
+		# A conversation is never told the value it may not use. Naming it here would contradict
+		# the tool's own description and invite the retry the refusal exists to stop.
+		if from_conversation:
+			return dict(MEMORY_NOT_EXECUTED["shared_memory"])
 		frappe.throw(_("scope must be 'agent' or 'user'."), title=_("Invalid Scope"))
 
 	if memory_id:
 		memory_id = memory_id.strip()
-		if from_conversation and _scope_of(memory_id) == "Agent":
+		if from_conversation and _scope_of(agent, memory_id) == "Agent":
 			return dict(MEMORY_NOT_EXECUTED["shared_memory"])
 		return _update(agent, memory_id, content, keywords)
 
@@ -114,15 +118,19 @@ def save_memory(
 	return _add(agent, content, scope_value, keywords=keywords)
 
 
-def _scope_of(memory_id: str) -> str | None:
-	"""The scope of an existing row, or None when there is no such row. Read before an edit is
-	allowed, because an edit reached by id says nothing about what it is editing."""
-	return frappe.db.get_value("Flow Agent Memory", memory_id, "scope")
+def _scope_of(agent: str, memory_id: str) -> str | None:
+	"""The scope of one of THIS agent's rows, or None when there is no such row. Read before an
+	edit is allowed, because an edit reached by id says nothing about what it is editing.
+
+	Filtered by agent so an id belonging to somewhere else reads as unknown, which is what it is —
+	otherwise the two different refusals would tell a caller whether a guessed id exists.
+	"""
+	return frappe.db.get_value("Flow Agent Memory", {"name": memory_id, "agent": agent}, "scope")
 
 
 def build_memory_block(agent: str | None, *, query: str = "") -> str | None:
-	"""The <agent_memory> block for the system prompt, or None when the agent has no
-	memory tool or nothing is stored."""
+	"""The <agent_memory> block appended to the last user message, or None when the agent has no
+	memory tool or nothing is kept. Never a system message: what is in it is written by a model."""
 	if not agent or not _has_memory_tool(agent):
 		return None
 
@@ -172,14 +180,33 @@ def _flatten(text: str | None) -> str:
 	flattened = "".join(
 		" " if (ch != " " and unicodedata.category(ch)[0] in "CZ") else ch for ch in (text or "")
 	)
-	flattened = flattened.replace(MEMORY_BLOCK_CLOSE, "</ agent_memory >")
-	flattened = flattened.replace(MEMORY_BLOCK_OPEN, "< agent_memory >")
-	return " ".join(flattened.split())
+	return " ".join(neutralise_memory_markers(flattened).split())
+
+
+# Anything that could be READ as the fence, not only the two exact strings. The first version
+# replaced the literals and let `</AGENT_MEMORY>` and `</agent_memory >` through — a blacklist of
+# two spellings, which is the shape of rule this codebase has already been bitten by. Case is
+# ignored, surrounding space is allowed, and anything inside the angle brackets after the name is
+# swallowed, so a marker wearing an attribute is caught too.
+_MEMORY_MARKER = re.compile(r"<\s*/?\s*agent_memory\b[^>]*>", re.IGNORECASE)
+
+
+def neutralise_memory_markers(text: str) -> str:
+	"""Break every fence marker in `text` so only the engine's own block carries one.
+
+	Used on two kinds of text and for one reason. Inside a note, because a note is written by a
+	model and could otherwise end the quoted region and speak in the turn's own voice. And on
+	everything already in the message the block is appended to — the person's words, an attached
+	file, a retrieved chunk — because none of that is written by the engine either, and a document
+	carrying a complete, well-formed block would sit beside the real one in the same role and the
+	same shape. Exactly one block in that message is the engine's: the one it just wrote.
+	"""
+	return _MEMORY_MARKER.sub(lambda m: m.group(0).replace("<", "< ").replace(">", " >"), text or "")
 
 
 def save_feedback_memory(run: Any, comment: str) -> str | None:
 	"""Store a thumbs-down comment as a note for the person who gave it, so their later runs
-	correct course. Returns None (a no-op) when the agent has no memory tool.
+	correct course. Returns None (a no-op) when the agent has no memory tool. USER scope.
 
 	It used to be stored as a SHARED note. Nothing on this path involves a model or an approval:
 	one person typing into a feedback box became standing context that every other user of the
