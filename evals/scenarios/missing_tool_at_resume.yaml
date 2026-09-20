@@ -1,5 +1,5 @@
 name: missing_tool_at_resume
-description: The tool is gone by the time the approval arrives; nothing runs and no answer is echoed back (S15).
+description: The tool is gone by the time the approval arrives; nothing runs and no answer is echoed back. This covers the missing-tool half of S15 only; the stale-gate half is covered by the unit module.
 user_message: pay alice
 agent:
   instructions: Be terse. Use the tools you are given.

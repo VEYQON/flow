@@ -160,6 +160,15 @@ def _check_tool_calls(expected: list[dict[str, Any]], actual, failures: list[str
 				)
 
 
+def _as_list(value) -> list[str]:
+	"""A bare string in the YAML means one string, not a sequence of characters. Iterating it
+	directly would assert that the result contains "n", "o", "t"... which nearly anything does —
+	a check that cannot fail, written by a typo."""
+	if value is None:
+		return []
+	return [value] if isinstance(value, str) else list(value)
+
+
 def _check_tool_results(expected: dict[str, Any], messages, label: str, failures: list[str]) -> None:
 	"""Assert on what each pending call was told, by tool_call_id.
 
@@ -173,10 +182,10 @@ def _check_tool_results(expected: dict[str, Any], messages, label: str, failures
 			failures.append(f"[{label}] no tool result was recorded for {call_id!r}")
 			continue
 		content = results[call_id]
-		for text in checks.get("contains") or []:
+		for text in _as_list(checks.get("contains")):
 			if text not in content:
 				failures.append(f"[{label}] {call_id} result does not contain {text!r}: {content!r}")
-		for text in checks.get("absent") or []:
+		for text in _as_list(checks.get("absent")):
 			if text in content:
 				failures.append(f"[{label}] {call_id} result must not contain {text!r}: {content!r}")
 		if "equals" in checks and content != checks["equals"]:

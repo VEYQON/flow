@@ -39,7 +39,7 @@ CONFIRM_SCALAR_TYPES = (str, bool, int, float)
 # Every approval question the engine raises carries exactly these options, in this order —
 # `_confirmation_question` builds them and nothing else in the engine does. At resume they are how
 # a question the person was asked to APPROVE is told apart from a question a tool asked itself.
-CONFIRM_ANSWER_OPTIONS = ["Approve", "Deny"]
+CONFIRM_ANSWER_OPTIONS = ("Approve", "Deny")
 # Said to the model when a pending call will not be acted on. Both are literals and neither carries
 # the person's answer: recording that answer as the call's result is the defect these exist to
 # stop, because the model then reads its own tool call as having returned the word a person typed.
@@ -253,13 +253,20 @@ class Agent:
 
 		1. the tool is not here at all — nothing can honour the answer, whatever it said;
 		2. the tool is here and gated — today's path, unchanged, group rule included;
-		3. the tool is here, is not gated, and the person was nonetheless asked to approve it, so
-		   the gate was turned off while the question was open — the basis of the answer is gone;
+		3. what the person was asked and what the tool now requires disagree in either direction —
+		   the gate was turned off, or turned on, while the question was open — so the basis of
+		   the answer is gone and it must be asked again rather than acted on;
 		4. anything else — the tool asked its own question, and the answer is its result, as ever.
 
-		Row 3 reads `asked`, because it is the only thing that still knows what was asked. With
-		no record it cannot fire and behaviour is exactly what it was, which is the right
-		fallback for a run that paused before any of this existed; rows 1 and 2 need no record.
+		Row 3 is symmetric, and deliberately so. A gate turned OFF while the question was open is
+		an approval that no longer applies; a gate turned ON is a tool about to execute on an
+		answer to a question nobody was asked to approve. The second of those EXECUTES if it is
+		not caught, so both directions end in the same place: not executed, ask again.
+
+		Rows 2 and 3 read `asked`, because it is the only thing that still knows what was asked.
+		With no record the tool's own gate stands in for it, so the two can never disagree, row 3
+		cannot fire, and behaviour is exactly what it was — the right fallback for a run that
+		paused before any of this existed. Row 1 needs no record at all.
 		"""
 		_validate_messages(messages)
 		messages = list(messages)
@@ -269,20 +276,27 @@ class Agent:
 
 		denied_group = _has_denial(answers)
 		approval_keys = _approval_question_keys(asked)
+		have_record = bool(asked)
 		resolved: list[tuple[ToolCall, str]] = []
 		for call in pending:
 			answer = answers.get(call.id)
 			tool = self._tools_by_name.get(call.name)
+			# What the person was asked. With no record of the pause there is nothing to read it
+			# from, so the tool's own gate stands in and the two can never disagree — which is
+			# exactly the behaviour that existed before any of this was recorded.
+			asked_to_approve = (
+				call.id in approval_keys if have_record else bool(tool and tool.requires_confirmation)
+			)
 			if tool is None:
 				content = _not_executed("unavailable")
-			elif tool.requires_confirmation:
+			elif asked_to_approve and tool.requires_confirmation:
 				# Only the exact "Approve" ever executes, so that is the only answer the group's
 				# denial has to hold back; everything else resolves exactly as it always has.
 				if denied_group and answer == "Approve":
 					content = _withheld_confirmation()
 				else:
 					content = self._resolve_confirmation(call, answer)
-			elif call.id in approval_keys:
+			elif asked_to_approve or tool.requires_confirmation:
 				content = _not_executed("approval_no_longer_applies")
 			else:
 				content = _serialize_tool_result(answer)
@@ -662,7 +676,11 @@ def _approval_question_keys(asked: list[Any] | None) -> frozenset[str]:
 			key, options = question.get("key"), question.get("options")
 		else:
 			key, options = getattr(question, "key", None), getattr(question, "options", None)
-		if isinstance(key, str) and options == CONFIRM_ANSWER_OPTIONS:
+		if (
+			isinstance(key, str)
+			and isinstance(options, list | tuple)
+			and tuple(options) == CONFIRM_ANSWER_OPTIONS
+		):
 			keys.add(key)
 	return frozenset(keys)
 

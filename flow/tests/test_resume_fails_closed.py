@@ -171,15 +171,21 @@ class TestAMissingToolFailsClosed(UnitTestCase):
 		self.assertEqual(recorder.ran, [])
 
 	def test_approve_on_a_tool_missing_from_the_runtime_executes_nothing(self):
+		"""Note what this does and does not prove. "Nothing ran" was already true before this
+		change — a runtime with no such tool could not run it either way. The defect was never
+		an execution; it was the answer being written in as the tool's result. So this asserts
+		BOTH halves: it is the forward guard against a future row that executes, and the result
+		assertion is the half that was actually broken."""
 		recorder = _Recorder()
 		_agent, _model, paused = _pause_on_one(recorder)
 
 		# The resuming runtime was rebuilt without send_money — the production shape, where a
 		# resume loads the session's agent afresh from its records.
 		resuming = Agent(model=FakeModel([_final("ok")]), tools=[recorder.delete_records])
-		resuming.resume(paused.messages, {"c1": "Approve"}, asked=paused.questions)
+		resumed = resuming.resume(paused.messages, {"c1": "Approve"}, asked=paused.questions)
 
 		self.assertEqual(recorder.ran, [])
+		self.assertEqual(json.loads(_tool_results(resumed.messages)["c1"]), UNAVAILABLE)
 
 	def test_the_missing_tools_result_is_the_fixed_record_and_never_the_answer(self):
 		recorder = _Recorder()
@@ -228,11 +234,27 @@ class TestAMissingToolFailsClosed(UnitTestCase):
 		self.assertNotIn(secret, json.dumps(resumed.messages))
 
 	def test_the_fixed_record_names_no_platform_vendor_or_model(self):
-		"""CLAUDE.md rule 3. Both records are read by the model."""
-		for record in (UNAVAILABLE, APPROVAL_NO_LONGER_APPLIES):
-			text = json.dumps(record).lower()
+		"""CLAUDE.md rule 3. Both records are read by the model.
+
+		It reads the ENGINE's strings, not this module's copies of them: a test that scanned its
+		own literals would stay green while the production message named a platform, which is the
+		one thing it exists to stop.
+		"""
+		messages = agent_module.NOT_EXECUTED_MESSAGES
+		self.assertEqual(sorted(messages), ["approval_no_longer_applies", "unavailable"])
+		for reason, message in messages.items():
+			text = message.lower()
 			for word in ("frappe", "flow", "erpnext", "mariadb", "openai", "anthropic", "gpt", "claude"):
-				self.assertNotIn(word, text, f"{word!r} must not be in {record['reason']}")
+				self.assertNotIn(word, text, f"{word!r} must not be in {reason}")
+
+	def test_this_modules_copies_match_the_engines(self):
+		"""The control for every equality assertion in this file: if the two drifted apart, the
+		tests would be pinning a string the engine does not produce."""
+		self.assertEqual(UNAVAILABLE["message"], agent_module.NOT_EXECUTED_MESSAGES["unavailable"])
+		self.assertEqual(
+			APPROVAL_NO_LONGER_APPLIES["message"],
+			agent_module.NOT_EXECUTED_MESSAGES["approval_no_longer_applies"],
+		)
 
 	def test_it_holds_without_any_record_of_what_was_asked(self):
 		"""A caller that passes no asked-questions record — an in-process caller, or a run that
@@ -268,13 +290,16 @@ class TestAGateTurnedOffWhilePausedFailsClosed(UnitTestCase):
 	answered a question whose basis has changed, so the answer cannot be acted on."""
 
 	def test_the_old_approval_does_not_execute_the_now_ungated_tool(self):
+		"""As above: not executing was already true here. The result assertion is the half that
+		this change is responsible for, so both are asserted together."""
 		recorder = _Recorder()
 		_agent, _model, paused = _pause_on_one(recorder)
 
 		resuming = Agent(model=FakeModel([_final("ok")]), tools=[_ungated_twin(recorder)])
-		resuming.resume(paused.messages, {"c1": "Approve"}, asked=paused.questions)
+		resumed = resuming.resume(paused.messages, {"c1": "Approve"}, asked=paused.questions)
 
 		self.assertEqual(recorder.ran, [])
+		self.assertEqual(json.loads(_tool_results(resumed.messages)["c1"]), APPROVAL_NO_LONGER_APPLIES)
 
 	def test_its_result_is_the_approval_no_longer_applies_record(self):
 		recorder = _Recorder()
@@ -300,6 +325,88 @@ class TestAGateTurnedOffWhilePausedFailsClosed(UnitTestCase):
 		self.assertEqual(json.loads(_tool_results(resumed.messages)["c1"]), APPROVAL_NO_LONGER_APPLIES)
 
 
+class TestAGateTurnedOnWhilePausedDoesNotExecute(UnitTestCase):
+	"""The mirror of the class above, and the direction that EXECUTES if it is not caught.
+
+	A tool asks its own question — not an approval question; nobody was shown "Approve this?" by
+	the engine. While the run is paused the tool is given `requires_confirmation`. At resume it
+	is present and gated, so on the way in it looks exactly like a call the person approved, and
+	an answer that happens to read "Approve" runs it. The person answered a tool's question and
+	a write went through on it.
+
+	Found by two reviewers independently during this spec's verify pass; it is the same defect
+	class as the rest of this module, pointing the other way.
+	"""
+
+	def _pause_on_a_tool_authored_question(self, ran: list[str]):
+		@tool
+		def review_draft(draft: str) -> Question:
+			"""Ask what to do with a draft."""
+			return Question(prompt="What should happen to this draft?", options=["Publish", "Hold"])
+
+		@tool(requires_confirmation=True)
+		def review_draft_gated(draft: str) -> str:
+			"""The same tool, after someone ticked the confirmation box."""
+			ran.append(draft)
+			return "published"
+
+		review_draft_gated.name = "review_draft"
+		model = FakeModel([_calls(("review_draft", {"draft": "d1"}, "c1")), _final("done")])
+		agent = Agent(model=model, tools=[review_draft])
+		return agent.run("what about the draft?"), review_draft_gated
+
+	def test_the_now_gated_tool_does_not_execute_on_an_answer_to_a_tools_own_question(self):
+		ran: list[str] = []
+		paused, gated = self._pause_on_a_tool_authored_question(ran)
+
+		resuming = Agent(model=FakeModel([_final("ok")]), tools=[gated])
+		resumed = resuming.resume(paused.messages, {"c1": "Approve"}, asked=paused.questions)
+
+		self.assertEqual(ran, [])
+		self.assertEqual(json.loads(_tool_results(resumed.messages)["c1"]), APPROVAL_NO_LONGER_APPLIES)
+
+	def test_a_tool_question_shaped_exactly_like_an_approval_is_not_told_apart(self):
+		"""The limitation, pinned rather than left unsaid. A question is recognised as an
+		approval by its options, so a tool that returns one offering exactly "Approve"/"Deny" is
+		indistinguishable from the engine's own, and a gate turned on underneath it still
+		executes. Telling these apart needs an explicit marker on the stored question, which
+		means changing what builds it — a rule-4 function, so it needs a spec that names it.
+		Nothing in this repository writes such a tool today. If one is ever written, this test
+		goes red and says what it costs."""
+		ran: list[str] = []
+
+		@tool
+		def review_draft(draft: str) -> Question:
+			"""Ask what to do with a draft."""
+			return Question(prompt="Approve this draft?", options=["Approve", "Deny"])
+
+		@tool(requires_confirmation=True)
+		def review_draft_gated(draft: str) -> str:
+			"""The same tool, after someone ticked the confirmation box."""
+			ran.append(draft)
+			return "published"
+
+		review_draft_gated.name = "review_draft"
+		model = FakeModel([_calls(("review_draft", {"draft": "d1"}, "c1")), _final("done")])
+		paused = Agent(model=model, tools=[review_draft]).run("what about the draft?")
+
+		resuming = Agent(model=FakeModel([_final("ok")]), tools=[review_draft_gated])
+		resuming.resume(paused.messages, {"c1": "Approve"}, asked=paused.questions)
+
+		self.assertEqual(ran, ["d1"], "known limitation: see this test's docstring")
+
+	def test_with_no_record_of_the_pause_it_is_todays_behaviour(self):
+		"""AC 11 in the direction that matters most: with nothing to read, the tool's own gate
+		stands in for what was asked, the two cannot disagree, and this row cannot fire."""
+		ran: list[str] = []
+		paused, gated = self._pause_on_a_tool_authored_question(ran)
+
+		resuming = Agent(model=FakeModel([_final("ok")]), tools=[gated])
+		resuming.resume(paused.messages, {"c1": "Approve"})
+
+		self.assertEqual(ran, ["d1"])
+
+
 class TestOrdinaryQuestionsAreUnchanged(UnitTestCase):
 	"""Row 4, the branch the `else` was written for: the tool asked the question itself, it is
 	still present, and it is not gated. The answer is its result, exactly as today."""
@@ -323,6 +430,9 @@ class TestOrdinaryQuestionsAreUnchanged(UnitTestCase):
 
 		self.assertEqual(_tool_results(resumed.messages)["c1"], "Customers")
 		self.assertEqual(resumed.output, "read it")
+		# The tool DID run before it asked. That is exactly why echoing its answer is right here
+		# and wrong in rows 1 and 3, where nothing ran at all.
+		self.assertEqual(ran, ["sales"])
 
 	def test_it_is_unchanged_with_no_asked_record_either(self):
 		ran: list[str] = []
@@ -407,6 +517,36 @@ class TestTheGatedPathIsByteIdentical(UnitTestCase):
 		self.assertEqual(recorder.ran, [("delete_records", {"folder": "invoices"})])
 		self.assertEqual(json.loads(_tool_results(resumed.messages)["k1"]), UNAVAILABLE)
 		self.assertEqual(_tool_results(resumed.messages)["k2"], "deleted invoices")
+
+
+class TestTheStreamingPathReadsTheRecordToo(UnitTestCase):
+	"""The only streaming test in this module was a missing-tool case, and row 1 never reads the
+	record — so dropping `asked` from the streaming call site would have left the suite green
+	while every streaming client lost row 3. This is the test that notices."""
+
+	def test_the_streamed_resume_withholds_a_stale_approval(self):
+		recorder = _Recorder()
+		_agent, _model, paused = _pause_on_one(recorder)
+
+		resuming = Agent(model=FakeModel([_final("ok")]), tools=[_ungated_twin(recorder)])
+		events = list(
+			resuming.resume(paused.messages, {"c1": "Approve"}, asked=paused.questions, stream=True)
+		)
+
+		self.assertEqual(recorder.ran, [])
+		ended = [e for e in events if isinstance(e, ToolEnded)]
+		self.assertEqual([(e.id, e.name) for e in ended], [("c1", "send_money")])
+		self.assertEqual(json.loads(ended[0].result), APPROVAL_NO_LONGER_APPLIES)
+
+	def test_a_gated_tool_still_executes_with_no_record_at_all(self):
+		"""AC 11's missing third: row 2 never reads the record, and this is what says so."""
+		recorder = _Recorder()
+		agent, _model, paused = _pause_on_one(recorder)
+		agent.model = FakeModel([_final("paid")])
+
+		agent.resume(paused.messages, {"c1": "Approve"})
+
+		self.assertEqual(recorder.ran, [("send_money", {"to": "alice", "amount": 500})])
 
 
 class TestTheLoadBearingFunctionsStillHaveNotMoved(UnitTestCase):

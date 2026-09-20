@@ -89,7 +89,7 @@ Read on `veyqon` @ `6fad779`, in the function, not the docstring.
 |---|---|---|
 | 1 | `tool is None` | **not executed** — fixed message, reason `unavailable` |
 | 2 | `tool.requires_confirmation` | **unchanged** — S14's group rule, then `_resolve_confirmation` |
-| 3 | the call was asked as an approval question (from the asked-questions record) | **not executed** — fixed message, reason `approval_no_longer_applies` |
+| 3 | what the person was asked and what the tool now requires **disagree in either direction** | **not executed** — fixed message, reason `approval_no_longer_applies` |
 | 4 | otherwise | **unchanged** — `_serialize_tool_result(answer)` |
 
 Row 1 is deliberately ahead of everything, including the question record: if the tool is gone there
@@ -97,12 +97,22 @@ is no reading of any answer under which the engine can honour it, so it fails cl
 needing to know what was asked. Row 4 is the branch the `else` was written for and is byte-identical
 to today.
 
-**How row 3 knows.** `Agent.resume` gains an optional keyword `asked` carrying the questions the
-pause raised — the rows already stored on the run. `FlowSession.resume` passes `run.questions`.
+**Row 3 is symmetric, and it was not in the first draft of this spec.** The verify pass found the
+mirror case independently through two reviewers, and it is the worse of the two because it
+*executes*: a tool that asked its OWN question, given `requires_confirmation` while the run was
+paused, is present and gated at resume, so it looks exactly like a call the person approved. An
+answer that happens to read `"Approve"` then runs it — and nobody was ever shown an approval
+question for it. Closing only the gate-off direction would have left a fail-open hole inside the
+same branch. So the row is stated once, for both directions: **what the person was asked and what
+the tool now requires must agree, or nothing runs.**
+
+**How rows 2 and 3 know.** `Agent.resume` gains an optional keyword `asked` carrying the questions
+the pause raised — the rows already stored on the run. `FlowSession.resume` passes `run.questions`.
 A pending call was an approval question iff `asked` holds an entry whose `key` is the call's id and
-whose `options` are exactly `["Approve", "Deny"]`. When `asked` is absent (an in-process caller that
-does not pass it, or a run paused before this change) row 3 cannot fire and behaviour is exactly
-today's — rows 1 and 2 still hold. That is a documented limitation, not a silent one: AC 11 pins it.
+whose `options` are exactly `CONFIRM_ANSWER_OPTIONS`. When `asked` is absent (an in-process caller
+that does not pass it, or a run paused before this change) **the tool's own gate stands in for what
+was asked**, so the two can never disagree, row 3 cannot fire, and behaviour is exactly today's.
+That is a documented limitation, not a silent one: AC 11 and AC 13 pin it in both directions.
 
 **The two fixed results.** Both are literals. Neither contains the person's answer, the tool's
 name, or any value from the answers map.
@@ -164,6 +174,18 @@ never reaches them.
 12. `_invoke`, `_resolve_confirmation`, `_confirmation_question` and `_has_denial` are
     byte-identical to their reviewed form, and upstream's `TestAgentConfirmation` is unmodified and
     green.
+13. A tool given `requires_confirmation` **while the run was paused**, whose pending call was a
+    question the tool asked itself, does **not** execute on the answer: it gets the
+    `approval_no_longer_applies` record. With no asked-questions record, it executes, as today.
+
+> **AC 13 is deliberately NOT in `s15-resume-fails-closed.features.json`.** That file may only
+> have its `passes` values flipped — entries are never added, removed or reworded (CLAUDE.md,
+> workflow rule 4) — and AC 13 came out of the verify pass, after the contract was written and
+> committed. It is proved by
+> `TestAGateTurnedOnWhilePausedDoesNotExecute.test_the_now_gated_tool_does_not_execute_on_an_answer_to_a_tools_own_question`
+> and by probe F (revert the symmetric condition → that test, and only that test, goes red).
+> **Adding the thirteenth entry is a one-line change for a human**, and it should be made when
+> this spec is reviewed.
 
 ## Risks
 - **Fail-closed changes behaviour for an ordinary tool-authored question whose tool went missing.**
@@ -171,9 +193,24 @@ never reaches them.
   wording says the *action* was not carried out, which is true — but it is less precise for that
   case. Accepted: it is strictly safer than echoing the answer, and the alternative is trusting a
   runtime that has already lost the tool.
-- **A tool-authored `Question` with options exactly `["Approve", "Deny"]`** is read by row 3 as an
-  approval question. It then fails closed rather than resolving. Accepted, and it fails in the safe
-  direction; a tool wanting an approval-shaped question should set `requires_confirmation`.
+- **A tool-authored `Question` with options exactly `["Approve", "Deny"]` cannot be told apart from
+  the engine's own**, because the options are the whole basis of the recognition. In the gate-off
+  direction that fails closed (safe). **In the gate-on direction it fails OPEN**: such a question,
+  on a tool that becomes gated while paused, still reaches row 2 and executes. Telling them apart
+  needs an explicit marker on the stored question, which means changing what builds it —
+  `_confirmation_question` is a rule-4 function, so that needs a spec that names it. **Nothing in
+  this repository writes such a tool today** (`grep -rn "Question(" flow/ --include=*.py` outside
+  tests hits only `flow/lib/agent.py`), and the limitation is pinned by
+  `test_a_tool_question_shaped_exactly_like_an_approval_is_not_told_apart` so it goes red the day
+  one is written. **Open question 4.**
+- **A tool replaced under the same name still executes on the old approval.** Row 2 checks that
+  the tool is present and gated, never that it is the *same* tool the person was shown a question
+  about. A QA reviewer demonstrated it: register a different function under the name `send_money`,
+  still gated, and an "Approve" given for the original runs the impostor. This is pre-existing on
+  `veyqon` and is **not fixed here** — the obvious fix, comparing the stored prompt against a
+  freshly built one, would withhold whenever an administrator merely edits the tool's title, which
+  is a false-positive cost this spec has no mandate to take on. **Open question 3**, and it wants
+  its own spec.
 - **Old paused runs** carry no marker beyond their stored options, which is exactly what row 3
   reads — so they are covered without a migration.
 - The `asked` argument widens `Agent.resume`'s signature. It is keyword-only with a default, so
@@ -190,6 +227,15 @@ never reaches them.
    the model is told nothing happened. The argument for halting is that a dropped approval is a
    failure, not a tool error. The argument against is that halting on a missing tool makes an
    ordinary tool-authored question fatal. Left as it is; **the owner's call.**
+3. **Should a resume check that the tool is the SAME tool the person was shown a question about?**
+   Today it checks only that one by that name is present and gated. See Risks. The cheap version
+   (compare the stored prompt to a freshly built one) withholds on an innocuous title edit; the
+   honest version records what the arguments and the tool were at pause time and compares those.
+   **Not decided here**; it needs its own spec, and it is the largest remaining hole in this path.
+4. **Should the stored question carry an explicit marker** saying it was an approval question,
+   instead of being recognised by its options? It would close the indistinguishable case in both
+   directions, and it means changing `_confirmation_question`, which rule 4 protects. **The
+   owner's call**, and the cost is one field on `Question` plus a fallback for old paused runs.
 
 ## Links
 - Found by [[40-architecture/tool-groups-findings]] (run 4, `loop/o3-tool-groups-spike`).
