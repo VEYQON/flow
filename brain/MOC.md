@@ -32,5 +32,11 @@ The hub. If a note isn't linked from here, it's lost.
 ## Decisions
 - **ADRs** → `20-adr/` — immutable. Supersede, never edit.
 
+## Evidence
+- `evals/` — scenarios run in-process against a scripted model. Every defect this project has
+  proven has one. A scenario that describes an **unfixed** defect carries `known_defect:` and is
+  reported in its own bucket, so it never makes the suite look green or red by accident.
+  See `evals/README.md`.
+
 ## Operations
 - [[changelog]] · **Daily** → `80-daily/` · **Retros** → `90-retro/`
