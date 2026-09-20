@@ -139,8 +139,31 @@ plain literal and not translated — matching the file rather than reformatting 
    not obviously consented to half of the group going ahead. The argument that it should not: free
    text is a *redirect*, not a refusal — the run continues by design so the model can adjust and
    re-ask, and stopping it would make every clarifying remark cancel everything beside it.
-   **AC 9 pins today's behaviour so that whichever way this is decided, the change is visible as a
-   test going red rather than as a silent shift.** Not mine to decide.
+   **Not mine to decide.**
+
+   **BOTH OPTIONS ARE NOW BUILT AND TESTED. Choosing costs a merge, not a build** (unattended run
+   5, 2026-09-20). See [[10-specs/s14b-all-or-nothing]].
+
+   | | **A — as it is** (`veyqon`) | **B — all-or-nothing** (`loop/s14b-all-or-nothing`) |
+   |---|---|---|
+   | the rule | an exact `"Deny"` anywhere withholds every `"Approve"` | in a group of more than one, a call runs only if **every** answer is exactly `"Approve"` |
+   | `{Approve, free text}` | `k1` executes, `k2` redirects, run continues | **nothing executes**, run continues so the model can re-ask |
+   | `{Approve, unanswered}` | `k1` executes | **nothing executes** |
+   | `{Approve, Deny}` | nothing executes, run halts | identical |
+   | `{Approve, Approve}` | both execute | identical |
+   | **one** question, any answer | — | **byte-identical**, and pinned by its own test |
+   | the diff | — | one predicate and one helper; the four rule-4 functions untouched |
+   | pinned by | AC 9 → `test_approve_beside_free_text_still_executes_the_approved_one_and_redirects_the_other` | `flow/tests/test_all_or_nothing.py`, 18 tests |
+
+   **The two are mutually exclusive, and the repository says so out loud**: on the S14b branch,
+   AC 9's test above is the **only** failing test in the whole suite (706 tests, one red). Neither
+   option can be adopted silently. If B is chosen, that one test is the thing a human must update
+   as part of accepting the decision — **the agent did not touch it** (workflow rule 4: never edit
+   a test to make something pass).
+
+   If B is chosen, see S14b's Open question 2: the withheld record would then sometimes say the
+   user "denied another action" when nobody denied anything, and wants one line of rewording in
+   `_withheld_confirmation` — a rule-4 function, so it needs a spec that names it.
 2. **Should a withheld Approve be re-offered on the next turn?** Today the model simply learns it
    did not run and decides for itself whether to propose it again. Leaving that to the model is the
    smaller change; making the engine re-ask is a feature.

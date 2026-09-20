@@ -217,6 +217,16 @@ class Agent:
 
 		The denial is read from the same `_has_denial` the caller uses to halt the run, so the
 		halt and the withholding can never disagree about what the answers said.
+
+		A group is answered as a group in the other direction too: in a pause holding MORE THAN
+		ONE question, a call runs only if every answer is exactly "Approve". A denial, free text,
+		or an unanswered question all withhold the rest. Approving one of two things while still
+		asking about the other is not consent to the first going ahead alone; the run continues,
+		so the model can put the question again.
+
+		A pause holding ONE question is untouched by that rule and is decided entirely by the
+		code that decided it before: `strict_group` is false by construction when there is one
+		pending call.
 		"""
 		_validate_messages(messages)
 		messages = list(messages)
@@ -225,6 +235,7 @@ class Agent:
 			raise ValueError("No questions awaiting an answer in the provided messages")
 
 		denied_group = _has_denial(answers)
+		strict_group = len(pending) > 1 and not _all_approved(pending, answers)
 		resolved: list[tuple[ToolCall, str]] = []
 		for call in pending:
 			answer = answers.get(call.id)
@@ -232,7 +243,7 @@ class Agent:
 			if tool is not None and tool.requires_confirmation:
 				# Only the exact "Approve" ever executes, so that is the only answer the group's
 				# denial has to hold back; everything else resolves exactly as it always has.
-				if denied_group and answer == "Approve":
+				if (denied_group or strict_group) and answer == "Approve":
 					content = _withheld_confirmation()
 				else:
 					content = self._resolve_confirmation(call, answer)
@@ -594,6 +605,19 @@ def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
 		options=["Approve", "Deny"],
 		allow_other=True,
 	)
+
+
+def _all_approved(pending: list[ToolCall], answers: dict[str, Any]) -> bool:
+	"""True only when the whole group was approved and nothing else was said.
+
+	Two conditions, because a group can fail to be unanimous in two ways. Every pending call must
+	carry an answer of exactly "Approve" — an unanswered one is not an approval — and no other
+	answer may have arrived alongside, so that a key naming nothing pending cannot smuggle a
+	non-approval past the check. Both failures point the same way: withhold.
+	"""
+	if any(answers.get(call.id) != "Approve" for call in pending):
+		return False
+	return all(value == "Approve" for value in answers.values())
 
 
 def _withheld_confirmation() -> str:

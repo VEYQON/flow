@@ -1,0 +1,18 @@
+{
+  "_comment": "Acceptance contract for brain/10-specs/s14b-all-or-nothing.md. The agent may ONLY flip 'passes'. Entries may never be added, removed, or reworded. Written 2026-09-20 (unattended run 5).",
+  "spec": "s14b-all-or-nothing",
+  "features": [
+    { "id": 1, "description": "Two questions answered Approve and free text execute nothing.", "passes": true },
+    { "id": 2, "description": "Free text and Approve is the same; neither the answer map's order nor the transcript's call order changes it.", "passes": true },
+    { "id": 3, "description": "Two questions, one Approve and one unanswered, execute nothing.", "passes": true },
+    { "id": 4, "description": "Three questions, two Approve and one free text, execute nothing.", "passes": true },
+    { "id": 5, "description": "Two questions both answered exactly Approve execute both tools and the run continues.", "passes": true },
+    { "id": 6, "description": "Approve beside Deny still executes nothing and still halts the run: S14 unchanged.", "passes": true },
+    { "id": 7, "description": "A single question answered Approve executes, with a byte-identical tool result.", "passes": true },
+    { "id": 8, "description": "A single question answered Deny produces today's denial record and halts, byte-identical.", "passes": true },
+    { "id": 9, "description": "A single question answered with free text produces today's redirect record byte-identical, and the run continues.", "passes": true },
+    { "id": 10, "description": "A withheld call still gets a tool result on its own tool_call_id carrying status not_executed.", "passes": true },
+    { "id": 11, "description": "The streaming resume withholds identically and emits the same ToolEnded events.", "passes": true },
+    { "id": 12, "description": "_invoke, _resolve_confirmation, _confirmation_question and _has_denial are byte-identical to their reviewed form, and upstream's TestAgentConfirmation is unmodified and green.", "passes": true }
+  ]
+}
