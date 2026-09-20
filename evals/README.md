@@ -1,0 +1,90 @@
+# Evaluations
+
+A scenario runner for the agent loop. It runs entirely in this process against a scripted model.
+
+## What these evaluate, and what they do not
+
+**They test the plumbing, not the judgement.** A scenario says: given this model output, does the
+engine call the right tool, ask for approval when it should, execute only on the exact "Approve",
+and never tell the person something is done while it is not. Every one of those is a property of
+the engine, and a scripted model is the right instrument for it — it makes the answers
+deterministic and the failures unambiguous.
+
+**They say nothing about whether a real model would choose well.** Whether the assistant picks the
+right tool, phrases an approval sensibly, or refuses when it should is a question about the model,
+and none of it is measured here. Real-model evaluations need credentials and a budget decision from
+the owner. They are not part of this, and nothing here should be quoted as evidence about model
+quality.
+
+## Running them
+
+    evals/run.sh                                  # all scenarios
+    evals/run.sh --scenario deny_stops_the_batch
+    evals/run.sh --list
+
+The wrapper exists for one reason: the engine calls the platform's translation helper when it
+builds an approval question, and that needs a platform context. `run.py` itself is plain Python and
+makes no request of its own; the wrapper only supplies the import context. Set `FLOW_BENCH` and
+`FLOW_SITE` if yours are not the defaults.
+
+**The verdict is the last line, `EVALS_GATE=GREEN` or `EVALS_GATE=RED reason=…`.** The wrapper does
+not trust the wrapped command's exit code — that lesson is in `CLAUDE.md` and it applies here for
+exactly the same reason — so it reads the runner's own summary line instead, and treats a missing
+summary as a failure rather than a pass.
+
+`python3 evals/run.py` works directly too, if you already have a context.
+
+## `deny_stops_the_batch` is RED on `veyqon`, and that is correct
+
+Four of the five scenarios pass on `veyqon`. `deny_stops_the_batch` asserts that a Deny beside an
+Approve executes neither, which is [[../brain/10-specs/s14-deny-stops-batch|S14]]'s behaviour and
+is not on `veyqon`:
+
+    deny_stops_the_batch  FAIL
+      - [approve_and_deny] expected [] to run, saw ['send_money']
+      - [deny_and_approve] expected [] to run, saw ['delete_records']
+
+The suite reproduced that defect independently on its first run, which is the most useful thing it
+has done so far. It turns green when S14 merges, and it is worth keeping red until then rather than
+weakening it: a scenario that describes what should happen is more useful than one that describes
+what does.
+
+## No network, no credentials, no real model
+
+The runner builds a code `Agent` around a scripted model defined in `run.py`. It never constructs
+the platform's `Model` class, never reads a credential, and never makes a request.
+
+`assert_no_real_model()` runs before any scenario and **refuses to start** if the environment looks
+like a real model is configured — any known provider credential variable, or the explicit
+`FLOW_EVALS_ALLOW_REAL` escape hatch being set. That refusal is a hard error, not a warning, and
+`tests/test_runner.py` proves it fires.
+
+It does not read `sites/*/site_config.json`, and it must never be changed to.
+
+## Tests
+
+The runner has its own tests, outside the bench's test gate because nothing under `flow/` changes:
+
+    python3 -m unittest discover -s evals/tests -t .
+
+## Writing a scenario
+
+One YAML file per scenario in `scenarios/`. The fields:
+
+| field | meaning |
+|---|---|
+| `name` | unique slug; matches the filename |
+| `description` | one line, for the table |
+| `user_message` | what the person says |
+| `agent.instructions` | the agent's instructions |
+| `tools` | each `{name, description, parameters, requires_confirmation}`; every tool is a stub that records its call and returns `result` |
+| `model_script` | the scripted turns, in order: each is `{tool_calls: [{name, arguments, id}]}` or `{content: "..."}` |
+| `expect.tool_calls` | the tool calls the engine should make, in order, as `{name, arguments}`; `arguments` may be a subset |
+| `expect.pauses` | whether the run should pause for approval |
+| `expect.questions` | for a pause: how many, and the options each must carry |
+| `expect.after` | a map of answer-set name → `{answers, executed, output, status}`; `executed` is the tools that must have actually run |
+| `expect.absent_text` | text that must NOT appear anywhere the person or the model sees — vendor names, "done" while something is pending |
+
+`expect.after` is where the approval contract is actually checked: a scenario names what happens
+after "Approve", after "Deny", and after free text, and the runner asserts on what executed rather
+than on what the run said.
