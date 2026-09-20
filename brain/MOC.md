@@ -8,6 +8,7 @@ The hub. If a note isn't linked from here, it's lost.
 ## Start here
 - [[30-loops/dev-loops|The 7 development loops]] — how work gets done
 - [[40-architecture/engine-overview|Engine overview]] — how a turn flows through the engine
+- [[40-architecture/tool-groups-findings|Can the tool set change during a run?]] — O3 evidence for ADR-003
 - [[70-runbooks/local-setup|Local setup]] — the bench, and how to rebuild it
 - [[20-adr/ADR-001-fork-flow|ADR-001 Fork Flow]] — why this repo exists and its branch model
 
@@ -29,6 +30,7 @@ The hub. If a note isn't linked from here, it's lost.
 
 ## Decisions
 - **ADRs** → `20-adr/` — immutable. Supersede, never edit.
+  - [[20-adr/ADR-003-one-agent-scoped-tools|ADR-003 One Agent Q, per-domain tool sets]] (**proposed** — evidence: [[40-architecture/tool-groups-findings]])
 
 ## Operations
 - [[changelog]] · **Daily** → `80-daily/` · **Retros** → `90-retro/`
