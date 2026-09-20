@@ -61,6 +61,7 @@
    "label": "Enabled"
   },
   {
+   "default": "1",
    "description": "Pause the run and ask the user to approve each call before this tool executes.",
    "fieldname": "requires_confirmation",
    "fieldtype": "Check",

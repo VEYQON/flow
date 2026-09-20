@@ -658,6 +658,13 @@ def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
 	)
 
 
+# The same escaping, under a name other modules may use. `_escaped` and every function that calls
+# it stay byte-identical: a second escaper elsewhere in the codebase would be a second rule, and the
+# first thing to drift. Text shown to a person, and text a person's answer depends on, is escaped
+# here or nowhere.
+escape_for_display = _escaped
+
+
 def _approval_question_keys(asked: list[Any] | None) -> frozenset[str]:
 	"""The keys of the questions in a pause that asked a person to APPROVE something.
 

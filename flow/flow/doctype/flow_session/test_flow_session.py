@@ -387,8 +387,13 @@ class TestBuildPromptMessages(IntegrationTestCase):
 		self.assertIn("2026-09-19", messages[0]["content"])
 
 	def test_memory_still_reaches_the_prompt_alongside_the_context(self):
-		"""The memory block and the context block now share one code path. This is the test that
-		goes red if that path ever delivers only one of them."""
+		"""Both blocks still reach the prompt; S16a separated the channels they reach it by.
+
+		Context is the platform stating what is true now, and stays in the instruction voice.
+		A note is written by a model and read back by a model, so it is handed over as quoted
+		data inside the user's own turn — never where the agent's own instructions live. This is
+		still the test that goes red if the prompt ever delivers only one of them.
+		"""
 		session = self._session(
 			[
 				{"role": "system", "content": "be terse", "run": None},
@@ -398,23 +403,33 @@ class TestBuildPromptMessages(IntegrationTestCase):
 		with patch("flow.memory.memory.build_memory_block", return_value="<agent_memory>REMEMBERED"):
 			messages = self._frozen_build(session, datetime(2026, 9, 19, 10, 42, tzinfo=UTC))
 
-		content = messages[0]["content"]
-		self.assertEqual(messages[0]["role"], "system")
-		self.assertTrue(content.startswith("be terse"))  # stored instructions kept, and kept first
-		self.assertIn("Current context:", content)
-		self.assertIn("<agent_memory>REMEMBERED", content)
-		# Order is part of the contract: what is true now, then what the agent remembers.
-		self.assertLess(content.index("Current context:"), content.index("<agent_memory>REMEMBERED"))
+		system = messages[0]
+		self.assertEqual(system["role"], "system")
+		self.assertTrue(system["content"].startswith("be terse"))  # stored instructions kept, and first
+		self.assertIn("Current context:", system["content"])
+		# The note is delivered, and it is delivered somewhere else: the user's turn, after the
+		# user's own words. No system message carries it.
+		self.assertNotIn("<agent_memory>REMEMBERED", system["content"])
+		last_user = [m for m in messages if m["role"] == "user"][-1]
+		self.assertIn("<agent_memory>REMEMBERED", last_user["content"])
+		self.assertLess(last_user["content"].index("hi"), last_user["content"].index("<agent_memory>"))
 
 	def test_memory_reaches_a_session_that_has_no_stored_system_message(self):
-		"""The insert branch carries both blocks too, not just the context one."""
+		"""The insert branch carries the context block; the note still arrives, in the user's turn.
+
+		This is the transcript shape F3's ephemeral-prefix count is about — a system message that
+		exists for this prompt only. S16a adds no second ephemeral message to it, which is why
+		that count is unchanged; the note rides on a message that was already there.
+		"""
 		session = self._session([{"role": "user", "content": "hi", "run": None}])
 		with patch("flow.memory.memory.build_memory_block", return_value="<agent_memory>REMEMBERED"):
 			messages = self._frozen_build(session, datetime(2026, 9, 19, 10, 42, tzinfo=UTC))
 
 		self.assertEqual(messages[0]["role"], "system")
 		self.assertIn("Current context:", messages[0]["content"])
-		self.assertIn("<agent_memory>REMEMBERED", messages[0]["content"])
+		self.assertNotIn("<agent_memory>REMEMBERED", messages[0]["content"])
+		self.assertEqual([m["role"] for m in messages], ["system", "user"])
+		self.assertIn("<agent_memory>REMEMBERED", messages[1]["content"])
 
 	def test_empty_transcript_stays_empty(self):
 		"""Resume distinguishes "nothing to resume from" by an empty build — context must not
@@ -1002,15 +1017,23 @@ class TestAgentInstructionsAreRebuiltEachTurn(IntegrationTestCase):
 		self.assertNotIn("BE VERBOSE INSTEAD", sent[1][0]["content"])
 
 	def test_context_and_memory_still_follow_the_instructions_in_that_order(self):
-		"""Order is a contract: instructions, then what is true now, then what is remembered."""
+		"""Order is still a contract, across two channels instead of inside one string.
+
+		The system message is instructions then what is true now. What is remembered is not in it
+		at all any more: it is quoted data in the user's turn, after the user's own words. Asserted
+		on both messages, so the day either half moves back the test says which.
+		"""
 		session = self._session()
 		sent = []
 		with patch("flow.memory.memory.build_memory_block", return_value="<agent_memory>REMEMBERED"):
 			self._turn(session, "one", sent)
 
-		content = sent[0][0]["content"]
-		self.assertTrue(content.startswith("ORIGINAL INSTRUCTIONS"))
-		self.assertLess(content.index("Current context:"), content.index("<agent_memory>REMEMBERED"))
+		system = sent[0][0]["content"]
+		self.assertTrue(system.startswith("ORIGINAL INSTRUCTIONS"))
+		self.assertIn("Current context:", system)
+		self.assertNotIn("<agent_memory>REMEMBERED", system)
+		last_user = [m for m in sent[0] if m["role"] == "user"][-1]["content"]
+		self.assertLess(last_user.index("one"), last_user.index("<agent_memory>REMEMBERED"))
 
 	def test_an_edit_is_picked_up_on_the_next_load_not_mid_request(self):
 		"""The boundary, stated rather than left to be discovered: the instructions come from the

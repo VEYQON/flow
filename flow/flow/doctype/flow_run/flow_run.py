@@ -204,8 +204,11 @@ def stream_with_persistence(
 			frappe.db.commit()
 		yield Error(message=str(e))
 	finally:
-		# The run's tools have finished; drop the source_run flag set for update_memory.
+		# The run's tools have finished; drop the flags set for update_memory. Both, together:
+		# leaving `flow_unattended` set would carry a trigger's "nobody is here" into the next
+		# request this worker serves, and silently stop that person's notes being kept.
 		frappe.flags.flow_run = None
+		frappe.flags.flow_unattended = False
 		# Stream cut short (e.g. client disconnect raises GeneratorExit) before
 		# we persisted — record the run as failed so it doesn't sit in "Running".
 		if not persisted:
