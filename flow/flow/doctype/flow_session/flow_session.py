@@ -249,12 +249,28 @@ class FlowSession(Document):
 
 	def _file_injection_budget(self) -> int:
 		"""Characters left for file content this turn: the context window minus the reply
-		reservation and the conversation text already in the transcript. Shrinks as the
-		conversation grows, so inline files yield to the dialogue rather than overflow it."""
+		reservation and the conversation text actually being sent. Shrinks as the conversation
+		grows, so inline files yield to the dialogue rather than overflow it."""
 		window_chars = self._context_window() * CHARS_PER_TOKEN
 		reserved = RESERVED_OUTPUT_TOKENS * CHARS_PER_TOKEN
-		dialogue = sum(len(m.content or "") for m in self.messages)
+		dialogue = sum(len(m.content or "") for m in self.messages) + self._instructions_delta()
 		return max(0, window_chars - reserved - dialogue)
+
+	def _instructions_delta(self) -> int:
+		"""How much longer (or shorter) the system message being sent is than the stored row it
+		stands in for.
+
+		The stored rows are no longer what the model receives: a session bound to an agent record
+		is sent that record's instructions, rebuilt each turn. Budgeting from the rows alone would
+		hand an attachment room that the instructions have already taken — a long set of
+		instructions would silently buy itself space it does not have.
+		"""
+		instructions = self._current_instructions()
+		if not instructions:
+			return 0
+		first = self.messages[0] if self.messages else None
+		stood_in_for = len(first.content or "") if first and first.role == "system" else 0
+		return len(instructions) - stood_in_for
 
 	def _index_retrieval_attachments(self, run: str, texts: dict[str, str] | None = None) -> None:
 		"""Chunk, embed, and store this run's retrieval-mode attachments, preferring the full
@@ -363,6 +379,17 @@ class FlowSession(Document):
 				message["content"] = content
 			messages.append(message)
 
+		# A session bound to an agent record sends that agent's instructions as they are NOW,
+		# rebuilt here rather than replayed from the row stored on the first turn — so editing an
+		# agent reaches the conversations already open. Ephemeral like everything else below: the
+		# stored row is never rewritten, and the transcript keeps showing what was stored.
+		instructions = self._current_instructions()
+		if instructions:
+			if messages[0]["role"] == "system":
+				messages[0]["content"] = instructions
+			else:
+				messages.insert(0, {"role": "system", "content": instructions})
+
 		# Ephemeral, in this order: what is true now, then what the agent remembers. Added to the
 		# stored system message when there is one, otherwise carried by a system message that
 		# exists only for this prompt (see `ephemeral_prompt_prefix`).
@@ -382,6 +409,25 @@ class FlowSession(Document):
 			else:
 				messages.insert(0, {"role": "system", "content": joined})
 		return messages
+
+	def _current_instructions(self) -> str | None:
+		"""The instructions to send now, or None to use whatever the transcript stored.
+
+		They come from the runtime this session was loaded with, which for a record-backed
+		session is rebuilt from the record on every load and is therefore already today's text.
+		(Continue such a session with a code agent instead and that agent's text is what goes —
+		the runtime is the source either way.)
+
+		None for a code-driven session: there is no record behind it, and its stored system
+		message is the only copy of its instructions there is. None too when the runtime carries
+		no instructions — mandatory on the record, but a direct database write can still empty
+		them — so a session with a stored system row keeps sending it rather than sending nothing.
+		"""
+		if not self.agent:
+			return None
+		# Every session reaching here came from new_session/load_session, both of which attach a
+		# runtime; the two callers of the prompt builder dereference it unguarded as well.
+		return self._runtime.instructions or None
 
 	def _latest_user_run(self) -> str | None:
 		for row in reversed(self.messages):
