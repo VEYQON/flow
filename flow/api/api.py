@@ -107,8 +107,9 @@ FEEDBACK_COMMENT_LIMIT = 500
 @frappe.whitelist()
 def submit_feedback(run_name: str, rating: str, comment: str | None = None) -> dict[str, Any]:
 	"""Record thumbs feedback on a finished run, or clear it with rating "None". A
-	thumbs-down comment is stored as shared agent memory when the agent has memory
-	enabled (a no-op otherwise). Clearing the rating leaves any saved memory intact."""
+	thumbs-down comment is stored as a personal note for the person who gave it, when the
+	agent has memory enabled (a no-op otherwise). Clearing the rating leaves any saved note
+	intact."""
 	from flow.lib.session import assert_run_owner
 	from flow.memory.memory import save_feedback_memory
 

@@ -104,9 +104,8 @@ def _memory_call(content: str = "Widget A maps to WGT-001.", call_id: str = "m1"
 def _personal_memory_call(content: str = "Widget A maps to WGT-001.", call_id: str = "m1") -> ChatResponse:
 	"""A response that calls update_memory for a PERSONAL note, which pauses for approval.
 
-	Added beside `_memory_call` rather than changing it: that helper shapes the agent-scope call and
-	is not this run's to edit. Since the memory tool became a gated, personal-only write, a call from
-	a conversation asks for `scope="user"` and the run pauses instead of writing inline.
+	`update_memory` requires confirmation, so a call from a conversation pauses the run instead of
+	writing inline, and `scope="user"` is the only scope a conversation may ask for.
 	"""
 	return ChatResponse(
 		content=None,
@@ -791,6 +790,14 @@ class TestSubmitFeedback(IntegrationTestCase):
 		asked. The scope assertion is replaced by a stronger pair: the note belongs to the person who
 		gave the feedback, and no shared note exists at all. The feedback is given by a named person
 		rather than the administrator, so "owned by whoever gave it" is measured and not assumed.
+
+		Which line does which: the scope and the owner carry the claim, and the last line adds only
+		the case where a shared note is written BESIDE the personal one. The person here is also the
+		run's owner, so this does not separate "owned by the giver" from "owned by the run's owner";
+		a third party with write permission on the run can also submit feedback, and for them only
+		the giver is correct. The write stamps the session user, so the behaviour is right — but this
+		test would pass either way, and saying so is cheaper than a test that needs a permission
+		grant to set up.
 		"""
 		person = _ensure_user("feedback-author@example.com")
 		frappe.set_user(person)
@@ -864,6 +871,7 @@ class TestMemoryRunProvenance(IntegrationTestCase):
 		turn that proposes the note pauses and writes nothing, and the exact "Approve" performs the
 		write. Both halves are asserted here, and the flag is checked after each of them.
 		"""
+		person = frappe.session.user
 		with patch.object(Model, "chat", side_effect=[_personal_memory_call()]):
 			paused = start_run("remember the mapping", agent=self.agent.name)
 
@@ -878,7 +886,7 @@ class TestMemoryRunProvenance(IntegrationTestCase):
 		self.assertEqual(resumed["status"], "Completed")
 		memory = frappe.get_doc("Flow Agent Memory", {"agent": self.agent.name})
 		self.assertEqual(memory.scope, "User")
-		self.assertEqual(memory.user, frappe.session.user)
+		self.assertEqual(memory.user, person)
 		self.assertEqual(memory.source, "Agent")
 		self.assertEqual(memory.source_run, paused["name"])
 		self.assertEqual(memory.content, "Widget A maps to WGT-001.")
