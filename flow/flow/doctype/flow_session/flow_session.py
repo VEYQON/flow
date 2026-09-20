@@ -142,6 +142,7 @@ class FlowSession(Document):
 		reference_name: str | None = None,
 		auto_approve: bool = False,
 		stream: bool = False,
+		tool_group: list[str] | None = None,
 	) -> FlowRun | Generator[Event]:
 		"""Run one turn and persist it as a Flow Run. `attachments` are File names whose text
 		is injected into this turn's prompt. With `stream=True`, returns an event generator.
@@ -157,6 +158,18 @@ class FlowSession(Document):
 		if not self.title:
 			self.db_set("title", derive_title(input))
 
+		# PROTOTYPE — ADR-003 evidence, not for merge. The turn's tool group is fixed HERE,
+		# before a token is spent, and recorded with the run. Nothing chooses it but the caller:
+		# there is no classifier and the model is never consulted about it.
+		snapshot = self._snapshot
+		if tool_group is not None:
+			_narrow_runtime(self._runtime, tool_group)
+			snapshot = {
+				**(snapshot or {}),
+				"tools": [t.name for t in self._runtime.tools],
+				"tool_group": list(tool_group),
+			}
+
 		run = create_run(
 			source=source,
 			input=input,
@@ -164,7 +177,7 @@ class FlowSession(Document):
 			trigger=trigger,
 			reference_doctype=reference_doctype,
 			reference_name=reference_name,
-			config_snapshot=self._snapshot,
+			config_snapshot=snapshot,
 		)
 		self._persist_turn(input, attachment_data, run.name)
 		self._index_retrieval_attachments(run.name, {d["file"]: d["extracted_text"] for d in attachment_data})
@@ -317,6 +330,13 @@ class FlowSession(Document):
 		if not run_name:
 			frappe.throw(_("This session has no paused run to resume."), title=_("Nothing to Resume"))
 		run = frappe.get_doc("Flow Run", run_name)
+
+		# PROTOTYPE. The tool set is rebuilt from THE PAUSED RUN's own record — not from what
+		# happens to be registered now, and not from the session's current group. A run that is
+		# answered is answered against the tools its question was asked about.
+		group = (_run_snapshot(run) or {}).get("tool_group")
+		if group is not None:
+			_narrow_runtime(self._runtime, group)
 
 		self.reload()
 		messages = self._build_prompt_messages()
@@ -525,6 +545,31 @@ def _is_known_zone(zone: str) -> bool:
 	except (ZoneInfoNotFoundError, ValueError):
 		return False
 	return True
+
+
+def _narrow_runtime(runtime, names: list[str]) -> None:
+	"""PROTOTYPE — ADR-003 evidence, not for merge. Restrict a runtime to one tool group, in place.
+
+	Prototype-grade on purpose. Production should build the `Agent` with the group, so that the
+	narrowing cannot be forgotten, undone by a later mutation, or applied twice to an object that
+	is already narrow. Doing it in place is precisely what makes this a spike.
+	"""
+	wanted = set(names)
+	keep = [t for t in runtime.tools if t.name in wanted]
+	runtime.tools = keep
+	runtime._tools_by_name = {t.name: t for t in keep}
+
+
+def _run_snapshot(run) -> dict[str, Any] | None:
+	"""PROTOTYPE. The config recorded when a run started, parsed. Already written on every run
+	today (`FlowRun.apply_result`'s sibling, `create_run`); this only reads it back."""
+	stored = run.get("config_snapshot")
+	if isinstance(stored, str):
+		try:
+			stored = json.loads(stored)
+		except (TypeError, ValueError):
+			return None
+	return stored if isinstance(stored, dict) else None
 
 
 def _display_name(name: str | None) -> str:
