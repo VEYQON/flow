@@ -422,7 +422,10 @@ class FlowSession(Document):
 		# Built here rather than where it is attached, below, because file injection spends a budget
 		# and this block is part of what the turn costs. Its inputs are the agent and the latest
 		# stored user message; neither is touched by anything between here and there, so building it
-		# earlier changes the block not at all. It is still built exactly once.
+		# earlier changes the block not at all. It is still built exactly once, which a test asserts.
+		# The cost is charged even on a transcript with no user message to attach it to, where the
+		# block is not delivered — harmless because file text rides on a user message too, so there
+		# is nothing there to starve, but the two conditions are far apart and this says so.
 		memory = build_memory_block(self.agent, query=self._latest_user_content())
 		budget = self._file_injection_budget(memory_chars=len(memory or ""))
 

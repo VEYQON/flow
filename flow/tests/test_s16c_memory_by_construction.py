@@ -47,6 +47,8 @@ FILE_CHARS = 20000
 # the injected body is wrapped in "--- File: … ---" and a "[File truncated …]" marker, so counting it
 # counted the framing as file content and the no-notes budget read 15591 instead of 15589.
 FILE_FILL = "ø"
+# What separates the block from the text of the message it rides on.
+MEMORY_BLOCK_JOINER = "\n\n"
 
 # The fixtures below are deliberately local rather than imported from the module beside this one.
 # Each test module has to stand on its own so a branch can carry one without the other, and a shared
@@ -892,6 +894,28 @@ class TestTheMemoryBlockIsBudgeted(IntegrationTestCase):
 		self.assertEqual(seen[0][0], len(block))
 		self.assertEqual(seen[0][1], self._old_formula(session) - len(block))
 
+	def test_the_block_is_still_built_exactly_once(self):
+		"""The one property of MOVING the build that nothing else measures.
+
+		The block is built earlier now so its cost can be handed to the budget, and it is used again
+		where it is attached. A refactor that re-builds it at the attach site would leave every other
+		test here green while doing two database reads and a relevance selection twice per turn. The
+		budget spy counts budget calls, not builds, so it cannot see that — this does.
+		"""
+		save_memory(self.agent.name, content="Prefers metric units.", scope="user")
+		session = self._session_with_a_file(FILE_CHARS)
+		calls: list[str | None] = []
+		original = memory_module.build_memory_block
+
+		def counting(agent, **kwargs):
+			calls.append(agent)
+			return original(agent, **kwargs)
+
+		with patch.object(memory_module, "build_memory_block", counting):
+			session._build_prompt_messages()
+
+		self.assertEqual(calls, [self.agent.name])
+
 	def test_adding_notes_no_longer_grows_the_turn(self):
 		"""The reason any of this matters, asserted on the whole prompt rather than on the budget.
 
@@ -916,8 +940,38 @@ class TestTheMemoryBlockIsBudgeted(IntegrationTestCase):
 		with_notes = self._session_with_a_file(FILE_CHARS)
 		total_with = sum(len(m.get("content") or "") for m in with_notes._build_prompt_messages())
 
-		# The two newlines that join the block to the message it rides on, and nothing else.
-		self.assertEqual(total_with, total_without + 2)
+		# The joiner that puts the block after the message's own text, and nothing else. Derived
+		# rather than written as 2, so a change to the joiner reports itself instead of reporting
+		# the budget.
+		self.assertEqual(total_with, total_without + len(MEMORY_BLOCK_JOINER))
+
+	def test_a_note_set_larger_than_the_room_leaves_the_file_with_no_content(self):
+		"""The edge a review found, pinned rather than papered over — and NOT fixed here, because
+		capping what a note may cost is a decision about which of two things a turn should lose, and
+		that belongs to whoever owns the product rather than to this change.
+
+		Notes can now consume the whole file allowance. At zero the file arrives as its framing with
+		an empty body and a truncation marker: the model is told, and the person who attached the
+		file is told nothing. Before this change notes could not reach the file's room at all, so
+		this reachability is new. R1 and Open question 3 carry it.
+		"""
+		# A note is capped at 500 characters and only so many are ever shown, so the block cannot be
+		# made arbitrarily large — it takes a small window as well. This one leaves a few hundred
+		# characters of room before the notes are counted, and the notes are larger than that.
+		frappe.db.set_value("Flow Model", self.model_doc.name, "context_window", 4200)
+		for i in range(4):
+			save_memory(self.agent.name, content=f"Fact {i}: " + "n" * 480, scope="user")
+		session = self._session_with_a_file(FILE_CHARS)
+		self.assertGreater(
+			len(build_memory_block(self.agent.name, query="summarise the file")),
+			session._context_window() * CHARS_PER_TOKEN - RESERVED_OUTPUT_TOKENS * CHARS_PER_TOKEN,
+			"this test needs a note set bigger than the room the window leaves",
+		)
+
+		self.assertEqual(self._injected_file_chars(session), 0)
+		content = next(m for m in session._build_prompt_messages() if m["role"] == "user")["content"]
+		self.assertIn("f.txt", content)
+		self.assertIn(MEMORY_BLOCK_OPEN, content)
 
 	def test_control_the_file_is_what_fills_the_budget(self):
 		"""Without this, every assertion above could be passing on a prompt that carries no file at

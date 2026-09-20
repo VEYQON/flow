@@ -147,6 +147,10 @@ See `s16c-memory-by-construction.features.json`.
    is a bigger change with a smaller payoff — the framing is tens of characters, the notes were
    thousands — and doing it silently inside this spec would have made "nothing else in the budget
    changes" untrue.
+3. **Should a note set be capped in what it may take from file text, and should the person be told
+   when a file arrives empty?** See R1. Today the model is told and the person is not, which is the
+   wrong way round — but the fix is a message to a person, which is a product decision and a frontend
+   change, and this branch touches no frontend file.
 2. **Should a resume be able to tell that its run was unattended?** S16a R6 says a resume is always
    attended. D1 makes the binding the thing that refuses, and a resume never rebinds, so a trigger
    run resumed by its owner can keep notes for the rest of that call. That is a person answering, so
@@ -154,9 +158,16 @@ See `s16c-memory-by-construction.features.json`.
    spec says so out loud rather than leaving it to be discovered.
 
 ## Risks
-- **R1 — a big memory set now shrinks what a file may inject.** That is the point, and it is a
-  behaviour change: a turn that used to inline a whole file may now switch part of it to retrieval
-  or clamp it. The alternative is the two crossing the window together, which fails the turn.
+- **R1 — a big memory set now shrinks what a file may inject, and at the limit it takes all of it.**
+  That is the point, and it is a behaviour change: a turn that used to inline a whole file may now
+  clamp it. The alternative is the two crossing the window together, which fails the turn.
+  At the extreme, found by review and now **pinned by a test rather than capped**, the room reaches
+  zero and the file arrives as its framing with an empty body and a truncation marker — **the model
+  is told and the person who attached the file is not.** Notes could not reach the file's room at all
+  before this change, so that reachability is new. It takes a small context window as well as a large
+  note set, because a note is capped at 500 characters and only so many are ever shown.
+  **No cap on what a note may cost is built here**: capping it decides which of two things a turn
+  should lose, and that is a product decision. **Open question 3.**
 - **R2 — `build_memory_block` now runs one step earlier.** It runs exactly once either way, and its
   inputs do not depend on anything between the two positions. If a future change makes the block
   depend on injected content, this ordering becomes wrong; the test that pins the block's content
