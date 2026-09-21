@@ -219,6 +219,20 @@ class TestUnreadableHitsAreDropped(KnowledgePermissionCase):
 		self.assertEqual(results, [])
 		self.assertEqual(frappe.local.message_log, [])
 
+	def test_an_ordinary_refusal_records_nothing(self):
+		"""The control for `test_a_check_that_cannot_answer_is_recorded_for_the_operator`.
+
+		Without it, that test would pass on an implementation that logged every denial — which
+		is the outage the per-search cap exists to stop, and which would also hand the operator a
+		row for every record anybody was ever not allowed to see. A refusal is silent. (M1.)
+		"""
+		logged = []
+		with patch.object(frappe, "log_error", lambda *a, **k: logged.append((a, k))):
+			results = self._retrieve_as(self.outsider, SECRET, kbs=[self.kb.name])
+
+		self.assertEqual(results, [])
+		self.assertEqual(logged, [])
+
 	def test_the_serialized_tool_result_carries_no_trace_of_the_record(self):
 		"""A sweep over the serialized result the caller is handed, not over the dict."""
 		from flow.lib.agent import _serialize_tool_result
@@ -377,6 +391,54 @@ class TestTheCheckCannotSpeak(KnowledgePermissionCase):
 		self.assertEqual(results, [])
 		self.assertEqual(frappe.local.message_log, [])
 
+	def test_a_check_that_cannot_answer_is_recorded_for_the_operator(self):
+		"""A refusal is silent. A crash is not. The asker gets nothing either way. (M1.)
+
+		A lock-wait timeout mid-loop empties the whole search, and before this the operator had
+		no record of it anywhere: the asker is told "nothing matched" and it does not reproduce
+		on demand. The row carries no content, title or excerpt — only that the gate stopped
+		answering, and how many hits that cost.
+
+		`len(logged) == 1` is the discriminating assertion: this fixture has TWO candidates and
+		both raise, so an implementation that logs per candidate scores 2.
+		"""
+
+		def broken(*args, **kwargs):
+			raise frappe.db.InternalError("lock wait timeout exceeded")
+
+		logged = []
+		frappe.local.message_log = []
+		with (
+			patch.object(frappe, "has_permission", broken),
+			patch.object(frappe, "log_error", lambda *a, **k: logged.append(k)),
+		):
+			results = self._retrieve_as(self.outsider, SECRET, kbs=[self.kb.name])
+
+		self.assertEqual(results, [])  # still fail-closed
+		self.assertEqual(frappe.local.message_log, [])  # still silent to the asker
+		self.assertEqual(len(logged), 1)  # once per search, not once per candidate
+
+		written = f"{logged[0].get('title', '')}\n{logged[0].get('message', '')}"
+		for fragment in (SECRET, self.gone.title, self.stays.title, self.gone.name, self.stays.name):
+			with self.subTest(fragment=fragment):
+				self.assertNotIn(fragment, written)  # no content, no title, no excerpt, no name
+
+	def test_a_hit_whose_record_is_gone_records_nothing_either(self):
+		"""The second control: a deleted record is an EXPECTED refusal, not a crash.
+
+		The sweep's 24-hour window is a normal state of this store. Logging it would put a row in
+		front of the operator every day for something working as designed, and would bury the one
+		that matters. (M1.)
+		"""
+		self._orphan()
+
+		logged = []
+		with patch.object(frappe, "log_error", lambda *a, **k: logged.append(k)):
+			results = self._retrieve_as(self.outsider, SECRET, kbs=[self.kb.name])
+
+		self.assertEqual([r["reference_name"] for r in results], [self.stays.name])
+		self.assertEqual(logged, [])
+
 	def test_a_chunk_that_names_a_doctype_but_no_record_is_dropped_not_kept(self):
 		"""Half a reference is not "no record behind it" — it is a chunk to distrust."""
 		from flow.knowledge import retriever
@@ -525,7 +587,7 @@ class TestCitations(KnowledgePermissionCase):
 		self.assertTrue(results)
 		for row in results:
 			with self.subTest(name=row["reference_name"]):
-				self.assertEqual(row["url"], f"/app/note/{row['reference_name']}")
+				self.assertEqual(row["url"], f"/desk/note/{row['reference_name']}")
 				self.assertTrue(row["url"].startswith("/"))
 				self.assertNotIn("://", row["url"])
 
@@ -556,7 +618,7 @@ class TestCitations(KnowledgePermissionCase):
 
 		self.assertEqual(
 			retriever._url_of({"reference_doctype": "Note", "reference_name": "a/b#c d"}),
-			"/app/note/a%2Fb%23c%20d",
+			"/desk/note/a%2Fb%23c%20d",
 		)
 		self.assertIsNone(retriever._url_of({"reference_doctype": None, "reference_name": "x"}))
 

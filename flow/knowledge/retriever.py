@@ -24,6 +24,13 @@ is nothing to check it against, and the binding remains its only boundary.
 
 A hit dropped for permission is dropped silently. "Some results were withheld"
 is itself information about records the asker may not know exist.
+
+Silently to the *asker*. A check that REFUSES and a check that CANNOT ANSWER are
+not the same event, and only the first is unremarkable: a transient database
+fault would otherwise empty every search while the asker is told nothing matched
+and nobody is left holding a record of it. So an unexpected failure is still
+fail-closed and still silent to the asker, but it is written once per search to
+the operator's log, carrying no content, title or excerpt.
 """
 
 from __future__ import annotations
@@ -48,6 +55,16 @@ OVERFETCH = 4
 # single-row permission check per candidate, at most this many. Written as a literal because
 # the store is imported lazily (it pulls in the vector library); a test pins the two together.
 CANDIDATE_CEILING = 100
+
+# The canonical route to a record's form. `/app/<...>` reaches the same form only through a
+# redirect (`frappe/hooks.py`: `/app/(.*)` -> `/desk/\1`), so a link built here resolves
+# directly rather than costing the reader a round trip. One constant, used once.
+DESK_PATH = "/desk"
+
+# What the operator's log row is called when a permission check could not answer. The title is
+# fixed text and the body carries a count and one traceback: never a record's content, title or
+# excerpt, because the whole point of the check is that the asker may not see those.
+_CHECK_FAILED_TITLE = "knowledge read check could not answer"
 
 
 def retrieve_attachments(query: str, *, session: str, limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
@@ -105,15 +122,17 @@ def retrieve(query: str, *, kbs: list[str], limit: int = DEFAULT_LIMIT) -> list[
 
 	chunks = _hydrate({int(hit["id"]) for hit in hits})
 	kept: list[tuple[dict[str, Any], dict[str, Any]]] = []
+	faults: list[str] = []
 	for hit in hits:
 		chunk = chunks.get(int(hit["id"]))
 		if chunk is None:
 			continue
-		if not _may_read(chunk):
+		if not _may_read(chunk, faults=faults):
 			continue
 		kept.append((hit, chunk))
 		if len(kept) >= limit:
 			break
+	_report_failed_checks(faults)
 
 	titles = _titles_for([chunk for _hit, chunk in kept])
 	return [
@@ -130,7 +149,7 @@ def retrieve(query: str, *, kbs: list[str], limit: int = DEFAULT_LIMIT) -> list[
 	]
 
 
-def _may_read(chunk: dict[str, Any]) -> bool:
+def _may_read(chunk: dict[str, Any], *, faults: list[str] | None = None) -> bool:
 	"""Whether the asking user may read the record this chunk came from.
 
 	A chunk indexed from a record is shown only to somebody who could open that record. A chunk
@@ -152,6 +171,13 @@ def _may_read(chunk: dict[str, Any]) -> bool:
 	longer exists. Loading one of those raises, with a message naming it. A restriction hook
 	belonging to somebody else can raise or speak for its own reasons. In every such case the
 	answer is the safe one, the asker is told nothing, and the rest of the search continues.
+
+	Two reasons to raise, one answer, two records of it. The cases above are the check DOING ITS
+	JOB and are unremarkable, so nothing is written down. Everything else — a lock-wait timeout,
+	a dropped connection, a broken hook module in some other app — is the check UNABLE TO DO ITS
+	JOB, and that must not be indistinguishable from "nothing matched": the answer is still the
+	safe one and the asker is still told nothing, but `faults` collects it for the caller to
+	record once. Passing `faults` is optional so this stays callable as a plain predicate.
 	"""
 	doctype, name = chunk.get("reference_doctype"), chunk.get("reference_name")
 	if not doctype and not name:
@@ -162,10 +188,41 @@ def _may_read(chunk: dict[str, Any]) -> bool:
 	said = list(getattr(frappe.local, "message_log", None) or [])
 	try:
 		return bool(frappe.has_permission(doctype, "read", name))
+	except (frappe.DoesNotExistError, frappe.PermissionError, frappe.ValidationError):
+		# Expected: the record is gone, the check refused, or somebody else's hook threw. A
+		# refusal is silent, and these are refusals.
+		return False
 	except Exception:
+		# Unexpected: still closed, still silent to the asker — but not silent to the operator.
+		if faults is not None:
+			faults.append(frappe.get_traceback())
 		return False
 	finally:
 		frappe.local.message_log = said
+
+
+def _report_failed_checks(faults: list[str]) -> None:
+	"""One row per search, never one per candidate.
+
+	The loop runs up to `CANDIDATE_CEILING` times and whatever stopped one check usually stops
+	all of them, so a row per candidate would answer one database wobble with a hundred inserts
+	— an outage of its own, and one that buries the very row somebody needs to read. One row,
+	the count, and the first traceback.
+
+	Nothing here is shown to the asker or to the model: `frappe.log_error` writes an Error Log
+	row, which only an administrator can open.
+	"""
+	if not faults:
+		return
+	frappe.log_error(
+		title=_CHECK_FAILED_TITLE,
+		message=(
+			f"{len(faults)} permission check(s) in one knowledge search could not answer. "
+			"Every affected hit was dropped, and the asker was told nothing. "
+			"The first failure follows; the rest are almost certainly the same.\n\n"
+			f"{faults[0]}"
+		),
+	)
 
 
 def _title_key(chunk: dict[str, Any]) -> tuple[str, str]:
@@ -219,7 +276,7 @@ def _url_of(chunk: dict[str, Any]) -> str | None:
 	doctype, name = chunk.get("reference_doctype"), chunk.get("reference_name")
 	if not doctype or not name:
 		return None
-	return f"/app/{slug(doctype)}/{quote(str(name), safe='')}"
+	return f"{DESK_PATH}/{slug(doctype)}/{quote(str(name), safe='')}"
 
 
 def _enabled_kbs(kbs: list[str]) -> list[str]:
