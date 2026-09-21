@@ -22,6 +22,7 @@ The hub. If a note isn't linked from here, it's lost.
   - [[10-specs/s16a-memory-is-data|S16a — memory is data, and agent-wide memory is not writable from a conversation]] (implemented 2026-09-20, awaiting review)
   - [[10-specs/s16b-gates-cannot-be-unset|S16b — an approval switch cannot be turned off by accident]] (implemented 2026-09-20, awaiting review)
   - [[10-specs/s16c-memory-by-construction|S16c — an unattended run keeps no notes by construction, and a kept note is budgeted]] (implemented 2026-09-20, awaiting review)
+  - [[10-specs/s18-knowledge-read-filter|S18 — knowledge search returns only what the asking user may read]] (implemented 2026-09-21, awaiting review)
 - **Inbox** → `00-inbox/`
   - [[00-inbox/instructions-frozen-at-first-turn]] (resolved by E2)
   - [[00-inbox/worded-refusal-reproposes]]
