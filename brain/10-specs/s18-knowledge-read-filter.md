@@ -1,8 +1,9 @@
 ---
 type: spec
-status: approved  # draft → approved (HUMAN ONLY) → in-progress → implemented
+status: implemented  # draft → approved (HUMAN ONLY) → in-progress → implemented
 approved-by: owner pre-approval for unattended run 8 2026-09-21 — REVIEW BEFORE MERGE
 created: 2026-09-21
+implemented: 2026-09-21
 upstreamable: yes
 ---
 # Spec: S18 — knowledge search returns only what the asking user may read
@@ -229,6 +230,24 @@ on `UnitTestCase`) and asserts `frappe.session.user` **before** searching.
 - `flow/knowledge/retriever.py` — the filter, the over-fetch, the two citation helpers, the docstring.
 - `flow/tests/test_knowledge_permissions.py` — new.
 - `brain/10-specs/s18-knowledge-read-filter.md`, `.features.json` — this spec and its contract.
+
+## Measured (this laptop, 21 Sep 2026 — not a benchmark)
+
+One search, seven rounds, median, on a fixture of 20 indexed notes (10 the asker may not read,
+ranked first, 10 they may), `limit=5`, with a fake embedder so no network call is in the number:
+
+| | median |
+|---|---|
+| before, as the code shipped (no check, no over-fetch) | **18.25 ms** |
+| before, over-fetch present, check neutralised | **20.08 ms** |
+| **after, as committed** | **31.52 ms** |
+
+So on this fixture the change costs about **13 ms**: roughly 2 ms of over-fetch (hydrating 20 rows
+instead of 5) and roughly 11 ms for the 15 record permission checks it took to collect 5 readable
+hits — about **0.7 ms per check**. One laptop, one process, a rolled-back fixture: it says the added
+work is bounded and small next to the embedding call a real search makes over the network, and it
+says nothing about production data. The five hits the "before" rows returned included records the
+asker may not read; the five the "after" row returned did not.
 
 ## Open questions (for the owner — not decided here)
 
