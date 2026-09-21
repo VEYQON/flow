@@ -99,6 +99,22 @@ def _may_read(chunk: dict[str, Any]) -> bool:
   `:151`) is never produced. With `throw=True` the messages come back **and** a
   `frappe.PermissionError` is raised out of the middle of a search (`frappe/__init__.py:638-644`).
   Test 4.7 is what pins this.
+- **A check that cannot answer drops the hit, and says nothing.** Establishing the permission means
+  loading the record (`frappe/permissions.py:139-140`), and the record can be gone:
+  `ignore_links_on_delete` lists `Flow Knowledge Chunk` with the explicit comment that a chunk must
+  never block deleting the record it indexes, and the sweep that removes the orphan is **daily**
+  (`flow/hooks.py:39-43`, `:49-52`). So between a delete and the next sweep the store holds hits
+  whose record no longer exists, and `load_from_db` raises `DoesNotExistError` **with a message
+  naming the record** (`frappe/model/document.py:294-296`; `frappe.throw` appends to
+  `frappe.message_log` before raising). A restriction hook belonging to another app can raise or
+  `msgprint` for its own reasons. The check therefore snapshots `frappe.local.message_log`, catches
+  `Exception`, returns **False**, and restores the snapshot in a `finally`. The broad catch is
+  deliberate: on a read path, *failing to establish* permission and *being refused* must have the
+  same outcome.
+- **Half a reference is not "no record behind it".** A chunk that names a type but carries no record,
+  or the reverse, is a chunk to distrust: `_may_read` returns True only when **both** are absent, and
+  False when exactly one is. Today's ingest always sets both or neither
+  (`flow/knowledge/ingest.py:121-130`, `:238-239`), so this is defence in depth, not a live path.
 - **The asking user is whoever the run carries.** `_may_read` passes no `user`, so
   `frappe.permissions.has_permission` defaults to `frappe.session.user`. `Administrator` is allowed
   everything by that function's third statement, which is why **every** permission test in this spec
@@ -191,6 +207,9 @@ on `UnitTestCase`) and asserts `frappe.session.user` **before** searching.
 | 4.2 | Control: the same query as the user who **may** read it returns the record. Without this, 4.1 passes by returning nothing to anybody. |
 | 4.3 | A chunk with `reference_doctype is None` (a `Text` source) is returned exactly as before, to a user with no extra roles. **Backwards compatibility.** |
 | 4.5 | Over-fetch: with unreadable records ranking above readable ones, the user still gets up to `limit` readable hits. |
+| 4.7a | A hit whose source record has been deleted is dropped, the rest of the search still returns, and nothing names the missing record. |
+| 4.7b | A permission check that raises or speaks for any reason drops the hit and reaches the asker with neither. |
+| 4.7c | A chunk that names a type but carries no record (or the reverse) is dropped, not kept. |
 | 4.7 | A dropped hit produces no message and no raise: `frappe.local.message_log` is empty after a search over a fully-unreadable set, and the call returns `[]`. |
 | 4.8 | The tool result the model is handed (`_serialize_tool_result`, `flow/lib/agent.py:728`) contains no substring of the unreadable record — a sweep over the **serialized** JSON, not the dict. |
 | 4.11 | The ceiling holds: with more unreadable candidates than the ceiling, the search ends and returns what it has, and the store was asked for no more than `CANDIDATE_CEILING`. |
@@ -248,6 +267,41 @@ hits — about **0.7 ms per check**. One laptop, one process, a rolled-back fixt
 work is bounded and small next to the embedding call a real search makes over the network, and it
 says nothing about production data. The five hits the "before" rows returned included records the
 asker may not read; the five the "after" row returned did not.
+
+## What this change does NOT close (found in review, recorded not fixed)
+
+1. **`Flow Knowledge Chunk` is readable around the filter by anyone with doctype-level read on it.**
+   The doctype grants `{"read": 1, "report": 1, "role": "System Manager"}`, and the generic `read`
+   builtin goes through `frappe.get_list` (`flow/tools/builtins.py:97`), which does **not** run
+   controller `has_permission` hooks. So a System Manager who may not open another user's private
+   record can still ask for that record's indexed chunk content by name. The desk list view and the
+   `execute` sandbox are the same door. **Pre-existing, and the remaining path to exactly the data
+   this spec promises to withhold.** The fix is its own spec: a
+   `permission_query_conditions` + `has_permission` pair on `Flow Knowledge Chunk` applying the same
+   reference check, or dropping `read`/`report` on it to Administrator. **A green suite here does not
+   mean the one-sentence contract holds against a System Manager.**
+2. **A count oracle.** The caller learns how many of the top `min(limit * OVERFETCH, ceiling)`
+   candidates were withheld, because a short result list can only mean "withheld" or "no more
+   matches". Repeated narrowing turns that into existence probing. Open question 3 documents the
+   single-hit direction only; this is the aggregate one. Paging deeper until `limit` survivors would
+   remove the signal in every case but the ceiling — a product decision, not a test.
+3. **`_may_read` is not memoised.** A long record becomes many chunks, and each one pays a full
+   check. Bounded by the ceiling, so not a hazard, but a per-`retrieve` cache keyed on
+   `(doctype, name)` is the obvious next improvement. Not done here because the ceiling test measures
+   the *count* of checks and would have to be rewritten around 100 distinct records.
+4. **Over-fetch changes hybrid ranking.** Rank fusion depends on the candidate-set size
+   (`flow/knowledge/store.py:135-152`), so "a Text-source hit is returned exactly as before" is
+   exactly true only under `search_type = "Vector"`. The keys and values of a given hit are
+   unchanged; its position among four times as many candidates may not be.
+5. **Field-level (permlevel) read is not applied to the title.** `_may_read` establishes
+   document-level read; a title field at `permlevel > 0` would still be returned.
+6. **Two messages already reaching the model on this path name the platform** — `store._open_table`'s
+   *"Configure Flow Knowledge Settings and ingest a source"* (`flow/knowledge/store.py:165-168`) is a
+   live CLAUDE.md rule 3 violation, not introduced here and not fixed here.
+7. **Nothing pins the identity inside a trigger run.** Every test drives `retrieve` under
+   `set_user`. `flow/triggers/triggers.py:75` runs the agent as `run_as or owner`, so the filter
+   should use that identity — read and believed, not measured. A test that runs a trigger with
+   `run_as` set to a restricted user is the missing one.
 
 ## Open questions (for the owner — not decided here)
 
