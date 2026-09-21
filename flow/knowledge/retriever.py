@@ -74,6 +74,10 @@ def retrieve(query: str, *, kbs: list[str], limit: int = DEFAULT_LIMIT) -> list[
 	"""Return the best-matching chunks within `kbs`, most relevant first.
 
 	`kbs` must be non-empty — an empty scope is refused, not read as "all".
+
+	A hit whose source record the calling user may not read is dropped, silently, so fewer than
+	`limit` may come back. Each hit that survives carries its content, score, source, reference,
+	the record's own title, and a relative path to it.
 	"""
 	if not kbs:
 		frappe.throw(
@@ -111,7 +115,7 @@ def retrieve(query: str, *, kbs: list[str], limit: int = DEFAULT_LIMIT) -> list[
 		if len(kept) >= limit:
 			break
 
-	titles = _titles_for([chunk for _, chunk in kept])
+	titles = _titles_for([chunk for _hit, chunk in kept])
 	return [
 		{
 			"content": chunk["content"],
@@ -135,14 +139,33 @@ def _may_read(chunk: dict[str, Any]) -> bool:
 	The record, not its type: the type-level question would answer the same for every row and
 	so would check nothing. The user is whoever the call is running as.
 
-	`throw` stays off, and this is a rule rather than a preference. Turning it on would raise out
-	of the middle of a search, and would also switch on the "you do not have access to this
-	document" messages — four dropped hits would name four records the asker may not know exist.
+	`throw` stays off, and this is a rule rather than a preference. Turning it on would abort the
+	whole search on the first hit it dropped, and would switch on the "you do not have access to
+	this document" message, which names the record.
+
+	Half a reference is not "no record behind it": a chunk that claims a type but carries no
+	record, or the reverse, is a chunk to distrust, so it is dropped.
+
+	Anything the check itself says or raises is swallowed. Establishing the permission means
+	loading the record, and the record can be gone — deleting an indexed record is supported and
+	the chunk is removed later by a sweep, so the store legitimately holds hits whose record no
+	longer exists. Loading one of those raises, with a message naming it. A restriction hook
+	belonging to somebody else can raise or speak for its own reasons. In every such case the
+	answer is the safe one, the asker is told nothing, and the rest of the search continues.
 	"""
 	doctype, name = chunk.get("reference_doctype"), chunk.get("reference_name")
-	if not doctype or not name:
+	if not doctype and not name:
 		return True
-	return frappe.has_permission(doctype, "read", name)
+	if not doctype or not name:
+		return False
+
+	said = list(getattr(frappe.local, "message_log", None) or [])
+	try:
+		return bool(frappe.has_permission(doctype, "read", name))
+	except Exception:
+		return False
+	finally:
+		frappe.local.message_log = said
 
 
 def _title_key(chunk: dict[str, Any]) -> tuple[str, str]:
@@ -156,8 +179,13 @@ def _title_key(chunk: dict[str, Any]) -> tuple[str, str]:
 def _titles_for(chunks: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
 	"""Titles for the records the kept chunks came from: one query per distinct doctype.
 
-	Batched deliberately, never one query per hit. Reading with `frappe.get_all` is right here
-	precisely because every chunk passed in has already been kept.
+	Batched deliberately, never one query per hit.
+
+	Reading without a permission check is right on both branches, but for two different reasons,
+	and they are worth separating. A referenced record has already passed `_may_read`, so its
+	title is no more disclosure than the excerpt beside it. A chunk with no reference is named by
+	its knowledge source row instead, and that row is administrator-authored bookkeeping about a
+	chunk the scope already permits — a filename, for a local file.
 	"""
 	wanted: dict[str, set[str]] = {}
 	for chunk in chunks:
@@ -166,17 +194,15 @@ def _titles_for(chunks: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
 
 	titles: dict[tuple[str, str], str] = {}
 	for doctype, names in wanted.items():
+		# `get_title_field` falls back to `name`, so dedupe rather than special-case it.
 		field = frappe.get_meta(doctype).get_title_field()
-		if field == "name":
-			titles.update({(doctype, name): name for name in names})
-			continue
 		rows = frappe.get_all(
 			doctype,
 			filters={"name": ["in", list(names)]},
-			fields=["name", f"`{field}` as chunk_title"],
+			fields=list(dict.fromkeys(["name", field])),
 		)
 		for row in rows:
-			titles[(doctype, row["name"])] = row["chunk_title"]
+			titles[(doctype, row["name"])] = row[field]
 	return titles
 
 
@@ -184,14 +210,16 @@ def _url_of(chunk: dict[str, Any]) -> str | None:
 	"""A relative path to the record this chunk came from, or None when there is no record.
 
 	Relative on purpose: an absolute address carries the host, which is noise to the caller and
-	an avoidable leak. The name is percent-encoded so a record whose name contains a separator
+	an avoidable leak. The name is encoded with nothing left safe — not even `/` or `#`, which
+	the general-purpose URL quoter preserves — so a record whose name contains a separator
 	cannot change the shape of the path.
 	"""
+	from frappe.desk.utils import slug
+
 	doctype, name = chunk.get("reference_doctype"), chunk.get("reference_name")
 	if not doctype or not name:
 		return None
-	slug = frappe.scrub(doctype).replace("_", "-")
-	return f"/app/{slug}/{quote(str(name), safe='')}"
+	return f"/app/{slug(doctype)}/{quote(str(name), safe='')}"
 
 
 def _enabled_kbs(kbs: list[str]) -> list[str]:

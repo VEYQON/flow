@@ -167,13 +167,10 @@ class KnowledgePermissionCase(IntegrationTestCase):
 		return source
 
 	def _retrieve_as(self, user, query, **kwargs):
-		frappe.set_user(user)
-		self.assertEqual(frappe.session.user, user)  # a check run as Administrator proves nothing
-		try:
+		with self.set_user(user):
+			self.assertEqual(frappe.session.user, user)  # a check run as Administrator proves nothing
 			with patch("litellm.embedding", side_effect=self._fake_embed):
 				return retrieve(query, **kwargs)
-		finally:
-			frappe.set_user("Administrator")
 
 
 class TestUnreadableHitsAreDropped(KnowledgePermissionCase):
@@ -184,18 +181,18 @@ class TestUnreadableHitsAreDropped(KnowledgePermissionCase):
 		self._note_source(self.kb.name, title_like="S18 Secret%")
 
 	def test_a_user_who_may_not_read_the_record_gets_nothing_at_all(self):
-		"""Feature 1. Asserted field by field over the whole structure, not assertFalse."""
+		"""Nothing comes back, and nothing about the record comes back with it."""
 		results = self._retrieve_as(self.outsider, SECRET, kbs=[self.kb.name])
 
-		self.assertEqual(len(results), 0)
-		self.assertEqual(results, [])
 		blob = json.dumps(results, default=str)
 		for fragment in (SECRET, self.secret.title, self.secret.name, "score", "content", "source"):
 			with self.subTest(fragment=fragment):
-				self.assertNotIn(fragment, blob)
+				self.assertNotIn(fragment, blob)  # reports first: "[]" is not the only way to pass
+		self.assertEqual(len(results), 0)
+		self.assertEqual(results, [])
 
 	def test_control_the_owner_does_get_the_record(self):
-		"""Feature 2. Without this, the test above passes by returning nothing to anybody."""
+		"""The control. Without it, the test above passes by returning nothing to anybody."""
 		results = self._retrieve_as(self.reader, SECRET, kbs=[self.kb.name])
 
 		self.assertEqual(len(results), 1)
@@ -204,7 +201,7 @@ class TestUnreadableHitsAreDropped(KnowledgePermissionCase):
 		self.assertEqual(results[0]["reference_name"], self.secret.name)
 
 	def test_a_dropped_hit_produces_no_message_and_does_not_raise(self):
-		"""Feature 5. `throw=True` on the permission call would do both."""
+		"""`throw=True` on the permission call would produce both."""
 		frappe.local.message_log = []
 		results = self._retrieve_as(self.outsider, SECRET, kbs=[self.kb.name])
 
@@ -212,7 +209,7 @@ class TestUnreadableHitsAreDropped(KnowledgePermissionCase):
 		self.assertEqual(frappe.local.message_log, [])
 
 	def test_the_serialized_tool_result_carries_no_trace_of_the_record(self):
-		"""Feature 6. A sweep over the serialized JSON the model is handed, not over the dict."""
+		"""A sweep over the serialized result the caller is handed, not over the dict."""
 		from flow.lib.agent import _serialize_tool_result
 
 		results = self._retrieve_as(self.outsider, SECRET, kbs=[self.kb.name])
@@ -223,29 +220,23 @@ class TestUnreadableHitsAreDropped(KnowledgePermissionCase):
 		self.assertNotIn(self.secret.name, serialized)
 
 	def test_the_search_knowledge_tool_goes_through_the_filtered_path(self):
-		"""Feature 8. The builtin the model calls, not the function underneath it."""
+		"""The bound tool, not the function underneath it."""
 		from flow.tools.builtins import bind_search_knowledge
 
 		tool = bind_search_knowledge([self.kb.name])
 
-		frappe.set_user(self.outsider)
-		self.assertEqual(frappe.session.user, self.outsider)
-		try:
+		with self.set_user(self.outsider):
+			self.assertEqual(frappe.session.user, self.outsider)
 			with patch("litellm.embedding", side_effect=self._fake_embed):
 				denied = tool(query=SECRET)
-		finally:
-			frappe.set_user("Administrator")
 
 		self.assertEqual(denied, [])
 		self.assertNotIn(SECRET, json.dumps(denied, default=str))
 
-		frappe.set_user(self.reader)
-		self.assertEqual(frappe.session.user, self.reader)
-		try:
+		with self.set_user(self.reader):
+			self.assertEqual(frappe.session.user, self.reader)
 			with patch("litellm.embedding", side_effect=self._fake_embed):
 				allowed = tool(query=SECRET)
-		finally:
-			frappe.set_user("Administrator")
 
 		self.assertEqual(len(allowed), 1)  # control: the tool does reach the record for its owner
 
@@ -258,7 +249,7 @@ class TestUnreadableHitsAreDropped(KnowledgePermissionCase):
 
 class TestChunksWithNoReference(KnowledgePermissionCase):
 	def test_a_chunk_with_no_reference_is_returned_exactly_as_before(self):
-		"""Feature 3. Backwards compatibility: Text, File and URL sources set no reference."""
+		"""Backwards compatibility: Text, File and URL sources set no reference."""
 		kb = self._kb("S18 Plain KB")
 		source = self._text_source(kb.name, f"the {PUBLIC} handbook for everyone. " * 4)
 
@@ -269,9 +260,13 @@ class TestChunksWithNoReference(KnowledgePermissionCase):
 		self.assertTrue(all(r["source"] == source.name for r in results))
 		self.assertTrue(all(r["reference_doctype"] is None for r in results))
 		self.assertTrue(all(r["reference_name"] is None for r in results))
+		self.assertEqual(
+			set(results[0]),
+			{"content", "score", "source", "reference_doctype", "reference_name", "title", "url"},
+		)
 
 	def test_a_text_source_hit_is_titled_by_its_source_row_and_has_no_url(self):
-		"""Feature 11."""
+		"""Its title is the knowledge source row's, and there is no record to link to."""
 		kb = self._kb("S18 Plain KB 2")
 		self._text_source(kb.name, f"the {PUBLIC} handbook for everyone. " * 4, title="Staff Handbook")
 
@@ -280,6 +275,89 @@ class TestChunksWithNoReference(KnowledgePermissionCase):
 		self.assertTrue(results)
 		self.assertTrue(all(r["title"] == "Staff Handbook" for r in results))
 		self.assertTrue(all(r["url"] is None for r in results))
+
+
+class TestTheCheckCannotSpeak(KnowledgePermissionCase):
+	"""What happens when the permission check itself cannot answer.
+
+	Deleting an indexed record is a normal, supported operation: the chunk deliberately does
+	not block it, and a scheduled sweep removes the orphan later. So between the delete and
+	the sweep the store holds hits whose record is gone, and loading one raises — with a
+	message naming the record. A hit the check cannot clear is a hit that is not shown, and
+	nothing about it is said out loud.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		self.kb = self._kb("Read Filter Orphan KB")
+		self.gone = self._note("Read Filter Orphan gone", f"{SECRET} about to vanish", public=1)
+		self.stays = self._note("Read Filter Orphan stays", f"{SECRET} still here", public=1)
+		self._note_source(self.kb.name, title_like="Read Filter Orphan%")
+		self.ids = self._chunk_ids([self.gone.name, self.stays.name])
+		self.assertEqual(len(self.ids), 2)
+
+	def _chunk_ids(self, note_names):
+		rows = frappe.get_all(
+			"Flow Knowledge Chunk",
+			filters={"reference_doctype": "Note", "reference_name": ["in", note_names]},
+			fields=["name", "reference_name"],
+		)
+		by_note = {row["reference_name"]: int(row["name"]) for row in rows}
+		return [by_note[name] for name in note_names if name in by_note]
+
+	def _orphan(self):
+		"""Delete the row underneath the chunk, the way the sweep's 24-hour window leaves it."""
+		frappe.db.delete("Note", {"name": self.gone.name})
+		frappe.clear_document_cache("Note", self.gone.name)
+
+	def _fixed_order(self, ordered_ids):
+		def fake_search(vector, *, text=None, kbs=None, limit=5, **kwargs):
+			return [{"id": i, "kb": "kb", "source": "src", "score": 1.0} for i in ordered_ids[:limit]]
+
+		return fake_search
+
+	def test_a_hit_whose_record_is_gone_is_dropped_and_says_nothing(self):
+		self._orphan()
+		frappe.local.message_log = []
+
+		results = self._retrieve_as(self.outsider, SECRET, kbs=[self.kb.name])
+
+		self.assertEqual([r["reference_name"] for r in results], [self.stays.name])
+		self.assertEqual(frappe.local.message_log, [])
+		blob = json.dumps(results, default=str)
+		self.assertNotIn(self.gone.name, blob)
+		self.assertNotIn("Read Filter Orphan gone", blob)
+
+	def test_a_readable_hit_ranked_below_the_orphan_still_comes_back(self):
+		"""The orphan must not take the rest of the search down with it."""
+		self._orphan()
+
+		with patch("flow.knowledge.store.search", side_effect=self._fixed_order(self.ids)):
+			results = self._retrieve_as(self.outsider, SECRET, kbs=[self.kb.name])
+
+		self.assertEqual([r["reference_name"] for r in results], [self.stays.name])
+
+	def test_a_check_that_raises_for_any_reason_drops_the_hit_silently(self):
+		"""A restriction hook of somebody else's can raise or speak. Neither reaches the asker."""
+
+		def angry(doctype, ptype="read", doc=None, **kwargs):
+			frappe.msgprint(f"denied loudly for {doc}")
+			raise RuntimeError(f"hook exploded on {doc}")
+
+		frappe.local.message_log = []
+		with patch.object(frappe, "has_permission", angry):
+			results = self._retrieve_as(self.outsider, SECRET, kbs=[self.kb.name])
+
+		self.assertEqual(results, [])
+		self.assertEqual(frappe.local.message_log, [])
+
+	def test_a_chunk_that_names_a_doctype_but_no_record_is_dropped_not_kept(self):
+		"""Half a reference is not "no record behind it" — it is a chunk to distrust."""
+		from flow.knowledge import retriever
+
+		self.assertTrue(retriever._may_read({"reference_doctype": None, "reference_name": None}))
+		self.assertFalse(retriever._may_read({"reference_doctype": "Note", "reference_name": None}))
+		self.assertFalse(retriever._may_read({"reference_doctype": None, "reference_name": "x"}))
 
 
 class TestOverFetchAndCeiling(KnowledgePermissionCase):
@@ -329,7 +407,7 @@ class TestOverFetchAndCeiling(KnowledgePermissionCase):
 		return fake_search, calls
 
 	def test_unreadable_hits_ranked_first_do_not_cost_the_reader_their_results(self):
-		"""Feature 4. With OVERFETCH reverted to 1 the store returns only hidden rows."""
+		"""With no over-fetch the store returns only the rows this user may not read."""
 		fake_search, calls = self._ordered_search(self.hidden_ids + self.open_ids)
 
 		with patch("flow.knowledge.store.search", side_effect=fake_search):
@@ -345,7 +423,7 @@ class TestOverFetchAndCeiling(KnowledgePermissionCase):
 		self.assertEqual(CANDIDATE_CEILING, store.MAX_SEARCH_LIMIT)
 
 	def test_the_store_is_never_asked_for_more_than_the_ceiling(self):
-		"""Feature 7, first half: the ceiling is the store's own clamp, so it is not invented."""
+		"""The ceiling is the store's own clamp, so it is not an invented number."""
 		fake_search, calls = self._ordered_search(self.hidden_ids)
 
 		with patch("flow.knowledge.store.search", side_effect=fake_search):
@@ -355,7 +433,7 @@ class TestOverFetchAndCeiling(KnowledgePermissionCase):
 		self.assertLess(CANDIDATE_CEILING, CANDIDATE_CEILING * OVERFETCH)  # the clamp did work
 
 	def test_more_unreadable_candidates_than_the_ceiling_ends_the_search(self):
-		"""Feature 7, second half: it stops at the ceiling and returns what it has.
+		"""It stops at the ceiling and returns what it has.
 
 		The candidate list is longer than the ceiling, and every candidate inside the
 		ceiling is unreadable. The readable rows sit beyond it and are never reached — the
@@ -402,7 +480,7 @@ class TestCitations(KnowledgePermissionCase):
 		self._note_source(self.kb.name, title_like="S18 Cited%")
 
 	def test_every_doctype_hit_carries_the_records_own_title(self):
-		"""Feature 9."""
+		"""The record names itself, not the opaque knowledge source row."""
 		results = self._retrieve_as(self.outsider, PUBLIC, kbs=[self.kb.name])
 
 		self.assertTrue(results)
@@ -410,7 +488,7 @@ class TestCitations(KnowledgePermissionCase):
 		self.assertTrue(all(r["title"] == "S18 Cited open" for r in results))
 
 	def test_every_doctype_hit_carries_a_relative_desk_path(self):
-		"""Feature 10."""
+		"""A path, not an address: no scheme and no host."""
 		results = self._retrieve_as(self.outsider, PUBLIC, kbs=[self.kb.name])
 
 		self.assertTrue(results)
@@ -421,8 +499,8 @@ class TestCitations(KnowledgePermissionCase):
 				self.assertNotIn("://", row["url"])
 
 	def test_an_unreadable_hit_contributes_no_title(self):
-		"""Feature 12. The titles are built after the permission check, so the dropped
-		record's title is never even asked for."""
+		"""The titles are built after the permission check, so a dropped record's title is
+		never even asked for."""
 		from flow.knowledge import retriever
 
 		asked = []
@@ -441,8 +519,31 @@ class TestCitations(KnowledgePermissionCase):
 		blob = json.dumps(results, default=str)
 		self.assertNotIn("S18 Cited hidden", blob)
 
+	def test_a_name_cannot_change_the_shape_of_the_path(self):
+		"""Every fixture name here is hex, so the encoding needs its own test."""
+		from flow.knowledge import retriever
+
+		self.assertEqual(
+			retriever._url_of({"reference_doctype": "Note", "reference_name": "a/b#c d"}),
+			"/app/note/a%2Fb%23c%20d",
+		)
+		self.assertIsNone(retriever._url_of({"reference_doctype": None, "reference_name": "x"}))
+
+	def test_a_record_with_no_title_field_is_named_by_its_own_name(self):
+		"""`get_title_field` falls back to `name`, and that branch is on the same path."""
+		from flow.knowledge import retriever
+
+		titles = retriever._titles_for([{"reference_doctype": "DocField", "reference_name": "nope"}])
+		self.assertEqual(titles, {})  # no such row, and no raise
+
+		note = self._note("Read Filter Titled", f"{PUBLIC} titled", public=1)
+		self.assertEqual(
+			retriever._titles_for([{"reference_doctype": "Note", "reference_name": note.name}]),
+			{("Note", note.name): "Read Filter Titled"},
+		)
+
 	def test_no_result_field_names_the_platform_a_vendor_or_the_host(self):
-		"""Feature 13, with a positive control so a zero-hit sweep is a finding."""
+		"""With a positive control, so a zero-hit sweep is a finding rather than a shrug."""
 		results = self._retrieve_as(self.outsider, PUBLIC, kbs=[self.kb.name])
 		blob = json.dumps(results, default=str).lower()
 
@@ -456,7 +557,7 @@ class TestCitations(KnowledgePermissionCase):
 
 
 class TestExistingGatesAreUntouched(KnowledgePermissionCase):
-	"""Feature 14. The new filter is a third gate, never a replacement for the two that exist."""
+	"""The new filter is a third gate, never a replacement for the two that exist."""
 
 	def setUp(self):
 		super().setUp()
@@ -465,12 +566,9 @@ class TestExistingGatesAreUntouched(KnowledgePermissionCase):
 		self._note_source(self.kb.name, title_like="S18 Gate%")
 
 	def test_an_empty_knowledge_base_scope_still_throws(self):
-		frappe.set_user(self.outsider)
-		try:
+		with self.set_user(self.outsider):
 			with self.assertRaises(frappe.ValidationError):
 				retrieve(PUBLIC, kbs=[])
-		finally:
-			frappe.set_user("Administrator")
 
 	def test_a_disabled_knowledge_base_is_still_skipped(self):
 		self.assertTrue(self._retrieve_as(self.outsider, PUBLIC, kbs=[self.kb.name]))
