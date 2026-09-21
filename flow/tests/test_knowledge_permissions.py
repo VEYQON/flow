@@ -60,6 +60,12 @@ def _ensure_user(email: str) -> str:
 				"roles": [{"role": "Translator"}],
 			}
 		).insert(ignore_permissions=True)
+	else:
+		# A row surviving an aborted run (a crash between insert and rollback, or one made by
+		# hand) would otherwise be returned exactly as found — without the role the docstring
+		# above says is load-bearing. `add_roles` is idempotent, so make it unconditional
+		# rather than conditional. (L7, review of run 8.)
+		frappe.get_doc("User", email).add_roles("Translator")
 	frappe.clear_cache(user=email)
 	return email
 
@@ -99,6 +105,11 @@ class KnowledgePermissionCase(IntegrationTestCase):
 		)
 		self.reader = _ensure_user(READER)
 		self.outsider = _ensure_user(OUTSIDER)
+		# The precondition every negative test below rests on: the outsider can read the
+		# fixture's DOCTYPE. Without it a roleless user would make them all pass for the
+		# wrong reason. (L7, review of run 8.)
+		for user in (self.reader, self.outsider):
+			self.assertTrue(frappe.has_permission("Note", "read", user=user))
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -241,10 +252,25 @@ class TestUnreadableHitsAreDropped(KnowledgePermissionCase):
 		self.assertEqual(len(allowed), 1)  # control: the tool does reach the record for its owner
 
 	def test_the_permission_check_is_about_the_record_not_the_doctype(self):
-		"""Both users have doctype-level read on the fixture; only one owns the record."""
-		self.assertTrue(frappe.has_permission("Note", "read", user=self.outsider))
-		self.assertFalse(frappe.has_permission("Note", "read", self.secret.name, user=self.outsider))
-		self.assertTrue(frappe.has_permission("Note", "read", self.secret.name, user=self.reader))
+		"""Both users have doctype-level read on the fixture; only one owns the record — and
+		`_may_read` follows the record, not the type.
+
+		Rewritten for L1 (review of run 8): as written it asserted only on `frappe.has_permission`
+		and no mutation of `flow/knowledge/retriever.py` could turn it red — the module could be
+		deleted outright and it still passed. The first line stays as the fixture precondition;
+		everything after it goes through the code this spec changed.
+		"""
+		from flow.knowledge import retriever
+
+		self.assertTrue(frappe.has_permission("Note", "read", user=self.outsider))  # precondition
+		chunk = {"reference_doctype": "Note", "reference_name": self.secret.name}
+
+		with self.set_user(self.outsider):
+			self.assertEqual(frappe.session.user, self.outsider)
+			self.assertFalse(retriever._may_read(chunk))
+		with self.set_user(self.reader):
+			self.assertEqual(frappe.session.user, self.reader)
+			self.assertTrue(retriever._may_read(chunk))
 
 
 class TestChunksWithNoReference(KnowledgePermissionCase):
@@ -430,7 +456,12 @@ class TestOverFetchAndCeiling(KnowledgePermissionCase):
 			self._retrieve_as(self.outsider, SECRET, kbs=[self.kb.name], limit=CANDIDATE_CEILING)
 
 		self.assertEqual(calls, [CANDIDATE_CEILING])
-		self.assertLess(CANDIDATE_CEILING, CANDIDATE_CEILING * OVERFETCH)  # the clamp did work
+		# A precondition on the constant, NOT a measurement of the clamp: with OVERFETCH <= 1
+		# the line above would hold whatever `retrieve` did with the ceiling. The clamp is
+		# measured by the assertion above it and by nothing else. (L2, review of run 8: this
+		# line previously read `assertLess(CANDIDATE_CEILING, CANDIDATE_CEILING * OVERFETCH)`
+		# with the comment "the clamp did work", which is true for any OVERFETCH >= 2.)
+		self.assertGreater(OVERFETCH, 1)
 
 	def test_more_unreadable_candidates_than_the_ceiling_ends_the_search(self):
 		"""It stops at the ceiling and returns what it has.
@@ -530,8 +561,23 @@ class TestCitations(KnowledgePermissionCase):
 		self.assertIsNone(retriever._url_of({"reference_doctype": None, "reference_name": "x"}))
 
 	def test_a_record_with_no_title_field_is_named_by_its_own_name(self):
-		"""`get_title_field` falls back to `name`, and that branch is on the same path."""
+		"""`get_title_field` falls back to `name`, and that branch is on the same path.
+
+		Rewritten for L3 (review of run 8). As written this reached the fallback on neither half:
+		the first asked `DocField` — which has no title field — for the row `"nope"`, which does
+		not exist, so `{}` came back whatever `field` was; the second used `Note`, whose
+		`title_field` IS `title`, so it exercised the ordinary branch. A real row of a doctype
+		with no title field is what makes the fallback observable, and it is what catches a
+		change that stops de-duplicating `["name", "name"]`.
+		"""
 		from flow.knowledge import retriever
+
+		self.assertIsNone(frappe.get_meta("DocField").title_field)  # precondition, not the claim
+		row = frappe.get_all("DocField", limit=1, pluck="name")[0]
+		self.assertEqual(
+			retriever._titles_for([{"reference_doctype": "DocField", "reference_name": row}]),
+			{("DocField", row): row},  # named by its own name, and the dedupe held
+		)
 
 		titles = retriever._titles_for([{"reference_doctype": "DocField", "reference_name": "nope"}])
 		self.assertEqual(titles, {})  # no such row, and no raise
@@ -552,8 +598,11 @@ class TestCitations(KnowledgePermissionCase):
 			with self.subTest(word=word):
 				self.assertNotIn(word, blob)
 
-		# positive control: the sweep does find a forbidden word when one is present
-		self.assertIn("flow", json.dumps([{"title": "Flow Knowledge Source"}]).lower())
+		# Positive control IN THE IDENTICAL FORM: the same sweep, over the same real results,
+		# with one forbidden word planted into them. (L4, review of run 8: the control was a
+		# fresh literal, which proved `assertIn` works rather than that this sweep detects.)
+		planted = json.dumps([*results, {"title": "Flow"}], default=str).lower()
+		self.assertIn("flow", planted)
 
 
 class TestExistingGatesAreUntouched(KnowledgePermissionCase):
