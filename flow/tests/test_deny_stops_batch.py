@@ -358,7 +358,14 @@ class TestTheLoadBearingFunctionsAreUntouched(UnitTestCase):
 	"""
 
 	BASELINE_DIGESTS: ClassVar[dict[str, str]] = {
-		"_invoke": "745260a7da1fe7e9221cf6257de98eeb7c7e23edf5eb4e1ce17d4d0505f5fa4f",
+		# Re-baselined once, for S19 (brain/10-specs/s19-batch-is-one-decision.md, D2/D6), under
+		# the owner's exception for that spec: `_invoke` now reads the same disposition the loops
+		# classify a batch with, so the engine holds ONE copy of its most important condition
+		# instead of three. The previous value was
+		# 745260a7da1fe7e9221cf6257de98eeb7c7e23edf5eb4e1ce17d4d0505f5fa4f. The other three are
+		# byte-unchanged in the same commit, and `test_s19_batch_is_one_decision.py` quotes them
+		# independently so a second re-baseline cannot pass unnoticed here.
+		"_invoke": "2c89005367c8e8bc8ce944ddc2b4fe7f164c84a50802964024f63981e3633246",
 		"_resolve_confirmation": "adbb8b26e0b0fb166a5a9fff1c658c531d081b3bd2f2967e55b8e838b5ab8f47",
 		"_confirmation_question": "32916612298d4ebdb423d9904e268992a2e638b56a67f2ca14fa67deba9cf34c",
 		"_has_denial": "80f799b6827afea159589dcee7889282ad8c376aacc15be424c273cd0e55b209",
