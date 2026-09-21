@@ -1,6 +1,7 @@
 ---
 type: spec
-status: approved  # draft → approved (HUMAN ONLY) → in-progress → implemented
+status: implemented  # draft → approved (HUMAN ONLY) → in-progress → implemented
+implemented: 2026-09-21 (unattended run 9) — see "Found in the build review" before merging
 approved-by: owner, run 9
   (v1 drafted by an unattended research session; v2 revised by an unattended adversarial review,
   2026-09-21. The owner approved v2 for unattended run 9 — REVIEW BEFORE MERGE.)
@@ -518,6 +519,61 @@ entries (the builder may only flip `passes`):
 
 *(The four reviewed functions being byte-identical is listed under "What it must not change" §1, not
 as an acceptance criterion — no S17 change can move that test. Review F8.)*
+
+--------------------------------------------------------------------------------------------------
+## Found in the build review — NOT fixed, because fixing it changes this spec (run 9)
+--------------------------------------------------------------------------------------------------
+**R7 — D3 does not merely block a resume; it makes the whole conversation unusable.**
+**Both reviewers found this independently and both rated it MEDIUM. It is the single most important
+thing on this page for the owner to decide.**
+
+`_validate_messages` is reached from **two** call sites, and R2 traces only one:
+`_prepare_resume` (`agent.py:271`) **and `_build_initial_messages` (`:474`)**. `FlowSession.chat`
+replays the entire stored transcript through the second on **every later message**
+(`flow_session.py:177` -> `:179` -> `run(list)`), and `_row_to_message` restores the stored
+`tool_calls` each time. So one indistinguishable turn anywhere in a session's history refuses:
+
+1. the resume — as R2 says, converting the Paused run to Failed and clearing its questions; then
+2. **every subsequent turn of that conversation, forever.** Each attempt creates another Failed run
+   and leaves another orphan user message in the transcript. There is no user-reachable recovery —
+   only someone who can delete the `Flow Session Message` row.
+
+**Why it matters more than R2 admits.** R2 calls the stored-transcript case theoretical because no
+such transcript is known to exist. But AT1b's own path *creates* them: an ungated colliding batch
+**completed and was stored** before this fix. And a gateway that never streams ids gives **every**
+multi-call turn `id=""` (`model.py:185-188`), so on such a site every session with any multi-tool
+turn in its history stops accepting messages the moment this ships. For an already-answered turn the
+refusal's own sentence — *"one approval would have answered both"* — is simply false.
+
+**And the `_build_initial_messages` half buys no safety.** On the `run(list)` path `_loop` only ever
+invokes calls from the **current** `response.tool_calls` (`:346-347`), never from history;
+`_pending_calls`/`_prepare_resume` are not on that path. So the refusal at `:474` prevents no double
+write. It only turns a survivable session into a dead one.
+
+**The two candidate fixes, both small:**
+- **(a)** fire D3 only for calls with **no `tool` result yet** — the set `_transcript_calls` already
+  builds. That is exactly the security-relevant condition: two *pending* colliding calls. A turn
+  whose calls are already resolved stops being refused, and sessions stay usable.
+- **(b)** move D3 out of `_validate_messages` into `_prepare_resume` only — the sole path that can
+  reach `_run_tool` from stored calls. Forward turns stay guarded by D2.
+
+**Not done in run 9.** This spec says in as many words that both call sites are wanted ("Both paths
+are wanted", D3), so narrowing it is a change to an approved spec and belongs to the owner, not to
+the builder. The behaviour **as specified** is pinned by
+`TestWhatThisRefUsesThatItDidNotHaveTo::test_a_stored_colliding_turn_refuses_every_later_turn_not_only_the_resume`,
+whose docstring says it is the test to change if the rule is narrowed.
+
+**R8 — two distinct non-string references are refused although they are answerable.** `[1, 2]` as
+integers fold to one bucket and the turn is refused, though a set of ids, `answers.get(1)` and
+`Question.key` would all tell them apart. `[True, 1]` folding is correct on the merits (they are
+equal and hash alike). This is D1's stated rule working as written, fail-closed; pinned by
+`TestTheEdgeOfTheFoldIsDeliberate` so it reads as a decision. Raised because it is the one behaviour
+this change makes **stricter** than the defect required.
+
+**R9 — `1` beside `"1"` survives the predicate and can still collide at the client.** They are
+genuinely distinct in Python, so nothing double-executes server-side; but `Question.key` is
+serialised with `asdict`, and a browser building `answers[q.key] = answer` collapses both onto
+`"1"`. Contrived, pre-existing, and recorded rather than closed.
 
 ## Open questions for the owner
 **v1's questions 1 and 2 are closed by the owner's decisions** (refuse, not dedup; the runner gains the
