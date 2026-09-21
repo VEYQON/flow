@@ -53,6 +53,11 @@ NOT_EXECUTED_MESSAGES = {
 		"question was open, so the answer that was given no longer applies to it. "
 		"Do not report it as done. Ask again before doing it."
 	),
+	"group_refused": (
+		"This action was not carried out and nothing was done. It was held back with the other "
+		"actions in the same reply, and one of them was refused. "
+		"Do not report it as done. Ask before doing it on its own."
+	),
 }
 VALID_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
@@ -276,6 +281,7 @@ class Agent:
 
 		denied_group = _has_denial(answers)
 		approval_keys = _approval_question_keys(asked)
+		question_keys = _all_question_keys(asked)
 		have_record = bool(asked)
 		resolved: list[tuple[ToolCall, str]] = []
 		for call in pending:
@@ -297,6 +303,22 @@ class Agent:
 				else:
 					content = self._resolve_confirmation(call, answer)
 			elif asked_to_approve or tool.requires_confirmation:
+				content = _not_executed("approval_no_longer_applies")
+			elif call.id not in answers and not (have_record and call.id in question_keys):
+				# Nobody was asked about this call: it was held back so that nothing in its turn
+				# ran before the person answered. `not in`, never `.get(...) is None` — an answer
+				# of None is an answer, and running a tool on the strength of one would be the
+				# same defect one branch down. Refusing one action in the group refuses this one
+				# with it, because it was held back for the group's sake.
+				content = (
+					_not_executed("group_refused")
+					if denied_group
+					else _serialize_tool_result(self._run_tool(call))
+				)
+			elif have_record and call.id not in question_keys:
+				# An answer arrived for a call no question was ever raised for. `answers` is
+				# validated for shape only, so this is reachable from the web: acting on it would
+				# hand the model whatever text was sent as this tool's result.
 				content = _not_executed("approval_no_longer_applies")
 			else:
 				content = _serialize_tool_result(answer)
@@ -343,7 +365,30 @@ class Agent:
 				)
 
 			questions: list[Question] = []
-			for call in response.tool_calls:
+			# The whole batch is classified before any of it runs. A model can ask for a read and
+			# a write in one breath; if the write needs a person, the read must not already have
+			# happened in their name by the time they are asked, and a Deny must not leave them
+			# with a done thing nobody mentioned. The calls nobody was asked about are held back
+			# with no tool result, which is what makes them pending at resume.
+			plan = [(call, self._disposition(call)) for call in response.tool_calls]
+			if any(disposition == "ask" for _call, disposition in plan):
+				for call, disposition in plan:
+					if disposition != "ask":
+						continue
+					question = self._invoke(call)
+					question.key = call.id
+					questions.append(question)
+				return RunResult(
+					output=response.content,
+					messages=messages,
+					tool_calls=executed_calls,
+					iterations=iteration,
+					usage=usage_total,
+					paused=True,
+					questions=questions,
+				)
+
+			for call, _disposition in plan:
 				result = self._invoke(call)
 				if isinstance(result, Question):
 					result.key = call.id
@@ -408,7 +453,32 @@ class Agent:
 				return
 
 			questions: list[Question] = []
-			for call in response.tool_calls:
+			# The same one decision as `_loop`, in the loop the web apps actually use. A deferred
+			# call is never announced as started, and is ended with an empty result, so no card is
+			# left spinning for something that has not run.
+			plan = [(call, self._disposition(call)) for call in response.tool_calls]
+			if any(disposition == "ask" for _call, disposition in plan):
+				for call, disposition in plan:
+					if disposition == "ask":
+						yield ToolStarted(id=call.id, name=call.name, arguments=call.arguments)
+						question = self._invoke(call)
+						question.key = call.id
+						questions.append(question)
+					yield ToolEnded(id=call.id, name=call.name, result="")
+				yield Done(
+					result=RunResult(
+						output=response.content,
+						messages=messages,
+						tool_calls=executed_calls,
+						iterations=iteration,
+						usage=usage_total,
+						paused=True,
+						questions=questions,
+					)
+				)
+				return
+
+			for call, _disposition in plan:
 				# Re-announce with the full arguments now that they've finished streaming, before the
 				# tool runs — so the UI shows the arguments during execution, not only with the result.
 				yield ToolStarted(id=call.id, name=call.name, arguments=call.arguments)
@@ -481,6 +551,21 @@ class Agent:
 		# new reply, and a resume.
 		_validate_messages(input, refuse_indistinguishable_calls=False)
 		return list(input)
+
+	def _disposition(self, call: ToolCall) -> str:
+		"""What happens to this call before anything in its turn runs: "ask" or "run".
+
+		Read from the tool's own flag, never from the tool body, so a whole batch can be decided
+		before any of it executes. A question a TOOL returns is not an approval and is not
+		classified here: by the time it exists its body has already run, so holding its
+		neighbours back would protect nothing.
+		"""
+		tool = self._tools_by_name.get(call.name)
+		if call.error or tool is None:
+			return "run"
+		# The same condition `_invoke` acts on, read once and in one place: a batch cannot be
+		# decided ahead of itself by a rule that differs from the one that executes it.
+		return "ask" if tool.requires_confirmation and not self.auto_approve else "run"
 
 	def _invoke(self, call: ToolCall) -> Any:
 		"""Run a tool and return its raw result. A Question (returned or synthesized for
@@ -769,6 +854,22 @@ def _approval_question_keys(asked: list[Any] | None) -> frozenset[str]:
 			and isinstance(options, list | tuple)
 			and tuple(options) == CONFIRM_ANSWER_OPTIONS
 		):
+			keys.add(key)
+	return frozenset(keys)
+
+
+def _all_question_keys(asked: list[Any] | None) -> frozenset[str]:
+	"""Every key in a pause's record, whatever kind of question raised it.
+
+	`_approval_question_keys` filters to the ones that asked a person to APPROVE something, which
+	is the wrong question for a call that was HELD BACK: a tool's own question is not an approval
+	and its call is not deferred. Both are read from the record for the same reason — the runtime
+	resuming a run is not always the one that paused it.
+	"""
+	keys: set[str] = set()
+	for question in asked or []:
+		key = question.get("key") if isinstance(question, dict) else getattr(question, "key", None)
+		if isinstance(key, str):
 			keys.add(key)
 	return frozenset(keys)
 
