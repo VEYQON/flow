@@ -5,6 +5,9 @@ implemented: 2026-09-21 (unattended run 9) — see "Found in the build review" b
 approved-by: owner, run 9
   (v1 drafted by an unattended research session; v2 revised by an unattended adversarial review,
   2026-09-21. The owner approved v2 for unattended run 9 — REVIEW BEFORE MERGE.)
+amended-by: owner, run 10, R7 — the refusal applies to the model's NEW reply and to resume, NOT to
+  replayed history in `_build_initial_messages`. Status stays approved/implemented; see D3 and
+  "Found in the build review".
 created: 2026-09-21
 revised: 2026-09-21 (v2)
 upstreamable: yes (the engine change only — see "Upstream")
@@ -227,8 +230,22 @@ with a colliding transcript is refused at resume instead of double-executing. Th
 fail-closed principle applied to the one input S15 did not cover, and it is the only part of this
 change that protects a site that already has the bad transcript stored.
 
-`_validate_messages` is also reached from `_build_initial_messages` (`flow/lib/agent.py:474`), so a
-caller handing in history with a colliding turn is refused at the door too. Both paths are wanted.
+**AMENDED by the owner, run 10 (R7).** v2 said `_validate_messages` is also reached from
+`_build_initial_messages` (`flow/lib/agent.py:474`), so a caller handing in history with a colliding
+turn is refused at the door too, and that "both paths are wanted". That is withdrawn. The replay path
+is **not** refused:
+
+- it buys no execution safety — on the `run(list)` path `_loop` only ever invokes calls from the
+  CURRENT reply, never from history, and `_pending_calls`/`_prepare_resume` are not reachable from
+  there — so refusing it prevents no double write;
+- and it is the path a conversation is replayed through on EVERY later message, so one stored
+  colliding turn refused every future turn of that session, forever, recoverable only by someone who
+  could delete the `Flow Session Message` row.
+
+`_validate_messages` gains `refuse_indistinguishable_calls: bool = True`; `_build_initial_messages`
+is the one caller that passes `False`, with the reason in the code. The default stays True so any new
+call site is guarded unless it says otherwise. The guarantee is unchanged: two actions in one reply
+that cannot be told apart run nothing, on the model's new reply (D2) and at resume (D3).
 
 **Changed from v1** (review F6): v1 used a developer-facing message (`messages[i] has two tool calls
 sharing the id …`) on the grounds that "a transcript handed in by a caller is a programming error".
@@ -557,9 +574,19 @@ write. It only turns a survivable session into a dead one.
 - **(b)** move D3 out of `_validate_messages` into `_prepare_resume` only — the sole path that can
   reach `_run_tool` from stored calls. Forward turns stay guarded by D2.
 
-**Not done in run 9.** This spec says in as many words that both call sites are wanted ("Both paths
-are wanted", D3), so narrowing it is a change to an approved spec and belongs to the owner, not to
-the builder. The behaviour **as specified** is pinned by
+**DECIDED by the owner in run 10: fix (b), narrowed to the two paths where execution happens.**
+D3 now fires from `_prepare_resume` only; `_build_initial_messages` passes
+`refuse_indistinguishable_calls=False`. Applied and measured in run 10 on
+`loop/s17-r7-new-replies-only`. The test that named itself as the one to change was changed
+(`TestReplayedHistoryIsNotRefused`), a second test pinning the same withdrawn behaviour (AT6c) was
+converted into the sharper pair rather than deleted, and three new tests were watched failing first:
+a real `Flow Session` whose stored transcript holds such a turn can still chat, and the S17
+guarantee — a new reply, and a resume, both refuse and run nothing — is asserted on the identical
+input. Probe: re-adding the history check reddens exactly those four.
+
+**Not done in run 9** (kept for the record). Run 9 read this spec as saying both call sites are
+wanted, so narrowing it was a change to an approved spec and belonged to the owner, not to the
+builder. The behaviour **as specified** is pinned by
 `TestWhatThisRefUsesThatItDidNotHaveTo::test_a_stored_colliding_turn_refuses_every_later_turn_not_only_the_resume`,
 whose docstring says it is the test to change if the rule is narrowed.
 

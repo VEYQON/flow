@@ -29,11 +29,13 @@ the named-non-Administrator rule does not apply.
 from typing import Any
 from unittest.mock import patch
 
-from frappe.tests import UnitTestCase
+import frappe
+from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from flow.lib import agent as agent_module
 from flow.lib.agent import _UNANSWERABLE_TURN, Agent, Done, ToolEnded, ToolStarted
-from flow.lib.model import ChatResponse, ToolCall, ToolCallBegin
+from flow.lib.model import ChatResponse, Model, ToolCall, ToolCallBegin
+from flow.lib.session import load_session
 from flow.lib.tool import tool
 
 FORBIDDEN = ("frappe", "erpnext", "mariadb", "openai", "anthropic", "gpt-", "claude", "flow")
@@ -417,13 +419,25 @@ class TestAStoredTranscriptCannotBeResumed(UnitTestCase):
 				self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
 				self.assertEqual(recorder.ran, [])
 
-	def test_a_caller_supplied_history_carrying_one_is_refused_at_the_door(self):
-		"""AT6c. The third way in: history handed to `run`, validated by the same check."""
-		recorder = _Recorder()
-		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+	def test_the_same_history_handed_to_run_is_read_but_still_cannot_execute(self):
+		"""AT6c, narrowed by the owner in run 10 (R7), and made into the sharper pair.
 
+		The third way in — history handed to `run` — is no longer refused at the door, because
+		refusing it prevented no double write and killed the conversation instead (see
+		`TestReplayedHistoryIsNotRefused`). What AT6c was really protecting is asserted here
+		directly and on the identical input: reading that history executes NOTHING, and resuming
+		it — the one path that can reach the tool from those stored calls — is still refused.
+		"""
+		recorder = _Recorder()
+		history = _transcript_with_two_colliding_calls()
+
+		read_only = Agent(model=FakeModel([_final("sure")]), tools=recorder.tools)
+		self.assertEqual(read_only.run(list(history)).output, "sure")
+		self.assertEqual(recorder.ran, [])
+
+		resuming = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
 		with self.assertRaises(ValueError) as caught:
-			agent.run(_transcript_with_two_colliding_calls())
+			resuming.resume(list(history), {"c1": "Approve"})
 
 		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
 		self.assertEqual(recorder.ran, [])
@@ -817,23 +831,30 @@ class TestTheGuardIsWhatStopsTheDoubleExecution(UnitTestCase):
 		self.assertEqual(recorder.ran, [])
 
 
-class TestWhatThisRefUsesThatItDidNotHaveTo(UnitTestCase):
-	"""A REGRESSION THIS CHANGE INTRODUCES, pinned so it is visible rather than discovered.
+class TestReplayedHistoryIsNotRefused(UnitTestCase):
+	"""R7, narrowed by the owner in run 10: the refusal guards where a tool can be reached.
 
-	`_validate_messages` refuses a stored assistant turn whose calls cannot be told apart — and it
-	is reached from `_build_initial_messages` as well as from `_prepare_resume`. A conversation is
-	replayed through the first on EVERY later message, so one such turn anywhere in a stored
-	transcript refuses not just the resume but every future turn of that conversation.
+	Until run 10 the check lived in `_validate_messages`, which is reached from
+	`_build_initial_messages` as well as from `_prepare_resume`. A conversation is replayed
+	through the first on EVERY later message, so one indistinguishable turn anywhere in a stored
+	transcript refused not just the resume but every future turn of that conversation, forever,
+	with no user-reachable recovery.
 
-	The spec asks for both call sites in as many words ("Both paths are wanted"), and refusing a
-	caller-supplied history is the posture it argues for, so this test pins the behaviour AS
-	SPECIFIED rather than quietly narrowing it. Both reviewers rated the blast radius MEDIUM and
-	proposed narrowing it; that is an owner decision recorded in the run log, not one to take here.
+	That half bought no execution safety at all: on the `run(list)` path `_loop` only ever invokes
+	calls from the CURRENT reply, never from history — `_pending_calls`/`_prepare_resume` are not
+	on that path. It only turned a survivable session into a dead one.
 
-	If the owner narrows the rule, THIS is the test that must change, and it says so.
+	So the refusal now fires on the two paths where execution actually happens — the model's NEW
+	reply (`_assistant_message`) and a resume (`_prepare_resume`) — and replayed history is read
+	as the record of what already happened. `TestTheGuaranteeSurvivesTheNarrowing` is the other
+	half of this decision and must be read with it.
+
+	This is the test that the run 9 build named as the one to change if the owner narrowed the
+	rule. The owner narrowed it (run 10, R7).
 	"""
 
-	def test_a_stored_colliding_turn_refuses_every_later_turn_not_only_the_resume(self):
+	def test_a_stored_colliding_turn_no_longer_refuses_every_later_turn(self):
+		"""The bricking scenario, at the agent level: a history nothing can execute from."""
 		recorder = _Recorder()
 		history = _transcript_with_two_colliding_calls()
 		history.append({"role": "tool", "tool_call_id": "c1", "content": "sent 500 to alice"})
@@ -841,12 +862,26 @@ class TestWhatThisRefUsesThatItDidNotHaveTo(UnitTestCase):
 		history.append({"role": "user", "content": "now something completely unrelated"})
 		agent = Agent(model=FakeModel([_final("sure")]), tools=recorder.tools)
 
-		# Both calls already have a result, so nothing could double-execute from here — and the
-		# new turn is refused anyway.
-		with self.assertRaises(ValueError) as caught:
-			agent.run(history)
+		result = agent.run(history)
 
-		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(result.output, "sure")
+		# Replay executes nothing — that is the whole reason this path may be read.
+		self.assertEqual(recorder.ran, [])
+		# The poisoned turn is replayed to the model verbatim, not dropped or rewritten.
+		replayed = _assistant_turns(agent.model.calls[0]["messages"])
+		self.assertEqual([tc["id"] for tc in replayed[0]["tool_calls"]], ["c1", "c1"])
+
+	def test_a_pending_colliding_turn_in_history_is_also_replayed(self):
+		"""The harder half: the calls have NO results, so this is the shape the resume refuses.
+
+		Replay still invokes nothing, so reading it is safe; a resume of the same transcript is
+		refused, and `TestTheGuaranteeSurvivesTheNarrowing` asserts exactly that on this input.
+		"""
+		recorder = _Recorder()
+		history = _transcript_with_two_colliding_calls()
+		agent = Agent(model=FakeModel([_final("sure")]), tools=recorder.tools)
+
+		self.assertEqual(agent.run(history).output, "sure")
 		self.assertEqual(recorder.ran, [])
 
 	def test_an_ordinary_history_is_of_course_unaffected(self):
@@ -894,3 +929,129 @@ class TestWhatThisRefUsesThatItDidNotHaveTo(UnitTestCase):
 			_validate_messages(
 				[{"role": "assistant", "content": None, "tool_calls": ["not-a-dict", "nor-this"]}]
 			)
+
+
+class TestTheGuaranteeSurvivesTheNarrowing(UnitTestCase):
+	"""The other half of R7. Narrowing where the check fires must not narrow WHAT it guarantees.
+
+	Two actions in one reply that cannot be told apart still run nothing, on both paths that can
+	reach a tool: the model's new reply, and a resume of a stored transcript. If either of these
+	goes green-by-accident the narrowing has eaten the fix rather than scoped it.
+	"""
+
+	def test_a_new_reply_with_a_duplicate_reference_is_still_refused_and_runs_nothing(self):
+		recorder = _Recorder()
+		agent = Agent(
+			model=FakeModel(
+				[
+					_calls(
+						("send_money", {"to": "alice", "amount": 500}, "c1"),
+						("send_money", {"to": "bob", "amount": 500}, "c1"),
+					)
+				]
+			),
+			tools=recorder.tools,
+		)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.run("pay them both")
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_a_new_reply_with_no_usable_reference_is_still_refused_and_runs_nothing(self):
+		"""The ungated, no-reference shape — the one a gateway that never streams ids produces,
+		and the only one that executed twice with nobody asked anything."""
+		recorder = _Recorder()
+		agent = Agent(
+			model=FakeModel(
+				[
+					_calls(
+						("append_line", {"text": "one"}, ""),
+						("append_line", {"text": "two"}, ""),
+					)
+				]
+			),
+			tools=recorder.tools,
+		)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.run("log both")
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_a_resume_of_a_stored_colliding_turn_is_still_refused_and_runs_nothing(self):
+		"""The same transcript `test_a_pending_colliding_turn_in_history_is_also_replayed` reads
+		without complaint. Reading it is safe; resuming it is where the tool would run."""
+		recorder = _Recorder()
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(_transcript_with_two_colliding_calls(), {"c1": "Approve"})
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_a_streamed_resume_of_a_stored_colliding_turn_is_still_refused(self):
+		"""A generator that is never drained raises nothing, so the drain is the assertion."""
+		recorder = _Recorder()
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
+		with self.assertRaises(ValueError) as caught:
+			list(agent.resume(_transcript_with_two_colliding_calls(), {"c1": "Approve"}, stream=True))
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+
+class TestASessionWhoseHistoryIsPoisonedStaysUsable(IntegrationTestCase):
+	"""R7 at the level it was reported: a real conversation, not a hand-built message list.
+
+	`FlowSession.chat` rebuilds the prompt from the whole stored transcript on every message
+	(`_build_prompt_messages` -> `run(list)`), and `_row_to_message` restores the stored
+	`tool_calls` each time. Before the narrowing, one indistinguishable assistant turn stored in
+	`Flow Session Message.tool_calls` made every later message raise, mark the run Failed and
+	leave an orphan user message — forever, recoverable only by deleting the row.
+	"""
+
+	def tearDown(self):
+		frappe.db.rollback()
+
+	def _poisoned_session(self):
+		"""A session whose stored transcript holds a turn whose two calls share one reference."""
+		recorder = _Recorder()
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), name="Payer", tools=recorder.tools)
+		with patch.object(Model, "chat", return_value=_final("hello")):
+			run = agent.new_session().chat("hi")
+
+		session = load_session(run.session, agent=agent)
+		call = {
+			"id": "c1",
+			"type": "function",
+			"function": {"name": "send_money", "arguments": '{"to": "alice", "amount": 500}'},
+		}
+		session.append_run_messages(
+			[
+				{"role": "assistant", "content": None, "tool_calls": [dict(call), dict(call)]},
+				{"role": "tool", "tool_call_id": "c1", "content": "sent 500 to alice"},
+			],
+			run.name,
+		)
+		return agent, recorder, load_session(run.session, agent=agent)
+
+	def test_a_later_message_in_that_session_still_gets_an_answer(self):
+		_agent, recorder, session = self._poisoned_session()
+
+		with patch.object(Model, "chat", return_value=_final("sure")) as chat:
+			run = session.chat("now something unrelated")
+
+		self.assertEqual(run.status, "Completed")
+		self.assertEqual(run.output, "sure")
+		self.assertEqual(recorder.ran, [])
+		# The poisoned turn really was in the prompt this turn was built from — without this the
+		# test could pass against a session that had quietly dropped it.
+		replayed = _assistant_turns(
+			chat.call_args.args[0] if chat.call_args.args else chat.call_args.kwargs["messages"]
+		)
+		self.assertEqual([tc["id"] for tc in replayed[0]["tool_calls"]], ["c1", "c1"])

@@ -471,7 +471,15 @@ class Agent:
 				messages.append({"role": "system", "content": self.instructions})
 			messages.append({"role": "user", "content": input})
 			return messages
-		_validate_messages(input)
+		# Replayed history is read, never executed: on this path `_loop` only ever invokes calls
+		# from the CURRENT reply, and `_pending_calls`/`_prepare_resume` are not reachable from
+		# here. Refusing an indistinguishable turn in a caller's history therefore prevents no
+		# double write, while a conversation is replayed through here on EVERY later message — so
+		# one such turn stored in a transcript would refuse every future turn of that
+		# conversation, forever, recoverable only by someone who can delete the stored row.
+		# The refusal belongs where a tool can be reached from the calls in question: the model's
+		# new reply, and a resume. (Owner decision, run 10, S17 R7.)
+		_validate_messages(input, refuse_indistinguishable_calls=False)
 		return list(input)
 
 	def _invoke(self, call: ToolCall) -> Any:
@@ -534,7 +542,13 @@ def _indistinguishable_tool_call(ids: Iterable[Any]) -> tuple[bool, str] | None:
 	return None
 
 
-def _validate_messages(messages: Any) -> None:
+def _validate_messages(messages: Any, *, refuse_indistinguishable_calls: bool = True) -> None:
+	"""Structural checks on a message list, plus — unless asked not to — the refusal of an
+	assistant turn whose calls cannot be told apart.
+
+	`refuse_indistinguishable_calls` defaults to True so a new call site is guarded unless it
+	says otherwise: the only caller that opts out is `_build_initial_messages`, and it says why.
+	"""
 	if not isinstance(messages, list):
 		raise TypeError(f"input must be a str or list of message dicts, got {type(messages).__name__}")
 	for i, message in enumerate(messages):
@@ -547,11 +561,11 @@ def _validate_messages(messages: Any) -> None:
 			raise ValueError(f"messages[{i}] is a tool message but has no tool_call_id")
 		if "content" not in message and "tool_calls" not in message:
 			raise ValueError(f"messages[{i}] must have 'content' or 'tool_calls'")
-		if role == "assistant" and message.get("tool_calls"):
+		if refuse_indistinguishable_calls and role == "assistant" and message.get("tool_calls"):
 			# What makes this fix complete rather than only forward-looking: a run that paused
 			# BEFORE it, with a transcript the engine would now refuse, is refused at resume
-			# instead of double-executing. `_prepare_resume` and `_build_initial_messages` both
-			# validate here, so the ordinary resume and a caller-supplied history are both closed.
+			# instead of double-executing. `_prepare_resume` validates here, so the ordinary
+			# resume is closed as well as the model's new reply (`_assistant_message`).
 			# Person-facing on the resume path — the text reaches the run's error field — so it
 			# is the same one sentence, not a diagnostic.
 			# Iterated exactly as `_transcript_calls` iterates it — any sequence, not only a list —
