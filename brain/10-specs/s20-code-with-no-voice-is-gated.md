@@ -334,3 +334,65 @@ does not exist there and the diff is four lines instead of two.
    `WRITE_CAPABLE`-style classification for S19 Part B. Under the owner's unattended rule there is no
    classification: a bare callable is gated after S20, and a gated tool is refused in an unattended
    run. The two specs now meet cleanly, and S19's R3 is closed rather than mirrored.
+
+--------------------------------------------------------------------------------------------------
+## Found in the build review (run 10, two fresh reviewers, read-only + one mutating)
+--------------------------------------------------------------------------------------------------
+Security auditor and QA adversary, separate contexts, neither having written any of this code.
+**Neither found a HIGH, and neither found a route to an ungated runnable tool that D1/D2 miss.**
+Both enumerated every construction of a `Tool` in non-test code — `flow/lib/tool.py`,
+`flow/lib/resolver.py` and `evals/run.py` are the only three — and both confirmed the floor survives
+to `flow/lib/agent.py`'s `_invoke`, which reads the RUNTIME tool and never the record. QA also
+measured the routes v1 worried about: `db.set_value` forcing the column to 0 on a Script row gives
+`SCRIPT_COLUMN: 0  RUNTIME: True`; `functools.partial`, a bound method, a module-level lambda and
+the raw `.func` behind an ungated `Tool` all resolve **gated**.
+
+**FIXED in this branch (review MEDIUM — the only finding inside this spec's files).**
+`_build_tool`'s `code_requires_confirmation` defaulted to `False`, and after D1/D2 that default is
+unreachable from every production call site — which is why the spec's named mutation for AT4 (move
+the floor into the default) was GREEN. A default nobody reaches is a trap: a fourth resolution
+branch written later and calling `_build_tool` without the argument would resolve ungated, exactly
+as these two branches did before S20, and nothing would go red. The default is now the **safe**
+answer, `True`: a branch that says nothing about the code builds a tool that ASKS. Two new tests,
+both watched failing first (`TestTheFloorCannotBeForgotten`): the default is `True`, and a call
+site that omits the argument builds a gated tool.
+
+Removing the default outright — the reviewer's own proposal — was **tried and rejected, measured**:
+it makes a forgotten argument a `TypeError`, and `flow/tests/test_ai_confirm_template.py:485`
+calls `_build_tool` without it deliberately (it is testing a record written before the
+`confirm_template` column existed). That call errored the gate. Making it green again would mean
+editing a test to fit the code, which the workflow forbids; a safe default closes the same hole
+without touching a test that was right.
+
+**RECORDED FOR THE OWNER, NOT CHANGED — each is outside this spec's files.**
+1. **MEDIUM (both reviewers, independently) — the tool panel is told the opposite of what the
+   engine will do.** `flow/api/api.py:148-164` (`get_agent_tools`) reports
+   `requires_confirmation` **from the row**, so for exactly the rows S20 changes — a bare-callable
+   or Script row with the box unticked — the panel says "runs inline" while the engine pauses and
+   asks. QA reproduced it (`API_MAP: {'qa_api_tool': False}  RUNTIME: True`). **Fail-safe
+   direction**: no approval is skipped and a live pause still renders its card, because
+   `AssistantMessage.vue` falls back to the question's presence. What it costs is a reloaded
+   conversation: `frontend/src/store.js:440-445` recovers the "Denied" badge only from that map, so
+   a refusal the person made can re-render as an ordinary tool result. Smallest fix: resolve
+   instead of reading the column (`to_tool().requires_confirmation`, `True` if the resolve throws —
+   an unresolvable tool must never be advertised as inline), with a test for an unticked
+   bare-callable row. It touches `flow/api/api.py`, which this spec does not name, so it is the
+   owner's to schedule.
+2. **LOW — a fork-owned test now documents the opposite of the shipped rule.**
+   `flow/tests/test_write_tools_confirm.py:363-370` says of a Script tool "its author decides".
+   After D2 the author decides only by shipping a decorated `Tool`. The assertion is about the
+   stored column and stays true; the docstring is what is now misleading, and a maintainer could
+   read it as the contract.
+3. **LOW — a legacy pause with no recorded questions.** `flow/lib/agent.py:288` falls back to the
+   tool's CURRENT gate when a pause carries no `asked` record, and S20 flips exactly that class of
+   tool from ungated to gated. A run that paused before this deploy on a Script tool's OWN question
+   could, after it, execute on the literal answer "Approve". Upgrade-window only — current code
+   always stores the questions — and narrowing it is a `_prepare_resume` change, which CLAUDE.md
+   rule 4 says needs a spec that names it.
+4. **LOW — R2's field descriptions were not written.** The escape hatch ("ship it as a decorated
+   `Tool`") is in this spec and in the code comments, and nowhere an integrator reads.
+   `flow_tool.json` is untouched by this branch on purpose: a doctype JSON edit is its own review.
+5. **Pre-existing, outside S20 entirely** — `flow/assistant/assistant.py` names the platform in the
+   assistant's own system instructions (a CLAUDE.md rule 3 violation already on `veyqon`) and tells
+   the model to set `auto_approve=1` on triggers it creates. S19 Part B is what answers the second
+   half; the first half is a separate one-line capture.

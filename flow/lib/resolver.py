@@ -89,7 +89,12 @@ def _build_tool(
 	func: Any,
 	*,
 	confirm_prompt: Any = None,
-	code_requires_confirmation: bool = False,
+	# The default is the safe answer, not the convenient one. Every branch that builds a runnable
+	# tool has to say what the CODE declares about approval, and "nothing" is not "no" — a branch
+	# written later that forgets to say builds a tool that ASKS, instead of quietly re-creating
+	# the hole D1 and D2 close. Nothing in the engine relies on this default: all three call sites
+	# below pass the argument.
+	code_requires_confirmation: bool = True,
 ) -> Tool:
 	return Tool(
 		name=doc.slug,

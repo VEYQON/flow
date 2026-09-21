@@ -19,9 +19,11 @@ The record is not enough on three routes:
 So the floor is computed at RESOLVE time from what the code says, where a record cannot reach it.
 Turning a gate on is never refused; only taking one off that was never declared.
 
-Every test runs as a named non-Administrator user. Flow Tool's only permission rule is the System
-Manager one (`flow_tool.json:134-145`), and a test running as Administrator would pass even if that
-rule were deleted.
+Every test runs as a named non-Administrator user. That is load-bearing in AT4, which READS a row
+through the permission layer: Flow Tool's only permission rule is the System Manager one
+(`flow_tool.json:134-145`), and that read would pass as Administrator even if the rule were
+deleted. The inserts elsewhere pass `ignore_permissions=True` and prove nothing about permissions;
+they are written that way because what they measure is the resolver, not the doctype.
 """
 
 import frappe
@@ -253,6 +255,44 @@ class TestCodeWithNoVoiceIsGated(S20Base):
 
 		self.assertTrue(doc.requires_confirmation)
 		self.assertIs(doc.to_tool().requires_confirmation, True)
+
+
+class TestTheFloorCannotBeForgotten(S20Base):
+	"""From the build review (MEDIUM): after D1 and D2 every call site passes the floor
+	explicitly, so `_build_tool`'s default for it became unreachable — and a default nobody
+	reaches is a trap. A fourth resolution branch written later, calling `_build_tool` without the
+	argument, would resolve ungated exactly as the two branches did before S20, and no test in
+	this module would go red. Measured: that was the spec's named mutation for AT4, and it was
+	green.
+
+	So the default is the SAFE answer rather than the convenient one: a call site that says
+	nothing about the code builds a tool that asks. Removing the default outright was tried first
+	and rejected — it makes a forgotten argument a `TypeError` at a call site a fork-owned test
+	writes deliberately (`test_ai_confirm_template.py:485`), and making that test green again
+	would mean editing a test to fit the code.
+	"""
+
+	def test_the_code_floor_defaults_to_asking(self):
+		import inspect
+
+		from flow.lib.resolver import _build_tool
+
+		parameter = inspect.signature(_build_tool).parameters["code_requires_confirmation"]
+
+		self.assertIs(parameter.default, True)
+
+	def test_a_call_site_that_omits_it_builds_a_gated_tool(self):
+		"""The control, and the half that actually matters: a signature is a claim, this is the
+		behaviour a forgetful branch would produce."""
+		from flow.lib.resolver import _build_tool
+
+		doc = frappe.get_doc(
+			self._imported("s20_forgotten", f"{_HERE}.a_plain_function", requires_confirmation=0)
+		).insert(ignore_permissions=True)
+
+		built = _build_tool(doc, {"type": "object", "properties": {}}, lambda **kw: "ok")
+
+		self.assertIs(built.requires_confirmation, True)
 
 
 class TestTheGateNamesNothingItShouldNot(S20Base):
