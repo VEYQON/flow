@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -495,6 +495,41 @@ class Agent:
 			return json.dumps({"error": str(e)[:ERROR_MESSAGE_LIMIT]})
 
 
+# A tool call that cannot be told apart from another in the same turn cannot be approved separately
+# from it. There are two such shapes and they fail the same way downstream, so they are one rule
+# here: two calls carrying the same id, and two calls carrying no usable id at all — `None` from a
+# provider that sends a null, `""` from one that omits the field or never streams it. Both end up as
+# the same question key, the same answer lookup and the same membership test, which is the defect.
+# Anything that is not a non-empty string is folded into one bucket rather than skipped: skipping it
+# is what would leave the likelier half of this defect live.
+NO_CALL_REFERENCE = "<none>"
+
+_UNANSWERABLE_TURN = _(
+	"Two actions in one reply could not be told apart, so one approval would have answered both. "
+	"Nothing was carried out."
+)
+
+
+def _indistinguishable_tool_call(ids: Iterable[Any]) -> tuple[bool, str] | None:
+	"""The first reference that appears twice in one assistant turn, or None.
+
+	Returns `(found, reference)` rather than a bare string, so no caller can ever decide on the
+	truthiness of the value — an empty reference is a real collision and the most likely one, and a
+	guard written `if collided:` would wave it through.
+
+	References are compared EXACTLY: no case-folding and no stripping, because nothing downstream
+	normalises either. Membership, the answer lookup and the question key all compare raw, so "c1"
+	and "C1" are two answerable calls and must stay two.
+	"""
+	seen: set[str] = set()
+	for id in ids:
+		reference = id if isinstance(id, str) and id else NO_CALL_REFERENCE
+		if reference in seen:
+			return True, reference
+		seen.add(reference)
+	return None
+
+
 def _validate_messages(messages: Any) -> None:
 	if not isinstance(messages, list):
 		raise TypeError(f"input must be a str or list of message dicts, got {type(messages).__name__}")
@@ -508,11 +543,35 @@ def _validate_messages(messages: Any) -> None:
 			raise ValueError(f"messages[{i}] is a tool message but has no tool_call_id")
 		if "content" not in message and "tool_calls" not in message:
 			raise ValueError(f"messages[{i}] must have 'content' or 'tool_calls'")
+		if role == "assistant" and isinstance(message.get("tool_calls"), list):
+			# What makes this fix complete rather than only forward-looking: a run that paused
+			# BEFORE it, with a transcript the engine would now refuse, is refused at resume
+			# instead of double-executing. `_prepare_resume` and `_build_initial_messages` both
+			# validate here, so the ordinary resume and a caller-supplied history are both closed.
+			# Person-facing on the resume path — the text reaches the run's error field — so it
+			# is the same one sentence, not a diagnostic.
+			if (
+				_indistinguishable_tool_call(
+					tc.get("id") for tc in message["tool_calls"] if isinstance(tc, dict)
+				)
+				is not None
+			):
+				raise ValueError(_UNANSWERABLE_TURN)
 
 
 def _assistant_message(response: ChatResponse) -> dict[str, Any]:
 	message: dict[str, Any] = {"role": "assistant", "content": response.content}
 	if response.tool_calls:
+		if _indistinguishable_tool_call(call.id for call in response.tool_calls) is not None:
+			# One question cannot address two actions: both would carry the same key, one answer
+			# would resolve both, and the tool would run twice on one approval. Refused HERE,
+			# before the message is returned to be appended and therefore before anything is
+			# invoked — both loops build this message before they touch `response.tool_calls`.
+			#
+			# `is not None`, never `if collided:` — the no-reference case is a real collision and
+			# its reference is the falsy one. The predicate returns a tuple so this cannot be
+			# "simplified" into a bug.
+			raise ValueError(_UNANSWERABLE_TURN)
 		message["tool_calls"] = [
 			{
 				"id": call.id,
