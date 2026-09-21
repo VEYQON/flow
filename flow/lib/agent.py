@@ -504,7 +504,11 @@ class Agent:
 # is what would leave the likelier half of this defect live.
 NO_CALL_REFERENCE = "<none>"
 
-_UNANSWERABLE_TURN = _(
+# A plain literal, deliberately, like every other module-level message in this file. `_()` here
+# would run at IMPORT time and freeze the translation for the whole worker in whatever language
+# happened to be current then — and it would mean the vendor-word check over this string only ever
+# inspects the English one, which is the single thing that check exists to prevent.
+_UNANSWERABLE_TURN = (
 	"Two actions in one reply could not be told apart, so one approval would have answered both. "
 	"Nothing was carried out."
 )
@@ -543,16 +547,20 @@ def _validate_messages(messages: Any) -> None:
 			raise ValueError(f"messages[{i}] is a tool message but has no tool_call_id")
 		if "content" not in message and "tool_calls" not in message:
 			raise ValueError(f"messages[{i}] must have 'content' or 'tool_calls'")
-		if role == "assistant" and isinstance(message.get("tool_calls"), list):
+		if role == "assistant" and message.get("tool_calls"):
 			# What makes this fix complete rather than only forward-looking: a run that paused
 			# BEFORE it, with a transcript the engine would now refuse, is refused at resume
 			# instead of double-executing. `_prepare_resume` and `_build_initial_messages` both
 			# validate here, so the ordinary resume and a caller-supplied history are both closed.
 			# Person-facing on the resume path — the text reaches the run's error field — so it
 			# is the same one sentence, not a diagnostic.
+			# Iterated exactly as `_transcript_calls` iterates it — any sequence, not only a list —
+			# and an entry this cannot read folds to the sentinel instead of being SKIPPED.
+			# Skipping is what let v1 of this rule wave two `None` ids through; a shape the check
+			# drops but `_transcript_calls` still turns into a ToolCall is that hole in a new hat.
 			if (
 				_indistinguishable_tool_call(
-					tc.get("id") for tc in message["tool_calls"] if isinstance(tc, dict)
+					tc.get("id") if isinstance(tc, dict) else None for tc in message["tool_calls"]
 				)
 				is not None
 			):

@@ -31,8 +31,9 @@ from unittest.mock import patch
 
 from frappe.tests import UnitTestCase
 
-from flow.lib.agent import _UNANSWERABLE_TURN, Agent, Done
-from flow.lib.model import ChatResponse, ToolCall
+from flow.lib import agent as agent_module
+from flow.lib.agent import _UNANSWERABLE_TURN, Agent, Done, ToolEnded, ToolStarted
+from flow.lib.model import ChatResponse, ToolCall, ToolCallBegin
 from flow.lib.tool import tool
 
 FORBIDDEN = ("frappe", "erpnext", "mariadb", "openai", "anthropic", "gpt-", "claude", "flow")
@@ -54,8 +55,16 @@ class FakeModel:
 
 
 def _scripted_stream(response: ChatResponse):
+	"""A scripted stream, including the mid-stream tool announcements the real one carries.
+
+	Without the `ToolCallBegin`s this helper produces no `ToolStarted` events at all, so any test
+	claiming to observe what a client draws would be asserting over an empty list and could not
+	fail. That is exactly what the first draft of `TestTheStreamedRefusalIsHonest` did.
+	"""
 	if response.content:
 		yield response.content
+	for call in response.tool_calls or []:
+		yield ToolCallBegin(id=call.id, name=call.name)
 	return response
 
 
@@ -378,7 +387,14 @@ class TestAStoredTranscriptCannotBeResumed(UnitTestCase):
 
 		The fake model carries a following final turn ON PURPOSE: without it, deleting the
 		refusal would make this test red because the script ran out, which is the wrong reason.
-		With it, the pre-fix observation is the recorder holding TWO executions on ONE "Approve".
+		With it, deleting the refusal lets the resume run to completion and the tool executes
+		twice on one "Approve".
+
+		Honest about what this test itself sees: it goes red on `assertRaises`, BEFORE
+		`recorder.ran` is evaluated, so the two executions are not what this assertion reports.
+		They were observed separately, on the unwired engine, and are recorded in the run log;
+		`test_a_stored_colliding_transcript_double_executes_without_the_guard` below is the one
+		that asserts the count.
 		"""
 		recorder = _Recorder()
 		model = FakeModel([_final("paid")])
@@ -466,8 +482,13 @@ class TestTheRefusalIsFitToBeRead(UnitTestCase):
 				with self.subTest(word=word):
 					self.assertNotIn(word, text.lower())
 
-		# The control: the same sweep over a string that DOES name one must report it.
-		self.assertIn("frappe", f"{raised[0]} frappe".lower())
+		# The control, IN THE IDENTICAL FORM: the same loop, over the same text with one forbidden
+		# word planted into it, must report it. (The first draft asserted that a string built to
+		# contain "frappe" contained it, which no mutation could redden and which never ran the
+		# loop above at all.)
+		planted = f"{raised[0]} Frappe".lower()
+		caught_words = [word for word in FORBIDDEN if word in planted]
+		self.assertEqual(caught_words, ["frappe"])
 
 	def test_the_refusal_says_what_happened_and_that_nothing_was_done(self):
 		"""A person reads this in the run's error field, or over the stream. It has to be a
@@ -568,5 +589,308 @@ class TestTheStreamedRefusalIsHonest(UnitTestCase):
 			for event in agent.run("go", stream=True):
 				seen.append(event)
 
+		started = [e for e in seen if isinstance(e, ToolStarted)]
+		self.assertEqual([(e.id, e.name) for e in started], [("c1", "append_line")] * 2)
+		self.assertFalse([e for e in seen if isinstance(e, ToolEnded)])  # neither ever finished
 		self.assertFalse(any(isinstance(e, Done) for e in seen))
 		self.assertEqual(recorder.ran, [])
+
+
+class TestTheAnswerContractDidNotMove(UnitTestCase):
+	"""Criterion 13, asserted rather than argued.
+
+	The only thing a web app has to get right about an approval is that a question carries a `key`
+	and that posting `{key: answer}` resolves exactly that call. S17 refuses some turns earlier
+	than before; it must not have moved anything about the turns that still pause.
+	"""
+
+	def test_a_pause_still_carries_one_key_per_call_and_the_same_two_options(self):
+		from flow.lib.agent import CONFIRM_ANSWER_OPTIONS
+
+		recorder = _Recorder()
+		model = FakeModel(
+			[
+				_calls(
+					("send_money", {"to": "alice", "amount": 500}, "c1"),
+					("send_money", {"to": "bob", "amount": 10}, "c2"),
+				)
+			]
+		)
+		agent = Agent(model=model, tools=recorder.tools)
+
+		result = agent.run("pay alice and bob")
+
+		self.assertTrue(result.paused)
+		self.assertEqual([q.key for q in result.questions], ["c1", "c2"])
+		self.assertEqual(CONFIRM_ANSWER_OPTIONS, ("Approve", "Deny"))
+		for question in result.questions:
+			self.assertEqual(question.options, ["Approve", "Deny"])
+			self.assertTrue(question.allow_other)
+		self.assertEqual(recorder.ran, [])
+
+	def test_posting_that_key_back_resolves_exactly_that_call(self):
+		"""The whole wire contract in one assertion: the key the client was given is the key the
+		engine looks the answer up by, and only the approved call runs."""
+		recorder = _Recorder()
+		model = FakeModel(
+			[
+				_calls(
+					("send_money", {"to": "alice", "amount": 500}, "c1"),
+					("send_money", {"to": "bob", "amount": 10}, "c2"),
+				)
+			]
+		)
+		agent = Agent(model=model, tools=recorder.tools)
+		paused = agent.run("pay alice and bob")
+
+		fresh = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+		resumed = fresh.resume(
+			[dict(m) for m in paused.messages],
+			{q.key: ("Approve" if q.key == "c1" else "no, hold off") for q in paused.questions},
+		)
+
+		self.assertEqual(recorder.ran, [("send_money", {"to": "alice", "amount": 500})])
+		self.assertEqual(
+			{m["tool_call_id"] for m in resumed.messages if m.get("role") == "tool"}, {"c1", "c2"}
+		)
+
+
+class TestTheEdgeOfTheFoldIsDeliberate(UnitTestCase):
+	"""What the "not a non-empty string" fold costs, pinned so the cost is a decision.
+
+	The rule folds every reference that is not a non-empty `str` into one bucket. For `None` and
+	`""` that is the whole point — they are the shapes a provider actually produces and they really
+	are indistinguishable downstream. For two DISTINCT non-string references it is stricter than the
+	defect requires: two calls carrying `1` and `2` would be told apart perfectly well by a set of
+	ids, by `answers.get(...)` and as question keys, and they are refused anyway.
+
+	That is fail-closed by choice, not by accident, and it is pinned here so a later reader sees a
+	decision rather than an oversight. Note `True`/`1` genuinely DO collide downstream (they are
+	equal and hash alike), so folding those is correct on the merits.
+	"""
+
+	def test_two_distinct_non_string_references_are_refused_although_answerable(self):
+		from flow.lib.agent import NO_CALL_REFERENCE, _indistinguishable_tool_call
+
+		self.assertEqual(_indistinguishable_tool_call([1, 2]), (True, NO_CALL_REFERENCE))
+		# the control: as strings, the same two references are two answerable calls
+		self.assertIsNone(_indistinguishable_tool_call(["1", "2"]))
+
+	def test_an_integer_beside_a_string_is_not_folded_into_it(self):
+		"""The fold must not make a usable reference collide with an unusable one."""
+		from flow.lib.agent import _indistinguishable_tool_call
+
+		self.assertIsNone(_indistinguishable_tool_call([1, "1"]))
+		self.assertIsNone(_indistinguishable_tool_call([None, "c1"]))
+
+	def test_three_calls_where_only_two_collide_are_refused(self):
+		"""The rule is per turn, not per adjacent pair."""
+		from flow.lib.agent import _indistinguishable_tool_call
+
+		self.assertEqual(_indistinguishable_tool_call(["c1", "c2", "c1"]), (True, "c1"))
+		self.assertIsNone(_indistinguishable_tool_call(["c1", "c2", "c3"]))
+
+	def test_a_whitespace_only_reference_is_a_reference(self):
+		"""It is a non-empty string, so it is compared as one — consistent with taking ids
+		exactly, and with the control that nothing strips them."""
+		from flow.lib.agent import _indistinguishable_tool_call
+
+		self.assertEqual(_indistinguishable_tool_call(["  ", "  "]), (True, "  "))
+		self.assertIsNone(_indistinguishable_tool_call(["  ", ""]))
+
+
+class TestThePathsTheFirstDraftDidNotReach(UnitTestCase):
+	"""Four shapes the acceptance table does not name, each of which could have been a hole."""
+
+	def test_a_streamed_resume_refuses_too(self):
+		"""`_resume_stream` is a GENERATOR, so `resume(..., stream=True)` returns without running
+		anything — the refusal only happens on the first `next()`. A caller that builds the
+		generator and never drains it would see no error at all, so the draining is the test."""
+		recorder = _Recorder()
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
+		stream = agent.resume(_transcript_with_two_colliding_calls(), {"c1": "Approve"}, stream=True)
+
+		with self.assertRaises(ValueError) as caught:
+			for _event in stream:
+				pass
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_auto_approve_does_not_get_past_it(self):
+		"""The one flag that turns every approval gate off must not also turn this off — the
+		refusal is not a gate, it is a malformed reply. It sits before `_invoke`, which is where
+		`auto_approve` is read, so the flag never comes into it."""
+		recorder = _Recorder()
+		model = FakeModel(
+			[
+				_calls(
+					("send_money", {"to": "alice", "amount": 500}, "c1"),
+					("send_money", {"to": "alice", "amount": 500}, "c1"),
+				),
+				_final("done"),
+			]
+		)
+		agent = Agent(model=model, tools=recorder.tools, auto_approve=True)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.run("pay alice")
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_a_colliding_second_turn_is_refused_after_a_clean_first_one(self):
+		"""The rule is per assistant turn, and a run does not become immune by starting well.
+		The first turn executes; the second is refused and the first turn's work stands."""
+		recorder = _Recorder()
+		model = FakeModel(
+			[
+				_calls(("append_line", {"text": "first"}, "a1")),
+				_calls(
+					("append_line", {"text": "x"}, "b1"),
+					("append_line", {"text": "y"}, "b1"),
+				),
+			]
+		)
+		agent = Agent(model=model, tools=recorder.tools)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.run("go twice")
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [("append_line", {"text": "first"})])
+
+	def test_a_colliding_turn_that_already_has_one_result_is_still_refused(self):
+		"""The nastiest stored shape: one of the two already ran, so a rule that only looked at
+		PENDING calls would see a single call and wave it through — and the answer would then
+		resolve the one that had already executed. The check is over the assistant turn as
+		written, never over what is still pending, which is what closes this."""
+		recorder = _Recorder()
+		messages = _transcript_with_two_colliding_calls()
+		messages.append({"role": "tool", "tool_call_id": "c1", "content": "sent 500 to alice"})
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(messages, {"c1": "Approve"})
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+
+class TestTheGuardIsWhatStopsTheDoubleExecution(UnitTestCase):
+	"""The count, asserted — not inferred from a raise.
+
+	Every other test here observes the refusal, which means it stops at `assertRaises` and never
+	evaluates the recorder. This one removes the guard from the engine's own predicate for the
+	duration of one call and counts what happens without it, so the number this whole spec exists
+	to change is written down in a test rather than only in a run log.
+	"""
+
+	def _resume_with_the_guard_disabled(self, recorder):
+		"""`_indistinguishable_tool_call` forced to find nothing: the engine as it was."""
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+		with patch.object(agent_module, "_indistinguishable_tool_call", lambda ids: None):
+			return agent.resume(_transcript_with_two_colliding_calls(), {"c1": "Approve"})
+
+	def test_a_stored_colliding_transcript_double_executes_without_the_guard(self):
+		recorder = _Recorder()
+
+		result = self._resume_with_the_guard_disabled(recorder)
+
+		# ONE approval, TWO transfers. This is the defect, in a number.
+		self.assertEqual(
+			recorder.ran,
+			[("send_money", {"to": "alice", "amount": 500})] * 2,
+		)
+		self.assertEqual(result.output, "paid")
+
+	def test_and_with_the_guard_the_same_input_executes_nothing(self):
+		"""The control, on the identical input. Together these two are the before and after."""
+		recorder = _Recorder()
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(_transcript_with_two_colliding_calls(), {"c1": "Approve"})
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+
+class TestWhatThisRefUsesThatItDidNotHaveTo(UnitTestCase):
+	"""A REGRESSION THIS CHANGE INTRODUCES, pinned so it is visible rather than discovered.
+
+	`_validate_messages` refuses a stored assistant turn whose calls cannot be told apart — and it
+	is reached from `_build_initial_messages` as well as from `_prepare_resume`. A conversation is
+	replayed through the first on EVERY later message, so one such turn anywhere in a stored
+	transcript refuses not just the resume but every future turn of that conversation.
+
+	The spec asks for both call sites in as many words ("Both paths are wanted"), and refusing a
+	caller-supplied history is the posture it argues for, so this test pins the behaviour AS
+	SPECIFIED rather than quietly narrowing it. Both reviewers rated the blast radius MEDIUM and
+	proposed narrowing it; that is an owner decision recorded in the run log, not one to take here.
+
+	If the owner narrows the rule, THIS is the test that must change, and it says so.
+	"""
+
+	def test_a_stored_colliding_turn_refuses_every_later_turn_not_only_the_resume(self):
+		recorder = _Recorder()
+		history = _transcript_with_two_colliding_calls()
+		history.append({"role": "tool", "tool_call_id": "c1", "content": "sent 500 to alice"})
+		history.append({"role": "assistant", "content": "done"})
+		history.append({"role": "user", "content": "now something completely unrelated"})
+		agent = Agent(model=FakeModel([_final("sure")]), tools=recorder.tools)
+
+		# Both calls already have a result, so nothing could double-execute from here — and the
+		# new turn is refused anyway.
+		with self.assertRaises(ValueError) as caught:
+			agent.run(history)
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_an_ordinary_history_is_of_course_unaffected(self):
+		"""The control: this must not be refusing every history that carries any tool call."""
+		recorder = _Recorder()
+		history = [
+			{"role": "user", "content": "append x"},
+			{
+				"role": "assistant",
+				"content": None,
+				"tool_calls": [
+					{
+						"id": "a1",
+						"type": "function",
+						"function": {"name": "append_line", "arguments": '{"text": "x"}'},
+					}
+				],
+			},
+			{"role": "tool", "tool_call_id": "a1", "content": "appended x"},
+			{"role": "user", "content": "thanks"},
+		]
+		agent = Agent(model=FakeModel([_final("sure")]), tools=recorder.tools)
+
+		self.assertEqual(agent.run(history).output, "sure")
+
+	def test_a_tool_calls_entry_the_check_cannot_read_is_folded_not_skipped(self):
+		"""`_transcript_calls` iterates any sequence and subscripts `tc["id"]`, so a shape the
+		check SKIPS but it still consumes is the same hole v1 had with `None`. Folded instead."""
+		from flow.lib.agent import _validate_messages
+
+		call = {
+			"id": "c1",
+			"type": "function",
+			"function": {"name": "send_money", "arguments": "{}"},
+		}
+		# a tuple, not a list — iterated downstream, formerly skipped by the check entirely
+		with self.assertRaises(ValueError) as caught:
+			_validate_messages(
+				[{"role": "assistant", "content": None, "tool_calls": (dict(call), dict(call))}]
+			)
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+
+		# two entries the check cannot read at all fold together rather than vanishing
+		with self.assertRaises(ValueError):
+			_validate_messages(
+				[{"role": "assistant", "content": None, "tool_calls": ["not-a-dict", "nor-this"]}]
+			)

@@ -135,6 +135,17 @@ def load_scenarios(directory: Path = SCENARIO_DIR) -> list[dict[str, Any]]:
 			raise ValueError(f"{path.name}: 'name' is {data.get('name')!r}, expected {path.stem!r}")
 		expect = data.get("expect") or {}
 		if expect.get("raises") is not None:
+			# Non-empty `str`, checked here rather than trusted. `raises: ""` passes an
+			# `is not None` guard and then matches EVERY exception — a scenario silenced against
+			# any crash at all. `raises: false` is worse: it reaches the substring test and
+			# raises TypeError from inside `run_scenario`'s own `except`, taking the whole run
+			# down with no summary line, which the wrapper reports as a gate failure with no
+			# reason on it.
+			if not isinstance(expect["raises"], str) or not expect["raises"].strip():
+				raise ValueError(
+					f"{path.name}: 'expect.raises' must be a non-empty string naming part of the "
+					f"refusal, not {expect['raises']!r}"
+				)
 			contradictory = sorted(k for k in _RESULT_KEYS if expect.get(k) is not None)
 			if contradictory:
 				raise ValueError(
@@ -328,6 +339,12 @@ def run_scenario(scenario: dict[str, Any]) -> Result:
 		# said the opposite, which is the one outcome the known-defect machinery exists to prevent.
 		refused = refusal_failures(expect, e)
 		if refused is not None:
+			# The whole point of refusing is that nothing happened, so a scenario that expects a
+			# refusal must also observe that. Without this an engine that ran both writes and
+			# THEN raised would report PASS — and this is the scenario named for a double write.
+			# `tool_calls:` cannot carry the claim, because the loader forbids it beside `raises`.
+			if executed:
+				refused = [*refused, f"expected nothing to run, saw {[n for n, _a in executed]}"]
 			return Result(
 				scenario["name"],
 				scenario.get("description", ""),

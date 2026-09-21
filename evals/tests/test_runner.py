@@ -227,6 +227,32 @@ class TestARefusalCannotBeCombinedWithAResult(unittest.TestCase):
 		self.assertIn("raises", str(caught.exception))
 		self.assertIn("pauses", str(caught.exception))
 
+	def test_an_empty_raises_is_refused(self):
+		"""`raises: ""` passes an `is not None` guard and then matches EVERY exception — a
+		scenario silenced against any crash at all, which is the sharpest form of the risk the
+		spec records for this new key."""
+		import tempfile
+
+		body = 'name: empty\nuser_message: go\nmodel_script: []\nexpect:\n  raises: ""\n'
+		with tempfile.TemporaryDirectory() as tmp:
+			(Path(tmp) / "empty.yaml").write_text(body)
+			with self.assertRaises(ValueError) as caught:
+				runner.load_scenarios(Path(tmp))
+		self.assertIn("non-empty string", str(caught.exception))
+
+	def test_a_non_string_raises_is_refused(self):
+		"""`raises: false` is worse than useless: it reaches the substring test and raises
+		TypeError from inside `run_scenario`'s own `except`, taking the whole run down with no
+		summary line — which the wrapper can only report as a gate failure with no reason."""
+		import tempfile
+
+		body = "name: falsy\nuser_message: go\nmodel_script: []\nexpect:\n  raises: false\n"
+		with tempfile.TemporaryDirectory() as tmp:
+			(Path(tmp) / "falsy.yaml").write_text(body)
+			with self.assertRaises(ValueError) as caught:
+				runner.load_scenarios(Path(tmp))
+		self.assertIn("non-empty string", str(caught.exception))
+
 	def test_raises_alone_loads(self):
 		"""The control. Without it the check above would pass on a loader that refused every
 		scenario carrying `raises`."""
