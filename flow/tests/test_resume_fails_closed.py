@@ -241,7 +241,10 @@ class TestAMissingToolFailsClosed(UnitTestCase):
 		one thing it exists to stop.
 		"""
 		messages = agent_module.NOT_EXECUTED_MESSAGES
-		self.assertEqual(sorted(messages), ["approval_no_longer_applies", "unavailable"])
+		self.assertEqual(
+			sorted(messages),
+			["approval_no_longer_applies", "group_refused", "unavailable"],
+		)
 		for reason, message in messages.items():
 			text = message.lower()
 			for word in ("frappe", "flow", "erpnext", "mariadb", "openai", "anthropic", "gpt", "claude"):
