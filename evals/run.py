@@ -396,6 +396,18 @@ def run_scenario(scenario: dict[str, Any]) -> Result:
 			forbidden, result.output or "", "the reply shown while a change is pending", failures
 		)
 
+	# What the model was TOLD by a run that completed. Before this, `tool_results` and the
+	# forward-path `absent_text` were only ever consulted inside an answer case (`after:`) or on a
+	# refusal, so a scenario about a run that completes carried keys that checked nothing while
+	# reading exactly as though they did. A scenario whose whole claim is "it was refused and the
+	# model was told so" needs them here, because such a run never pauses and has no answers.
+	_check_tool_results(expect.get("tool_results", {}), result.messages, "the completed run", failures)
+	if not result.paused:
+		_check_absent_text(forbidden, result.output or "", "the reply from the completed run", failures)
+		for message in result.messages:
+			if message.get("role") == "tool":
+				_check_absent_text(forbidden, message.get("content") or "", "a tool result", failures)
+
 	# Each answer set is applied to the SAME pause, from the same transcript.
 	for label, case in (expect.get("after") or {}).items():
 		_run_answer_case(scenario, label, case, result, forbidden, failures)

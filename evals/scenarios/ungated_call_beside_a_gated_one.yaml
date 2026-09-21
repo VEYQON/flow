@@ -1,11 +1,5 @@
 name: ungated_call_beside_a_gated_one
-description: An ungated tool in the same turn as a gated one runs before anyone is asked anything.
-known_defect: >-
-  Reproduces today, on veyqon and on develop. The pausing turn executes every ungated call in it
-  before the approval question is ever shown. The person is then asked about the write, having
-  already had the read performed in their name — and if they deny, the read is not undone and
-  nothing says it happened. S14's spec names this as out of scope (Risks); no spec has claimed it
-  yet. The scenario asserts the RIGHT behaviour and is expected to fail until one does.
+description: "An ungated tool in the same reply as a gated one does not run before the person is asked. Named for the defect it was written to reproduce; it now asserts the fix."
 user_message: read alice's balance and pay her
 agent:
   instructions: Be terse. Use the tools you are given.
