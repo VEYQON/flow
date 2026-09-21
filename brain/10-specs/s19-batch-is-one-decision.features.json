@@ -13,13 +13,13 @@
     { "id": 9, "description": "Part A. A tool's own question left unanswered does not run that tool a second time.", "passes": true },
     { "id": 10, "description": "Part A. The streamed loop holds back the same calls, opens no card for them, and leaves none spinning.", "passes": true },
     { "id": 11, "description": "Part A. The pause and answer shapes the web apps read are unchanged.", "passes": true },
-    { "id": 12, "description": "Part B. An unattended run refuses a gated tool: it does not run and does not pause.", "passes": false },
-    { "id": 13, "description": "Part B. auto_approve alone still counts as unattended, so no existing caller changes meaning.", "passes": false },
-    { "id": 14, "description": "Part B. An unattended run still executes an ungated tool.", "passes": false },
-    { "id": 15, "description": "Part B. An attended run is unaffected: a gated tool still pauses and asks.", "passes": false },
-    { "id": 16, "description": "Part B. A trigger with auto_approve off refuses instead of parking the run in Paused, as the user it runs as.", "passes": false },
+    { "id": 12, "description": "Part B. An unattended run refuses a gated tool: it does not run and does not pause.", "passes": true },
+    { "id": 13, "description": "Part B. auto_approve alone still counts as unattended, so no existing caller changes meaning.", "passes": true },
+    { "id": 14, "description": "Part B. An unattended run still executes an ungated tool.", "passes": true },
+    { "id": 15, "description": "Part B. An attended run is unaffected: a gated tool still pauses and asks.", "passes": true },
+    { "id": 16, "description": "Part B. A trigger with auto_approve off refuses instead of parking the run in Paused, as the user it runs as.", "passes": true },
     { "id": 17, "description": "Part B. A resume is never unattended: an approved gated call still executes.", "passes": false },
-    { "id": 18, "description": "Part B. The refusal text names no platform, vendor or model, and the check that says so can itself go red.", "passes": false },
-    { "id": 19, "description": "Part B. Only the _invoke digest moved; the other three load-bearing functions are byte-identical.", "passes": false }
+    { "id": 18, "description": "Part B. The refusal text names no platform, vendor or model, and the check that says so can itself go red.", "passes": true },
+    { "id": 19, "description": "Part B. Only the _invoke digest moved; the other three load-bearing functions are byte-identical.", "passes": true }
   ]
 }

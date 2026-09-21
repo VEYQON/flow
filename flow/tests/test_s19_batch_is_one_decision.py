@@ -18,7 +18,8 @@ inferred from the shape of a result.
 import json
 from typing import Any
 
-from frappe.tests import UnitTestCase
+import frappe
+from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from flow.lib.agent import Agent, CONFIRM_ANSWER_OPTIONS, Done, Question, ToolEnded, ToolStarted
 from flow.lib.model import ChatResponse, ToolCall
@@ -342,3 +343,273 @@ class TestABatchIsOneDecision(UnitTestCase):
 
 		self.assertEqual(books.wrote, [{"to": "alice", "amount": 500}])
 		self.assertEqual(resumed.output, "done")
+
+
+class _Unattended:
+	"""A gated write and an ungated read, each recording what actually ran."""
+
+	def __init__(self):
+		self.wrote: list[dict[str, Any]] = []
+		self.read: list[str] = []
+		bag = self
+
+		@tool(requires_confirmation=True)
+		def send_money(to: str, amount: int) -> str:
+			"""Send money to someone."""
+			bag.wrote.append({"to": to, "amount": amount})
+			return f"sent {amount} to {to}"
+
+		@tool
+		def read_balance(account: str) -> str:
+			"""Read an account balance."""
+			bag.read.append(account)
+			return "120"
+
+		self.send_money = send_money
+		self.read_balance = read_balance
+
+
+class TestAnUnattendedRunRefusesEveryGate(UnitTestCase):
+	"""S19 Part B. A run with nobody in it cannot be asked anything, so a tool that requires
+	asking is refused: it does not run, and it does not park the run waiting for an answer that
+	can never come.
+
+	`auto_approve` answered the wrong question. It asked *may questions be skipped in this run*,
+	when the only answerable one is *may this tool run unasked in this run* — and the answer to
+	that is no.
+	"""
+
+	def test_an_unattended_run_refuses_a_gated_tool(self):
+		"""AT9."""
+		bag = _Unattended()
+		model = FakeModel([_calls(("send_money", {"to": "alice", "amount": 500}, "c1")), _final("done")])
+		agent = Agent(model=model, tools=[bag.send_money], unattended=True)
+
+		result = agent.run("pay alice")
+
+		self.assertEqual(bag.wrote, [], "a gated write ran in a run with nobody in it")
+		self.assertFalse(result.paused)
+		self.assertEqual(result.tool_calls, [], "a refused call was reported as one that ran")
+		refused = json.loads(_tool_results(result.messages)["c1"])
+		self.assertEqual(refused["status"], "not_executed")
+		self.assertEqual(refused["reason"], "unattended")
+		self.assertEqual(result.output, "done")
+
+	def test_auto_approve_alone_still_counts_as_unattended(self):
+		"""AT9b. The backward-compatible path: every caller that passes only `auto_approve` — a
+		trigger with the flag on, and upstream's own test — means the same thing by it."""
+		bag = _Unattended()
+		model = FakeModel([_calls(("send_money", {"to": "alice", "amount": 500}, "c1")), _final("done")])
+		agent = Agent(model=model, tools=[bag.send_money], auto_approve=True)
+
+		result = agent.run("pay alice")
+
+		self.assertEqual(bag.wrote, [])
+		self.assertFalse(result.paused)
+		refused = json.loads(_tool_results(result.messages)["c1"])
+		self.assertEqual(refused["reason"], "unattended")
+
+	def test_an_unattended_run_still_executes_an_ungated_tool(self):
+		"""AT12. The control. Without it, AT9 is satisfied by an engine that refuses everything —
+		which is an outage, not a gate."""
+		bag = _Unattended()
+		model = FakeModel([_calls(("read_balance", {"account": "alice"}, "r1")), _final("120")])
+		agent = Agent(model=model, tools=[bag.read_balance], unattended=True)
+
+		result = agent.run("read alice's balance")
+
+		self.assertEqual(bag.read, ["alice"])
+		self.assertEqual([c.name for c in result.tool_calls], ["read_balance"])
+		self.assertEqual(result.output, "120")
+
+	def test_an_attended_run_is_unaffected(self):
+		"""AT13. Refuse is checked before ask, and must never win when there IS someone to ask."""
+		bag = _Unattended()
+		model = FakeModel([_calls(("send_money", {"to": "alice", "amount": 500}, "c1"))])
+		agent = Agent(model=model, tools=[bag.send_money])
+
+		result = agent.run("pay alice")
+
+		self.assertTrue(result.paused)
+		self.assertEqual(len(result.questions), 1)
+		self.assertEqual(result.questions[0].options, list(CONFIRM_ANSWER_OPTIONS))
+		self.assertEqual(bag.wrote, [])
+
+	def test_a_refused_call_beside_an_ungated_one_stops_neither_the_read_nor_the_run(self):
+		"""A refusal is not a pause: the rest of the reply runs and the turn continues, which is
+		what keeps an unattended run from stalling on a tool it cannot be asked about."""
+		bag = _Unattended()
+		model = FakeModel(
+			[
+				_calls(
+					("read_balance", {"account": "alice"}, "r1"),
+					("send_money", {"to": "alice", "amount": 500}, "c1"),
+				),
+				_final("read it, did not pay"),
+			]
+		)
+		agent = Agent(model=model, tools=[bag.read_balance, bag.send_money], unattended=True)
+
+		result = agent.run("read and pay")
+
+		self.assertEqual(bag.read, ["alice"])
+		self.assertEqual(bag.wrote, [])
+		self.assertFalse(result.paused)
+		self.assertEqual([c.name for c in result.tool_calls], ["read_balance"])
+
+	def test_the_refusal_names_no_platform_or_vendor(self):
+		"""AT14. CLAUDE.md rule 3, over the literal the model reads."""
+		from flow.lib.agent import NOT_EXECUTED_MESSAGES
+
+		self._assert_clean(NOT_EXECUTED_MESSAGES["unattended"])
+
+	def test_control_the_vendor_check_can_go_red(self):
+		with self.assertRaises(AssertionError):
+			self._assert_clean("this sentence mentions Frappe by name")
+
+	def _assert_clean(self, text: str) -> None:
+		for word in ("frappe", "flow", "erpnext", "mariadb", "openai", "anthropic", "gpt", "claude"):
+			self.assertNotIn(word, text.lower(), f"{word!r} appears in text the model reads")
+
+
+class TestOnlyTheInvokeDigestMoved(UnitTestCase):
+	"""AT15. CLAUDE.md rule 4: four functions decide what executes and on which answer. S19
+	rewrites exactly one of them, `_invoke`, under an exception the owner gave for this spec.
+	The other three are quoted here as literals, so this test fails if one of them moves even
+	though the pin in `test_deny_stops_batch.py` was re-baselined in the same commit.
+	"""
+
+	UNCHANGED = {
+		"_resolve_confirmation": "adbb8b26e0b0fb166a5a9fff1c658c531d081b3bd2f2967e55b8e838b5ab8f47",
+		"_confirmation_question": "32916612298d4ebdb423d9904e268992a2e638b56a67f2ca14fa67deba9cf34c",
+		"_has_denial": "80f799b6827afea159589dcee7889282ad8c376aacc15be424c273cd0e55b209",
+	}
+
+	def test_the_three_that_did_not_move_are_byte_identical(self):
+		from flow.tests.test_deny_stops_batch import TestTheLoadBearingFunctionsAreUntouched as Pin
+
+		pin = Pin("test_the_four_functions_are_byte_identical_to_their_reviewed_form")
+		digests = pin._digests(pin._engine_source())
+
+		for name, digest in self.UNCHANGED.items():
+			self.assertEqual(digests[name], digest, f"{name} changed; rule 4 requires a spec naming it")
+
+	def test_the_re_baselined_pin_and_the_engine_agree(self):
+		"""The control: the pin next door must be describing the engine this test just hashed,
+		or a re-baseline could quietly have been taken from something else."""
+		from flow.tests.test_deny_stops_batch import TestTheLoadBearingFunctionsAreUntouched as Pin
+
+		pin = Pin("test_the_four_functions_are_byte_identical_to_their_reviewed_form")
+		digests = pin._digests(pin._engine_source())
+
+		self.assertEqual(digests["_invoke"], Pin.BASELINE_DIGESTS["_invoke"])
+		for name, digest in self.UNCHANGED.items():
+			self.assertEqual(Pin.BASELINE_DIGESTS[name], digest)
+
+
+class TestARealTriggerRunRefusesInsteadOfParking(IntegrationTestCase):
+	"""AT16. Part B pinned to a real run rather than to a code `Agent`.
+
+	`FlowSession.chat` is the only place that knows a run has nobody in it — it computes
+	`unattended` for the memory tool already — and until S19 it never told the runtime. A trigger
+	with `auto_approve` OFF therefore raised a question nobody could answer and left the run in
+	`Paused`, holding its session. Delete the one line that tells the runtime and this test is
+	what goes red.
+
+	It runs as the trigger's own `run_as` user, a named non-Administrator, because that is what
+	`flow/triggers/triggers.py:75` sets and what any permission this path relies on would be
+	measured against.
+	"""
+
+	S19_TESTER = "s19-trigger@example.com"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		from flow.tools.builtins import sync_builtin_tools
+
+		sync_builtin_tools()
+		cls.enterClassContext(cls.enable_safe_exec())
+
+	def setUp(self):
+		if not frappe.db.exists("User", self.S19_TESTER):
+			user = frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": self.S19_TESTER,
+					"first_name": "S19",
+					"send_welcome_email": 0,
+				}
+			).insert(ignore_permissions=True)
+			user.add_roles("System Manager")
+		model = frappe.get_doc(
+			{"doctype": "Flow Model", "title": "S19 Model", "model_id": "openai/gpt-4o-mini", "enabled": 1}
+		).insert(ignore_permissions=True)
+		agent = frappe.get_doc(
+			{
+				"doctype": "Flow Agent",
+				"title": "S19 Agent",
+				"model": model.name,
+				"instructions": "Be terse.",
+				"enabled": 1,
+			}
+		).insert(ignore_permissions=True)
+		self.trigger = frappe.get_doc(
+			{
+				"doctype": "Flow Trigger",
+				"title": "S19 Trigger",
+				"agent": agent.name,
+				"enabled": 1,
+				"event": "DocType Event",
+				"target_doctype": "ToDo",
+				"doc_event": "after_insert",
+				"prompt_template": "New {{ doc.doctype }}",
+				"auto_approve": 0,
+				"run_as": self.S19_TESTER,
+			}
+		).insert(ignore_permissions=True)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.rollback()
+
+	def test_a_trigger_with_auto_approve_off_refuses_instead_of_pausing(self):
+		from unittest.mock import patch
+
+		from flow.lib.model import Model
+		from flow.triggers import fire
+
+		seen_users: list[str] = []
+
+		def _script(*args, **kwargs):
+			seen_users.append(frappe.session.user)
+			if len(seen_users) == 1:
+				return ChatResponse(
+					content=None,
+					tool_calls=[ToolCall(id="c1", name="execute", arguments={"code": "result = 1"})],
+					finish_reason="tool_calls",
+					usage={},
+				)
+			return _final("done")
+
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "s19"}).insert(ignore_permissions=True)
+		with patch.object(Model, "chat", side_effect=_script):
+			run_name = fire(self.trigger.name, target_doctype="ToDo", target_name=todo.name)
+
+		run = frappe.get_doc("Flow Run", run_name)
+		self.assertEqual(run.status, "Completed", "the run parked waiting for an answer nobody can give")
+		self.assertEqual(json.loads(run.tool_calls or "[]"), [], "the gated tool ran unattended")
+		self.assertEqual(seen_users[0], self.S19_TESTER, "the run did not run as the trigger's user")
+		results = [
+			m.content
+			for m in frappe.get_all(
+				"Flow Session Message",
+				filters={"parent": run.session, "role": "tool"},
+				fields=["content"],
+				order_by="idx",
+			)
+		]
+		self.assertTrue(results, "the run stored no tool result at all")
+		refused = json.loads(results[-1])
+		self.assertEqual(refused["status"], "not_executed")
+		self.assertEqual(refused["reason"], "unattended")

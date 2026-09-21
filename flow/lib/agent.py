@@ -53,6 +53,10 @@ NOT_EXECUTED_MESSAGES = {
 		"question was open, so the answer that was given no longer applies to it. "
 		"Do not report it as done. Ask again before doing it."
 	),
+	"unattended": (
+		"This action was not carried out and nothing was done. It needs someone to approve it, and "
+		"this run has nobody who can. Do not report it as done. Say it needs a person."
+	),
 	"group_refused": (
 		"This action was not carried out and nothing was done. It was held back with the other "
 		"actions in the same reply, and one of them was refused. "
@@ -138,11 +142,16 @@ class Agent:
 		knowledge: Knowledge | list[Knowledge] | None = None,
 		max_iterations: int = DEFAULT_MAX_ITERATIONS,
 		auto_approve: bool = False,
+		unattended: bool = False,
 	):
 		if max_iterations < 1:
 			raise ValueError("max_iterations must be at least 1")
 
-		# Autonomous runs (triggers) auto-run confirmation tools; nobody is there to approve.
+		# A run with nobody in it: a trigger, a queued or background run, a run created with
+		# approvals waived. Nobody can be asked anything, so a tool that requires asking is
+		# refused rather than run or parked. Kept separate from `auto_approve` because a trigger
+		# with that flag OFF has nobody in it too — it used to raise a question and wait forever.
+		self.unattended = unattended
 		self.auto_approve = auto_approve
 		self.name = name
 		self.model = Model(model) if isinstance(model, str) else model
@@ -388,14 +397,17 @@ class Agent:
 					questions=questions,
 				)
 
-			for call, _disposition in plan:
+			for call, disposition in plan:
 				result = self._invoke(call)
 				if isinstance(result, Question):
 					result.key = call.id
 					questions.append(result)
 					continue
 
-				executed_calls.append(call)
+				# A refused call is told to the model like any other result, and the run carries
+				# on — but it did not run, so it is not one of the calls this turn executed.
+				if disposition != "refuse":
+					executed_calls.append(call)
 				messages.append(
 					{
 						"role": "tool",
@@ -478,7 +490,7 @@ class Agent:
 				)
 				return
 
-			for call, _disposition in plan:
+			for call, disposition in plan:
 				# Re-announce with the full arguments now that they've finished streaming, before the
 				# tool runs — so the UI shows the arguments during execution, not only with the result.
 				yield ToolStarted(id=call.id, name=call.name, arguments=call.arguments)
@@ -489,7 +501,8 @@ class Agent:
 					yield ToolEnded(id=call.id, name=call.name, result="")
 					continue
 
-				executed_calls.append(call)
+				if disposition != "refuse":
+					executed_calls.append(call)
 				serialized = _serialize_tool_result(result)
 				messages.append({"role": "tool", "tool_call_id": call.id, "content": serialized})
 				yield ToolEnded(id=call.id, name=call.name, result=serialized)
@@ -552,8 +565,12 @@ class Agent:
 		_validate_messages(input, refuse_indistinguishable_calls=False)
 		return list(input)
 
+	def _is_unattended(self) -> bool:
+		"""A run with nobody who can answer a question."""
+		return bool(self.unattended or self.auto_approve)
+
 	def _disposition(self, call: ToolCall) -> str:
-		"""What happens to this call before anything in its turn runs: "ask" or "run".
+		"""What happens to this call before anything in its turn runs: "refuse", "ask" or "run".
 
 		Read from the tool's own flag, never from the tool body, so a whole batch can be decided
 		before any of it executes. A question a TOOL returns is not an approval and is not
@@ -563,9 +580,12 @@ class Agent:
 		tool = self._tools_by_name.get(call.name)
 		if call.error or tool is None:
 			return "run"
-		# The same condition `_invoke` acts on, read once and in one place: a batch cannot be
-		# decided ahead of itself by a rule that differs from the one that executes it.
-		return "ask" if tool.requires_confirmation and not self.auto_approve else "run"
+		if not tool.requires_confirmation:
+			return "run"
+		# Refuse is decided BEFORE ask, and the order is the whole rule: an unattended run must
+		# never reach the question at all. Read once and in one place, so a batch can never be
+		# classified by a rule that differs from the one that executes it.
+		return "refuse" if self._is_unattended() else "ask"
 
 	def _invoke(self, call: ToolCall) -> Any:
 		"""Run a tool and return its raw result. A Question (returned or synthesized for
@@ -575,7 +595,10 @@ class Agent:
 		tool = self._tools_by_name.get(call.name)
 		if tool is None:
 			return json.dumps({"error": f"Unknown tool: {call.name!r}"})
-		if tool.requires_confirmation and not self.auto_approve:
+		disposition = self._disposition(call)
+		if disposition == "refuse":
+			return _not_executed("unattended")
+		if disposition == "ask":
 			return _confirmation_question(call, tool)
 		return self._run_tool(call)
 

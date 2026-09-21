@@ -183,13 +183,16 @@ class FlowSession(Document):
 		if not frappe.flags.in_test:
 			frappe.db.commit()
 
-		# Opt-in (set on the Flow Trigger): run confirmation tools without approval so unattended
-		# trigger runs don't park in Paused waiting for a confirmation no one can give.
 		self._runtime.auto_approve = auto_approve
 
 		# The update_memory tool reads this to stamp source_run. Scope tightly to the runtime
 		# call and clear after, so a stale run never leaks onto a later write in this request.
 		unattended = bool(auto_approve) or source == "Trigger"
+		# A run with nobody in it: every tool that requires asking is refused rather than run or
+		# parked. The runtime decides that from the tool's flag before any tool body runs, and
+		# this is the only place that knows the run has nobody in it — the flag alone does not
+		# say so, because a trigger with it OFF has nobody in it too.
+		self._runtime.unattended = unattended
 		self._rebind_memory_tool(unattended)
 		_set_active_run(run.name, unattended=unattended)
 		if stream:
