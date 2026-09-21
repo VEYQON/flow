@@ -133,6 +133,14 @@ def load_scenarios(directory: Path = SCENARIO_DIR) -> list[dict[str, Any]]:
 		data = yaml.safe_load(path.read_text())
 		if data.get("name") != path.stem:
 			raise ValueError(f"{path.name}: 'name' is {data.get('name')!r}, expected {path.stem!r}")
+		expect = data.get("expect") or {}
+		if expect.get("raises") is not None:
+			contradictory = sorted(k for k in _RESULT_KEYS if expect.get(k) is not None)
+			if contradictory:
+				raise ValueError(
+					f"{path.name}: 'expect.raises' cannot be combined with {contradictory} — "
+					"a run that was refused has no result to check those against"
+				)
 		scenarios.append(data)
 	return scenarios
 
@@ -248,6 +256,44 @@ def _check_absent_text(forbidden: list[str], haystack: str, where: str, failures
 			failures.append(f"{where} contains text that must not appear: {text!r}")
 
 
+# Scenario keys that describe a run that produced a RESULT. A run that raised has none of them to
+# be checked against, so asking for both is a scenario that cannot be satisfied either way — which
+# is the shape of a scenario somebody silenced by accident.
+_RESULT_KEYS = ("pauses", "tool_calls", "questions", "after")
+
+
+def refusal_failures(expect: dict[str, Any], error: BaseException | None) -> list[str] | None:
+	"""Failures for a scenario that expects a refusal, or None when it does not expect one.
+
+	`error` is the exception the run raised, or **None when the run completed**. Both outcomes
+	come here, and that is the whole point: a scenario expecting a refusal has to fail against an
+	engine that does not refuse, and the run completing is exactly what that looks like. Checking
+	`raises` only where an exception is already in hand makes the key vacuous in the one case it
+	exists to catch — the scenario would go green against the very engine it was written to
+	measure. (Found by the probe that reverts the engine fix and requires this scenario to fail.)
+
+	Pure: the expectation and the exception, nothing else. `evals/tests/` runs as plain unittest
+	with no platform context (see both test modules' docstrings), so the branch that decides
+	whether a raise was the right answer has to be reachable without importing the engine.
+
+	`absent_text` is applied to the refusal here and nowhere else. The three existing call sites
+	run over questions, a paused reply and a resume reply, and a run that raised reaches none of
+	them — so without this, a scenario expecting a refusal would carry an `absent_text` list that
+	checked nothing while reading exactly as though it did.
+	"""
+	wanted = expect.get("raises")
+	if wanted is None:
+		return None
+	if error is None:
+		return [f"expected the run to be refused with {wanted!r}, but it completed without refusing"]
+	failures: list[str] = []
+	actual = str(error)
+	if wanted not in actual:
+		failures.append(f"expected the run to be refused with {wanted!r}, but it raised {actual!r}")
+	_check_absent_text(expect.get("absent_text", []), actual, "the refusal", failures)
+	return failures
+
+
 def run_scenario(scenario: dict[str, Any]) -> Result:
 	from flow.lib.agent import Agent
 
@@ -275,11 +321,37 @@ def run_scenario(scenario: dict[str, Any]) -> Result:
 		# engine that does not pause, walks on to a turn the script does not have. That is exactly
 		# what measuring a scenario against an older engine looks like, and the answer to it is a
 		# red row with the reason on it — not a traceback and no summary line at all.
+		#
+		# Unless a refusal is the RIGHT answer. Some behaviour this suite has to be able to assert
+		# is "the engine refuses this and nothing happens", and without a way to say so such a
+		# scenario could never pass — it would sit red forever as a known defect while the record
+		# said the opposite, which is the one outcome the known-defect machinery exists to prevent.
+		refused = refusal_failures(expect, e)
+		if refused is not None:
+			return Result(
+				scenario["name"],
+				scenario.get("description", ""),
+				not refused,
+				refused,
+				known_defect=_known_defect(scenario),
+			)
 		return Result(
 			scenario["name"],
 			scenario.get("description", ""),
 			False,
 			[f"the run raised {type(e).__name__}: {e}"],
+			known_defect=_known_defect(scenario),
+		)
+
+	# The run completed. If the scenario said it must be refused, that is the failure — and it is
+	# the one that matters, because it is what an engine WITHOUT the fix produces.
+	refused = refusal_failures(expect, None)
+	if refused:
+		return Result(
+			scenario["name"],
+			scenario.get("description", ""),
+			False,
+			refused,
 			known_defect=_known_defect(scenario),
 		)
 

@@ -13,7 +13,7 @@
     { "id": 9, "description": "A stored transcript carrying an indistinguishable assistant turn is refused at resume, and the tool does not run.", "passes": true },
     { "id": 10, "description": "A stored transcript with distinct ids resumes exactly as today (control).", "passes": true },
     { "id": 11, "description": "The refusal, on both the forward and the resume path, names no platform, vendor or model.", "passes": true },
-    { "id": 12, "description": "The evals runner can express an expected refusal, fails a wrong one, still fails an unexpected raise, and applies absent_text to the refusal text.", "passes": false },
+    { "id": 12, "description": "The evals runner can express an expected refusal, fails a wrong one, still fails an unexpected raise, and applies absent_text to the refusal text.", "passes": true },
     { "id": 13, "description": "resume_run's answer contract is unchanged: no web-app change is required.", "passes": true }
   ]
 }

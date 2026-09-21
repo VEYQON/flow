@@ -10,6 +10,7 @@ PyYAML:
 import sys
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -123,6 +124,119 @@ class TestReporting(unittest.TestCase):
 
 		self.assertEqual(code, 0)
 		self.assertIn("FAILED=0", out.getvalue())
+
+
+class TestASccenarioCanExpectARefusal(unittest.TestCase):
+	"""AT11 — the four branches of `refusal_failures`.
+
+	Called directly, never through `run_scenario`, which opens by importing the engine. This
+	module runs with no platform context (see the docstring at the top of this file), and
+	`TestItCannotReachAProvider` exists precisely to keep it that way — so the branch that decides
+	whether a raise was the right answer has to be reachable without an engine import, and this is
+	the test that proves it is.
+	"""
+
+	FORBIDDEN: ClassVar[list[str]] = ["frappe", "erpnext", "mariadb", "openai", "anthropic", "gpt-", "claude"]
+
+	def test_a_scenario_that_expects_a_refusal_passes_on_it(self):
+		failures = runner.refusal_failures(
+			{"raises": "could not be told apart"},
+			ValueError(
+				"Two actions in one reply could not be told apart, so one approval would have answered both."
+			),
+		)
+		self.assertEqual(failures, [])
+
+	def test_a_scenario_that_expects_a_refusal_fails_on_the_wrong_one(self):
+		"""A `raises:` that matches an unrelated error would silence a scenario, so a wrong one
+		must fail and must say both texts."""
+		failures = runner.refusal_failures(
+			{"raises": "could not be told apart"}, RuntimeError("the database went away")
+		)
+		self.assertEqual(len(failures), 1)
+		self.assertIn("could not be told apart", failures[0])
+		self.assertIn("the database went away", failures[0])
+
+	def test_a_run_that_completed_when_a_refusal_was_expected_fails(self):
+		"""The branch a probe caught missing. `raises` checked only where an exception is already
+		in hand is vacuous in the one case the key exists for: run the scenario against an engine
+		that does NOT refuse, and the run simply completes, nothing looks at `raises`, and the row
+		goes green against the very engine it was written to measure."""
+		failures = runner.refusal_failures({"raises": "could not be told apart"}, None)
+		self.assertEqual(len(failures), 1)
+		self.assertIn("could not be told apart", failures[0])
+		self.assertIn("completed", failures[0])
+
+	def test_a_completed_run_with_no_refusal_expected_is_not_a_failure(self):
+		"""The control: every ordinary scenario in the suite takes this path on every run."""
+		self.assertIsNone(runner.refusal_failures({}, None))
+		self.assertIsNone(runner.refusal_failures({"pauses": True}, None))
+
+	def test_a_raise_with_no_expectation_still_fails(self):
+		"""The control. Returning None hands the caller back to today's behaviour, where an
+		unexpected raise is a red row with the reason on it. If this ever returned [] the new key
+		would turn every crash in the suite into a pass."""
+		self.assertIsNone(runner.refusal_failures({}, RuntimeError("boom")))
+		self.assertIsNone(runner.refusal_failures({"pauses": True}, RuntimeError("boom")))
+		self.assertIsNone(runner.refusal_failures({"raises": None}, RuntimeError("boom")))
+
+	def test_a_forbidden_word_in_the_refusal_fails_even_when_raises_matched(self):
+		"""`absent_text` is checked nowhere else on this path: the three existing call sites all
+		run over a result, and a run that raised has none. Without this the key would read as
+		coverage and be none."""
+		failures = runner.refusal_failures(
+			{"raises": "could not be told apart", "absent_text": self.FORBIDDEN},
+			ValueError("Two Frappe actions in one reply could not be told apart."),
+		)
+		self.assertEqual(len(failures), 1)
+		self.assertIn("frappe", failures[0].lower())
+
+	def test_a_clean_refusal_with_absent_text_still_passes(self):
+		"""The control for the test above: `absent_text` must not fail a refusal that is clean."""
+		failures = runner.refusal_failures(
+			{"raises": "could not be told apart", "absent_text": self.FORBIDDEN},
+			ValueError("Two actions in one reply could not be told apart. Nothing was carried out."),
+		)
+		self.assertEqual(failures, [])
+
+
+class TestARefusalCannotBeCombinedWithAResult(unittest.TestCase):
+	"""The loader's contradiction check. A scenario asking for both a refusal and a result can be
+	satisfied by neither, which is what a scenario somebody silenced by accident looks like."""
+
+	def _write(self, tmp, body):
+		path = Path(tmp) / "contradictory.yaml"
+		path.write_text(body)
+		return path
+
+	def test_raises_beside_pauses_is_refused_by_the_loader(self):
+		import tempfile
+
+		body = (
+			"name: contradictory\n"
+			"user_message: go\n"
+			"model_script: []\n"
+			"expect:\n"
+			"  raises: nope\n"
+			"  pauses: true\n"
+		)
+		with tempfile.TemporaryDirectory() as tmp:
+			self._write(tmp, body)
+			with self.assertRaises(ValueError) as caught:
+				runner.load_scenarios(Path(tmp))
+		self.assertIn("raises", str(caught.exception))
+		self.assertIn("pauses", str(caught.exception))
+
+	def test_raises_alone_loads(self):
+		"""The control. Without it the check above would pass on a loader that refused every
+		scenario carrying `raises`."""
+		import tempfile
+
+		body = "name: fine\nuser_message: go\nmodel_script: []\nexpect:\n  raises: nope\n"
+		with tempfile.TemporaryDirectory() as tmp:
+			(Path(tmp) / "fine.yaml").write_text(body)
+			scenarios = runner.load_scenarios(Path(tmp))
+		self.assertEqual([s["name"] for s in scenarios], ["fine"])
 
 
 if __name__ == "__main__":
