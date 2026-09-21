@@ -50,8 +50,14 @@ filters through `frappe.has_permission` (`flow/tools/builtins.py:49`), while kno
 
 1. A hit whose source record the asking user may not read is dropped before anything about it is
    built, and contributes nothing to the returned structure.
-2. Dropping is silent: no message, no toast, no Error Log row, no raise. "Some results were
-   withheld" is itself information.
+2. Dropping is silent **to the asker**: no message, no toast, no raise, and no Error Log row *for a
+   refusal*. "Some results were withheld" is itself information.
+   **Amended after review (M1, run 9).** That argument is about the asker, and an Error Log row is
+   visible only to an administrator, so it does not extend to one. A check that REFUSES and a check
+   that CANNOT ANSWER are different events: the first is unremarkable and stays silent everywhere;
+   the second is still fail-closed and still silent to the asker, but is written **once per search**
+   to the Error Log, carrying no content, title, excerpt or record name. Without that, a lock-wait
+   timeout empties every search while the asker is told "nothing matched" and nobody has a record.
 3. The caller still gets up to `limit` **readable** hits when readable ones exist, bounded by a
    stated ceiling on how many candidates are examined.
 4. A chunk with no reference behaves exactly as it does today — every existing `Text`, `File` and
@@ -79,10 +85,17 @@ source record:
 ```python
 def _may_read(chunk: dict[str, Any]) -> bool:
 	doctype, name = chunk.get("reference_doctype"), chunk.get("reference_name")
+	if not doctype and not name:
+		return True   # no record behind it — nothing to check against
 	if not doctype or not name:
-		return True
+		return False  # half a reference is a chunk to distrust
 	return frappe.has_permission(doctype, "read", name)
 ```
+
+> **Corrected after review (L5, run 9).** This block previously read `if not doctype or not name:
+> return True`, which fails **OPEN** for half a reference — the opposite of this spec's own prose
+> sixty lines below, of the shipped code, and of probe P7. This spec is `upstreamable: yes`, and a
+> code block is the part of a spec that gets copied.
 
 - **The record, not the doctype.** `frappe.has_permission(doctype, "read", name)` takes the `doc`
   branch (`frappe/permissions.py:137-140`), which loads the row with `frappe.get_lazy_doc` — whose
@@ -155,8 +168,12 @@ Every surviving hit gains two keys, built **after** `_may_read` has kept it:
   chunk with no reference it falls back to the `Flow Knowledge Source.title`, which for a local file
   is the basename (`flow/knowledge/knowledge.py:41`) — the opaque `Flow Knowledge Source` docname is
   useless here, the doctype being `autoname: hash`.
-- `url` — a **relative** desk path, `/app/<doctype-slug>/<name>`, with the name percent-quoted. For a
-  chunk with no reference it is `None`.
+- `url` — a **relative** desk path, `/desk/<doctype-slug>/<name>`, with the name percent-quoted. For
+  a chunk with no reference it is `None`. The prefix is the single constant `DESK_PATH` in
+  `flow/knowledge/retriever.py`.
+  **Owner decision, run 9** (open question 2, now closed): Frappe's canonical desk route is
+  `/desk/<path:app_path>` (`frappe/hooks.py:65`); `/app/(.*)` reaches the same form only through a
+  redirect (`frappe/hooks.py:69`). The link handed to a caller is the one that resolves directly.
 
 **Relative, deliberately.** `frappe.utils.get_url_to_form` (`frappe/utils/data.py:2000-2011`) returns
 an absolute URL including the site host. A host name in model-facing text is both noise and an
@@ -215,7 +232,7 @@ on `UnitTestCase`) and asserts `frappe.session.user` **before** searching.
 | 4.11 | The ceiling holds: with more unreadable candidates than the ceiling, the search ends and returns what it has, and the store was asked for no more than `CANDIDATE_CEILING`. |
 | 4.12 | `search_knowledge` — the builtin the model calls — goes through this path: the same user gets nothing through the tool either. |
 | 5.1 | Every hit from a DocType source carries a non-empty `title` equal to the record's own title field. |
-| 5.2 | Every such hit carries `url == "/app/<doctype-slug>/<name>"`. |
+| 5.2 | Every such hit carries `url == "/desk/<doctype-slug>/<name>"` (owner decision, run 9; was `/app/`). |
 | 5.3 | A hit from a `Text` source carries the source row's `title` and `url is None`, and does not raise. |
 | 5.4 | No returned field contains the site host or any platform, vendor or model name — a literal sweep over the serialized result, with a positive control. |
 | 4.10 | `flow/tests/test_knowledge.py` stays green **unmodified**, in particular `test_retrieve_requires_a_knowledge_base` and `test_retrieve_skips_disabled_knowledge_base`. |
@@ -280,6 +297,13 @@ asker may not read; the five the "after" row returned did not.
    `permission_query_conditions` + `has_permission` pair on `Flow Knowledge Chunk` applying the same
    reference check, or dropping `read`/`report` on it to Administrator. **A green suite here does not
    mean the one-sentence contract holds against a System Manager.**
+   **Run 9 (M2): re-verified and now carried in the machine-readable record too.** The doctype's
+   permissions block is exactly `[{"read": 1, "report": 1, "role": "System Manager"}]` and
+   `flow/hooks.py` registers **no** `permission_query_conditions` for `Flow Knowledge Chunk` — both
+   checked at this branch. The prose above said this; `features.json` did not, and `features.json`
+   exists precisely to be the short checkable contract. It now carries **feature 16,
+   `"passes": false`**, naming this path open. Feature 1's wording is unchanged and its scope is
+   `retrieve()` and `search_knowledge`, which is where it holds.
 2. **A count oracle.** The caller learns how many of the top `min(limit * OVERFETCH, ceiling)`
    candidates were withheld, because a short result list can only mean "withheld" or "no more
    matches". Repeated narrowing turns that into existence probing. Open question 3 documents the
@@ -309,10 +333,11 @@ asker may not read; the five the "after" row returned did not.
    unmeasured** (N1 §8.1, §8.5). This run measures one search before and after on a test fixture on
    this laptop; that is not a benchmark and must not be read as one. The recall cost (D2) is the
    number that matters and it needs production data.
-2. **`/app` versus `/desk`.** The run prompt fixes the shape as `/app/<doctype-slug>/<name>`, and
-   that is what is built. In this bench's Frappe (v16.31.0) the desk is served at `/desk/...` and
-   `/app/(.*)` is a **redirect** to it (`frappe/hooks.py:69`), so the path resolves — through one
-   redirect. If the owner prefers the canonical path, `_url_of` becomes a one-word change.
+2. ~~**`/app` versus `/desk`.**~~ **CLOSED by the owner, run 9: `/desk`.** Frappe's canonical desk
+   route is `/desk/<path:app_path>` (`frappe/hooks.py:65`) and `/app/(.*)` is a **redirect** to it
+   (`frappe/hooks.py:69`) — re-verified in this bench at v16.31.0. `_url_of` now builds
+   `{DESK_PATH}/<slug>/<quoted name>` from one constant, and two tests assert the `/desk` form
+   (probe PA5: setting `DESK_PATH = "/app"` reddens exactly those two).
 3. **A hit dropped for permission is indistinguishable from no match.** That is deliberate (Goal 2),
    but it means a person cannot be told "ask someone who can see that folder". Whether that hand-off
    should exist at all is a product decision.
