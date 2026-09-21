@@ -243,7 +243,7 @@ class TestAMissingToolFailsClosed(UnitTestCase):
 		messages = agent_module.NOT_EXECUTED_MESSAGES
 		self.assertEqual(
 			sorted(messages),
-			["approval_no_longer_applies", "group_refused", "unavailable"],
+			["approval_no_longer_applies", "group_refused", "unattended", "unavailable"],
 		)
 		for reason, message in messages.items():
 			text = message.lower()
