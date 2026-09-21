@@ -22,8 +22,11 @@ What these tests do NOT cover, said plainly rather than left to be inferred: the
 switch and the order in which a batch executes. Both are separate known defects with their own
 entries, and nothing here changes either.
 
-No permission surface: these drive `flow/lib/agent.py` with a fake model and read no document, so
-the named-non-Administrator rule does not apply.
+No permission surface, with one exception: every test here but one drives `flow/lib/agent.py` with
+a fake model and reads no document, so the named-non-Administrator rule does not apply.
+`TestASessionWhoseHistoryIsPoisonedStaysUsable` does create a `Flow Session` and its message rows,
+and runs as Administrator deliberately: what it measures is whether a stored transcript can still be
+replayed at all, and no permission rule is under test in it.
 """
 
 from typing import Any
@@ -885,7 +888,12 @@ class TestReplayedHistoryIsNotRefused(UnitTestCase):
 		self.assertEqual(recorder.ran, [])
 
 	def test_an_ordinary_history_is_of_course_unaffected(self):
-		"""The control: this must not be refusing every history that carries any tool call."""
+		"""The replay path reads an ordinary history unchanged.
+
+		Not a control for the refusal any more, and it says so: `run(list)` no longer runs that
+		check at all, so no mutation of it can redden this. The live control on the path that
+		still checks is `test_a_stored_transcript_with_distinct_ids_still_resumes`.
+		"""
 		recorder = _Recorder()
 		history = [
 			{"role": "user", "content": "append x"},
@@ -1055,3 +1063,64 @@ class TestASessionWhoseHistoryIsPoisonedStaysUsable(IntegrationTestCase):
 			chat.call_args.args[0] if chat.call_args.args else chat.call_args.kwargs["messages"]
 		)
 		self.assertEqual([tc["id"] for tc in replayed[0]["tool_calls"]], ["c1", "c1"])
+
+
+class TestWhatIsStillRefusedOnTheApprovalPath(UnitTestCase):
+	"""R10 — found by the run 10 review, pinned rather than changed. **An owner decision.**
+
+	R7 moved the refusal off the replay path, so a session whose history holds an
+	indistinguishable turn can chat again. It is still refused on the APPROVAL path, and
+	`_prepare_resume` validates the WHOLE transcript rather than the turn the answers address —
+	so a collision anywhere in that history, including one whose calls already have results and
+	can therefore never execute, refuses every later resume in that session. The person is shown
+	a sentence that is false for their situation: nobody was about to approve the old turn.
+
+	This is the same class of blast radius R7 was raised about, one door over, and no test covered
+	it until this one. It is NOT narrowed here: scoping the resume-time refusal to the calls being
+	resolved changes the reach of a refusal in an approved spec, which belongs to the owner.
+
+	What is NOT at risk, and why this is a decision rather than an emergency: the calls of a
+	collision that already has one result are BOTH counted answered by `_transcript_calls`, so
+	`_prepare_resume` never iterates them and nothing from such a turn can execute on resume.
+	Refusing it buys nothing; the cost is that the session can never approve anything again.
+	"""
+
+	def test_a_resolved_collision_in_history_still_refuses_a_later_unrelated_approval(self):
+		recorder = _Recorder()
+		history = _transcript_with_two_colliding_calls()
+		history.append({"role": "tool", "tool_call_id": "c1", "content": "sent 500 to alice"})
+		history.append({"role": "assistant", "content": "done"})
+		history.append({"role": "user", "content": "now pay bob"})
+		history.append(
+			{
+				"role": "assistant",
+				"content": None,
+				"tool_calls": [
+					{
+						"id": "z9",
+						"type": "function",
+						"function": {"name": "send_money", "arguments": '{"to": "bob", "amount": 10}'},
+					}
+				],
+			}
+		)
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
+		# The person is approving z9. c1 is history and can never execute again.
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(history, {"z9": "Approve"})
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_and_the_old_collision_could_not_have_executed_anyway(self):
+		"""Why R10 is a cost with no matching benefit: once either of a colliding pair has a
+		result, `_transcript_calls` counts BOTH answered, so a resume never iterates them."""
+		recorder = _Recorder()
+		history = _transcript_with_two_colliding_calls()
+		history.append({"role": "tool", "tool_call_id": "c1", "content": "sent 500 to alice"})
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
+		self.assertEqual(agent._pending_calls(history), [])
+		self.assertEqual([c.id for c in agent._answered_calls(history)], ["c1", "c1"])
+		self.assertEqual(recorder.ran, [])

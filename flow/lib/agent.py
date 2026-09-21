@@ -478,7 +478,7 @@ class Agent:
 		# one such turn stored in a transcript would refuse every future turn of that
 		# conversation, forever, recoverable only by someone who can delete the stored row.
 		# The refusal belongs where a tool can be reached from the calls in question: the model's
-		# new reply, and a resume. (Owner decision, run 10, S17 R7.)
+		# new reply, and a resume.
 		_validate_messages(input, refuse_indistinguishable_calls=False)
 		return list(input)
 

@@ -587,8 +587,32 @@ input. Probe: re-adding the history check reddens exactly those four.
 **Not done in run 9** (kept for the record). Run 9 read this spec as saying both call sites are
 wanted, so narrowing it was a change to an approved spec and belonged to the owner, not to the
 builder. The behaviour **as specified** is pinned by
-`TestWhatThisRefUsesThatItDidNotHaveTo::test_a_stored_colliding_turn_refuses_every_later_turn_not_only_the_resume`,
+`TestWhatThisRefUsesThatItDidNotHaveTo::test_a_stored_colliding_turn_refuses_every_later_turn_not_only_the_resume`
+(since renamed and inverted in run 10 —
+`TestReplayedHistoryIsNotRefused::test_a_stored_colliding_turn_no_longer_refuses_every_later_turn`),
 whose docstring says it is the test to change if the rule is narrowed.
+
+**R10 — the approval path still carries the blast radius R7 removed from the chat path.**
+**Found by the run 10 review. Pinned, not changed: it is the owner's decision.**
+
+`_prepare_resume` validates the WHOLE prompt transcript, not the turn the answers address. So one
+indistinguishable turn anywhere in a session's history — *including a fully resolved one* — refuses
+every later resume in that session: the run is marked Failed, its questions are cleared, and the
+person is shown a sentence that is false for their situation, since nobody was about to approve the
+old turn. That session can chat (R7) but can never approve anything again, with no user-reachable
+recovery.
+
+**The cost has no matching benefit.** Once either call of a colliding pair has a result,
+`_transcript_calls` counts BOTH as answered (§1 step 2), so `_prepare_resume` never iterates them
+and nothing from such a turn can execute on resume. Refusing it prevents nothing.
+
+**Candidate fix, for the owner:** scope the resume-time refusal to the calls being resolved — the
+pending set `_prepare_resume` already builds — so a collision among PENDING calls is still refused
+and a resolved one in history is not. That is the security-relevant condition exactly. It was not
+applied in run 10 because it changes the reach of a refusal in an approved spec.
+
+Pinned by `TestWhatIsStillRefusedOnTheApprovalPath`, both halves: the refusal, and the proof that
+the turn it refuses over could not have executed.
 
 **R8 — two distinct non-string references are refused although they are answerable.** `[1, 2]` as
 integers fold to one bucket and the turn is refused, though a set of ids, `answers.get(1)` and
