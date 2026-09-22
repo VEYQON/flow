@@ -33,6 +33,8 @@ class FakeModel:
 	def __init__(self, responses: list[ChatResponse]):
 		self._responses = list(responses)
 		self.calls: list[dict[str, Any]] = []
+		# Overridable so a test can script the ORDER of a stream, not only its contents.
+		self._stream = None
 
 	def chat(self, messages, tools=None, *, stream=False):
 		self.calls.append({"messages": list(messages), "tools": tools, "stream": stream})
@@ -40,7 +42,7 @@ class FakeModel:
 			raise AssertionError("FakeModel ran out of scripted responses")
 		response = self._responses.pop(0)
 		if stream:
-			return _scripted_stream(response)
+			return (self._stream or _scripted_stream)(response)
 		return response
 
 
@@ -477,6 +479,65 @@ class TestABatchIsOneDecision(UnitTestCase):
 			],
 		)
 		self.assertEqual(books.read, [{"account": "alice"}, {"account": "bob"}])
+
+	def test_a_reply_that_interleaves_text_and_calls_puts_its_text_first(self):
+		"""AT8c. QA-L1: AT8b's scripted reply has `content=None`, so it cannot see the one thing
+		buffering actually moves — where a reply's text sits relative to its announcements.
+
+		This scripts a stream that INTERLEAVES them, which is the only shape that can tell the
+		two engines apart: announce mid-stream and the client sees text, card, text; hold the
+		announcements and it sees all the text, then the card. The second is what ships, and it is
+		the accepted cost of not being able to tell, while a reply is still arriving, which of its
+		calls are going to run. Pinned rather than left as prose, because it is a change to the
+		contract `frontend/src/store.js` reads.
+		"""
+		books = _Books()
+		response = ChatResponse(
+			content="let me look",
+			tool_calls=[ToolCall(id="r1", name="read_balance", arguments={"account": "alice"})],
+			finish_reason="tool_calls",
+			usage={},
+		)
+
+		def _interleaved(scripted: ChatResponse):
+			if scripted is not response:  # the closing turn streams normally
+				return (yield from _scripted_stream(scripted))
+			yield "let me "
+			yield ToolCallBegin(id="r1", name="read_balance")
+			yield "look"
+			return scripted
+
+		model = FakeModel([response, _final("done")])
+		model._stream = _interleaved
+		agent = Agent(model=model, tools=books.tools)
+
+		events = list(agent.run("balance please", stream=True))
+
+		shape: list[Any] = []
+		for event in events:
+			if isinstance(event, ToolStarted):
+				shape.append(("started", event.id, event.arguments))
+			elif isinstance(event, ToolEnded):
+				shape.append(("ended", event.id, event.result))
+			elif isinstance(event, Done):
+				shape.append(("done", event.result.paused))
+			else:
+				shape.append(("text", event.text))
+
+		self.assertEqual(
+			shape,
+			[
+				# all of the reply's text, uninterrupted...
+				("text", "let me "),
+				("text", "look"),
+				# ...then the announcement it used to be split by
+				("started", "r1", {}),
+				("started", "r1", {"account": "alice"}),
+				("ended", "r1", "120"),
+				("text", "done"),
+				("done", False),
+			],
+		)
 
 	def test_the_pause_and_answer_shapes_are_unchanged(self):
 		"""AT18. The web apps read these three things and nothing else about a pause. How much

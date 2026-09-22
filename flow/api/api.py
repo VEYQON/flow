@@ -187,8 +187,12 @@ def get_agent_tools(agent: str) -> dict[str, bool]:
 			# A row the runtime cannot build is a row nothing will run ungated. Say gated rather
 			# than say nothing, and keep answering for the agent's other tools: mislabelling an
 			# approval is the one thing this call exists to avoid.
-			frappe.local.message_log = log
 			tools[row.slug] = True
+		finally:
+			# `finally`, not `except`: a resolve that SUCCEEDS can talk too — module-level code in
+			# an imported tool, a warning from the resolver — and everything in this log is
+			# serialised onto the response of a call whose whole answer is one boolean per tool.
+			frappe.local.message_log = log
 	return tools
 
 

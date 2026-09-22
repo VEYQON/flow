@@ -27,10 +27,12 @@ they are written that way because what they measure is the resolver, not the doc
 """
 
 import json
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
 
+from flow.flow.doctype.flow_tool.flow_tool import FlowTool
 from flow.lib.tool import Tool, tool
 
 S20_TESTER = "s20-tester@example.com"
@@ -105,6 +107,12 @@ class S20Base(IntegrationTestCase):
 
 
 _HERE = "flow.tests.test_s20_bare_callables_are_gated"
+
+
+def _talks_then_resolves(doc):
+	"""A row that resolves successfully AND writes to the message log on the way."""
+	frappe.msgprint("a secret about this tool")
+	return Tool(name=doc.slug, description="x", parameters={}, func=lambda: "x", requires_confirmation=True)
 
 
 class TestCodeWithNoVoiceIsGated(S20Base):
@@ -420,6 +428,25 @@ class TestThePanelIsToldWhatTheEngineWillBuild(S20Base):
 		leaked = json.dumps(frappe.local.message_log)
 		self.assertEqual(frappe.local.message_log, [], f"the panel call leaked: {leaked}")
 		self.assertNotIn("no_such_attribute", leaked)
+
+	def test_a_row_that_resolves_but_talks_leaks_nothing_either(self):
+		"""SEC-M2 / QA-L3. The snapshot was restored only when the resolve RAISED. A tool that
+		resolves successfully while printing — module-level code in an imported tool, a resolver
+		warning — still left whatever it printed in the log for the framework to serialise."""
+		from flow.api.api import get_agent_tools
+
+		row = frappe.get_doc(
+			self._imported("panel_chatty", f"{_HERE}.a_plain_function", requires_confirmation=0)
+		).insert()
+		agent = self._agent_with(row.name)
+
+		frappe.local.message_log = []
+		with patch.object(FlowTool, "to_tool", autospec=True, side_effect=_talks_then_resolves):
+			self.assertEqual(get_agent_tools(agent), {"panel_chatty": True})
+
+		leaked = json.dumps(frappe.local.message_log)
+		self.assertEqual(frappe.local.message_log, [], f"the panel call leaked: {leaked}")
+		self.assertNotIn("a secret about this tool", leaked)
 
 	def test_control_the_leak_check_can_go_red(self):
 		"""Without this the assertion above would hold against a `frappe.throw` that never
