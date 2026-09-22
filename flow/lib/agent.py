@@ -267,7 +267,8 @@ class Agent:
 		(call, content, announce) triples resolved, so a streaming resume can replay them as
 		events. `announce` is true for a call no question was ever raised for — one held back for
 		the group. No card was drawn for it when the run paused, because it was not starting then;
-		the client is told about it here, where it is, with the arguments that are about to run.
+		the client is told about it here, where it is, with the arguments that are about to run —
+		and not at all when the answers hold a denial, because then it is not about to run either.
 
 		A pause can hold several questions, and they are answered as one group. If any answer
 		in the group is a denial, nothing in the group runs: an "Approve" beside it is recorded
@@ -328,13 +329,18 @@ class Agent:
 			# Nothing was asked about this call, so the client has no card for it: it was held
 			# back, and a held-back call is announced when it runs, not before.
 			#
-			# All three clauses, and each closes a real card. `index >= live_from`: a call from a
+			# All four clauses, and each closes a real card. `index >= live_from`: a call from a
 			# turn nobody is resuming is not going to run, and announcing it drew model-authored
 			# arguments onto the screen where the person had just approved something else — a
 			# question's shape is never steered by values a model wrote. `have_record`: with no
 			# record the engine cannot tell a held-back call from an unanswered one and runs
-			# neither, so it announces neither. Announce exactly what this resume will run.
-			announce = index >= live_from and have_record and call.id not in question_keys
+			# neither, so it announces neither. `not denied_group`: a denial starts nothing, so
+			# it opens no card — drawing one, with the model's own arguments, for the action the
+			# person had just declined is the same defect on the one path where the answer was
+			# no. Announce exactly what this resume will run.
+			announce = (
+				index >= live_from and have_record and not denied_group and call.id not in question_keys
+			)
 			tool = self._tools_by_name.get(call.name)
 			# What the person was asked. With no record of the pause there is nothing to read it
 			# from, so the tool's own gate stands in and the two can never disagree — which is

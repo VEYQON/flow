@@ -430,6 +430,61 @@ class TestABatchIsOneDecision(UnitTestCase):
 		self.assertEqual(announced[0].name, "read_balance")
 		self.assertIn(("r1", "120"), [(e.id, e.result) for e in resumed if isinstance(e, ToolEnded)])
 
+	def test_a_denied_group_announces_nothing_for_the_held_back_call(self):
+		"""AT8d. The Deny half of AT8, and the one path where `announce` was still wrong.
+
+		A card is opened for an action that is starting. A denial is the one answer that starts
+		nothing, so it opens none. `announce` consulted the question record and the turn's position
+		and nothing else, so on a resume whose answers hold an exact "Deny" the held-back call was
+		announced anyway — with the arguments the model wrote — immediately before its
+		`group_refused` result. Nothing ran, so this is an honesty defect rather than an execution
+		one: the person declined, and the screen then drew the declined action as though it had
+		begun. During the pause nothing at all had been drawn for that call, which is the behaviour
+		the engine ships as correct; the Deny path contradicted it. It is also the E5 lesson one
+		door over — model-authored values shaping what a person is shown around an approval.
+
+		The `tool_ended` still goes out, and a client with no card for that id drops it, which is
+		the correct outcome: nothing shown for a call that never ran, exactly as during the pause.
+		"""
+		books = _Books()
+		agent, _model, paused = _pause_on_a_mixed_batch(books, extra=[_final("done")])
+
+		events = list(agent.resume(paused.messages, {"c2": "Deny"}, asked=paused.questions, stream=True))
+
+		# The control that makes the assertion below mean something: it really did not run.
+		self.assertEqual(books.read, [])
+		self.assertEqual(books.wrote, [])
+		self.assertEqual(
+			[(e.id, e.arguments) for e in events if isinstance(e, ToolStarted)],
+			[],
+			"a call the person's denial stopped was announced as starting",
+		)
+		self.assertEqual(
+			[
+				(e.id, json.loads(e.result).get("reason") or json.loads(e.result)["status"])
+				for e in events
+				if isinstance(e, ToolEnded)
+			],
+			[("r1", "group_refused"), ("c2", "denied")],
+		)
+		done = next(e for e in events if isinstance(e, Done))
+		self.assertEqual(done.result.output, None)
+
+	def test_but_an_approve_still_announces_the_held_back_call_once_with_its_arguments(self):
+		"""The control for AT8d. Holding the announcement back on a denial must not hold it back
+		on the answer that does start the action — that would trade one silent card for another.
+		"""
+		books = _Books()
+		agent, _model, paused = _pause_on_a_mixed_batch(books, extra=[_final("done")])
+
+		events = list(agent.resume(paused.messages, {"c2": "Approve"}, asked=paused.questions, stream=True))
+
+		self.assertEqual(books.read, [{"account": "alice"}])
+		announced = [e for e in events if isinstance(e, ToolStarted) and e.id == "r1"]
+		self.assertEqual(len(announced), 1, "the held-back call ran without ever being announced")
+		self.assertEqual(announced[0].name, "read_balance")
+		self.assertEqual(announced[0].arguments, {"account": "alice"})
+
 	def test_a_reply_with_nothing_to_approve_streams_exactly_as_it_did(self):
 		"""AT8b. The control for AT8: attended behaviour is unchanged.
 
