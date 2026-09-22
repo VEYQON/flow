@@ -635,6 +635,17 @@ Everything else is history and is let through. `TestWhatIsStillRefusedOnTheAppro
 the narrowing itself plus two guarantees behind it: a LIVE collision behind a dirty history is still
 refused, and so is a live pair carrying no reference at all.
 
+**CORRECTED the same day, by the run 11 QA adversary.** The first version of condition 1 read "any
+call in this turn has no result". An ABANDONED pause is exactly that, for ever — `stop_run` clears a
+run's questions but not its messages — so a legacy colliding turn left unanswered still refused every
+later approval in that session. That is the whole of the R10 defect, one door further along, and the
+narrowing had walked straight past it. Condition 1 is now **the LAST turn holding a call with no
+result**, matched positionally, the same way `_live_turn_pending_count` decides what may execute.
+Refusing an abandoned turn was buying nothing anyway: since the abandoned-turn branch in
+`_prepare_resume`, a call from a turn nobody is resuming is closed out with nothing and can never
+execute. Pinned by `test_an_abandoned_colliding_turn_does_not_refuse_a_later_approval_either`,
+watched red.
+
 **R8 — two distinct non-string references are refused although they are answerable.** `[1, 2]` as
 integers fold to one bucket and the turn is refused, though a set of ids, `answers.get(1)` and
 `Question.key` would all tell them apart. `[True, 1]` folding is correct on the merits (they are

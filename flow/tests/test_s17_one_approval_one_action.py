@@ -1117,6 +1117,47 @@ class TestWhatIsStillRefusedOnTheApprovalPath(UnitTestCase):
 		)
 		self.assertEqual(resumed.output, "paid")
 
+	def test_an_abandoned_colliding_turn_does_not_refuse_a_later_approval_either(self):
+		"""R10, the half the first narrowing missed. Found by the run 11 QA adversary.
+
+		"Live" was "any call in this turn has no result". An ABANDONED pause is exactly that, for
+		ever — Stop clears a run's questions but not its messages — so a legacy colliding turn
+		left unanswered still refused every later approval in that session, which is the whole of
+		the defect R10 exists to remove, one door further along.
+
+		And refusing it buys nothing, for the same reason the resolved case bought nothing: since
+		the abandoned-turn branch in `_prepare_resume`, a call from a turn nobody is resuming is
+		closed out with nothing and can never execute. Liveness is positional now, like the count
+		that decides what may run: the LAST turn with an unanswered call, plus any turn a person
+		is actually answering.
+		"""
+		recorder = _Recorder()
+		history = _transcript_with_two_colliding_calls()  # abandoned: no tool result, ever
+		history.append({"role": "user", "content": "now pay bob"})
+		history.append(
+			{
+				"role": "assistant",
+				"content": None,
+				"tool_calls": [
+					{
+						"id": "z9",
+						"type": "function",
+						"function": {"name": "send_money", "arguments": '{"to": "bob", "amount": 10}'},
+					}
+				],
+			}
+		)
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
+		resumed = agent.resume(history, {"z9": "Approve"})
+
+		self.assertEqual(
+			recorder.ran,
+			[("send_money", {"to": "bob", "amount": 10})],
+			"an abandoned turn refused an approval that had nothing to do with it",
+		)
+		self.assertEqual(resumed.output, "paid")
+
 	def test_a_bad_turn_in_the_past_does_not_excuse_a_bad_turn_being_resumed(self):
 		"""The S17 guarantee, under the narrowed rule. The history holds a RESOLVED collision and
 		the turn being resumed holds a LIVE one: the live one is still refused and nothing runs.

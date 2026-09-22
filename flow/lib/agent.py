@@ -756,7 +756,7 @@ def _indistinguishable_tool_call(ids: Iterable[Any]) -> tuple[bool, str] | None:
 	return None
 
 
-def _live_turn_pending_count(messages: Iterable[Any]) -> int:
+def _live_turn_pending_count(messages: list[Any]) -> int:
 	"""How many of `_pending_calls`'s results belong to the turn the pause is on.
 
 	`_transcript_calls` walks the transcript in order, so the unanswered calls of the LAST
@@ -771,6 +771,11 @@ def _live_turn_pending_count(messages: Iterable[Any]) -> int:
 	Everything before that tail is the wreckage of a run that was stopped or that failed — Stop
 	clears a run's questions but not its messages, and a resume that raises does the same — and a
 	transcript is replayed whole on every later turn, so that wreckage stays pending for ever.
+
+	`messages` is a list, not an `Iterable`: this walks it twice, and a generator would make the
+	second pass see nothing, return 0, and quietly treat EVERY pending call as wreckage — the
+	person's approval would resolve nothing, with no error anywhere. `_prepare_resume` validates
+	for a list before calling this, and the annotation now says so rather than inviting one.
 	"""
 	has_result = {m.get("tool_call_id") for m in messages if isinstance(m, dict) and m.get("role") == "tool"}
 	count = 0
@@ -787,38 +792,53 @@ def _live_turn_pending_count(messages: Iterable[Any]) -> int:
 	return count
 
 
-def _refuse_indistinguishable_live_turn(messages: Iterable[Any], answers: Any) -> None:
+def _refuse_indistinguishable_live_turn(messages: list[Any], answers: Any) -> None:
 	"""Refuse an assistant turn a resume is LIVE on and whose calls cannot be told apart.
 
 	The resume-path half of the rule `_validate_messages` applies to a model's new reply. A turn is
-	live if it still has a call with no result — the only turns a resume can execute from — or if
-	one of its calls is a key in `answers`, which is a person answering THIS turn. The second half
-	is what keeps the nastiest stored shape closed: two colliding calls, one of which already ran,
-	leaves nothing pending (`_transcript_calls` counts BOTH of a colliding pair answered), yet an
-	answer for that reference would resolve the one that had already executed.
+	live if it is the LAST one still holding a call with no result — the turn this pause is on —
+	or if one of its calls is a key in `answers`, which is a person answering THAT turn. The second
+	half is what keeps the nastiest stored shape closed: two colliding calls, one of which already
+	ran, leaves nothing pending (`_transcript_calls` counts BOTH of a colliding pair answered), yet
+	an answer for that reference would resolve the one that had already executed.
 
-	Everything else is history. A finished turn nobody is answering cannot execute again, so
-	refusing it stops nothing and costs a session every later approval it will ever make.
+	Everything else is history — a turn already finished, or a pause the person abandoned, which
+	stays unanswered for ever because Stop clears a run's questions and not its messages. Neither
+	can execute: `_prepare_resume` closes every call outside the live turn out with nothing before
+	any other rule is consulted. So refusing them stops nothing and costs a session every later
+	approval it will ever make, which is the whole of what R10 is about. "Last turn with something
+	pending", not "any turn with something pending", is the difference between the two.
 
 	A call whose reference is `None` or `""` can never be in `has_result` — `_validate_messages`
-	rejects a tool message with no `tool_call_id` outright — so a turn carrying those is always
-	live and always reaches the check. That is the likelier half of the defect and the half a test
-	written only around duplicate strings would miss.
+	rejects a tool message with no `tool_call_id` outright — so a turn carrying those counts as
+	holding something pending, and the last such turn is checked. That is the likelier half of the
+	defect and the half a test written only around duplicate strings would miss.
 
-	Iterated exactly as `_transcript_calls` iterates it, and an entry this cannot read folds to the
-	sentinel rather than being skipped, for the same reason it does there.
+	`messages` is a list, not an `Iterable`: this walks it twice, and a generator would silently
+	report that no turn is live at all.
 	"""
 	answered_keys = answers if isinstance(answers, dict) else {}
 	has_result = {m.get("tool_call_id") for m in messages if isinstance(m, dict) and m.get("role") == "tool"}
-	for message in messages:
+
+	def _ids(message: Any) -> list[Any] | None:
 		if not isinstance(message, dict) or message.get("role") != "assistant":
-			continue
+			return None
 		tool_calls = message.get("tool_calls")
 		if not tool_calls:
+			return None
+		return [tc.get("id") if isinstance(tc, dict) else None for tc in tool_calls]
+
+	last_pending = None
+	for message in messages:
+		ids = _ids(message)
+		if ids is not None and any(id not in has_result for id in ids):
+			last_pending = message
+
+	for message in messages:
+		ids = _ids(message)
+		if ids is None:
 			continue
-		ids = [tc.get("id") if isinstance(tc, dict) else None for tc in tool_calls]
-		live = any(id not in has_result for id in ids) or any(id in answered_keys for id in ids)
-		if not live:
+		if message is not last_pending and not any(id in answered_keys for id in ids):
 			continue
 		if _indistinguishable_tool_call(ids) is not None:
 			raise ValueError(_UNANSWERABLE_TURN)
