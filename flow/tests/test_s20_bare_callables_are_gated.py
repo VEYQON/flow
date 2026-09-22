@@ -326,3 +326,83 @@ class TestTheGateNamesNothingItShouldNot(S20Base):
 		the words must raise, or the test above proves nothing."""
 		with self.assertRaises(AssertionError):
 			self._assert_clean("this sentence mentions Frappe by name")
+
+
+class TestThePanelIsToldWhatTheEngineWillBuild(S20Base):
+	"""S20's MEDIUM, confirmed by REVIEW-FLOW-10 (M4) and fixed in run 11.
+
+	`get_agent_tools` read `requires_confirmation` straight off the `Flow Tool` rows. For exactly
+	the rows S20 moves — a bare callable behind an import path, and a Script tool — the row can say
+	0 while the runtime builds a gated tool. The engine still asks, so nothing executes unapproved;
+	the cost is that the panel mislabels the result. `frontend/src/store.js:443-444` recovers the
+	"Denied"/"Changes requested" badge only when `toolApproval[part.name] === true`, so after a
+	reload a refusal or a denial on one of these tools re-rendered as an ordinary tool result with
+	no badge at all — the person is shown a write as though it had simply happened.
+
+	The panel is now told what the runtime would build, not what the row says.
+	"""
+
+	def _agent_with(self, tool_name: str) -> str:
+		model = frappe.get_doc(
+			{
+				"doctype": "Flow Model",
+				"title": "S20 Panel Model",
+				"model_id": "openai/gpt-4o-mini",
+				"enabled": 1,
+			}
+		).insert(ignore_permissions=True)
+		agent = frappe.get_doc(
+			{
+				"doctype": "Flow Agent",
+				"title": "S20 Panel Agent",
+				"model": model.name,
+				"instructions": "Be terse.",
+				"enabled": 1,
+				"tools": [{"tool": tool_name}],
+			}
+		).insert(ignore_permissions=True)
+		return agent.name
+
+	def test_a_bare_callable_row_with_the_box_unticked_is_reported_gated(self):
+		from flow.api.api import get_agent_tools
+
+		row = frappe.get_doc(
+			self._imported("panel_bare", f"{_HERE}.a_plain_function", requires_confirmation=0)
+		).insert()
+		self.assertEqual(row.requires_confirmation, 0, "the row really does say no confirmation")
+		self.assertTrue(row.to_tool().requires_confirmation, "the runtime really does build it gated")
+
+		self.assertEqual(get_agent_tools(self._agent_with(row.name)), {"panel_bare": True})
+
+	def test_a_script_row_with_the_box_unticked_is_reported_gated(self):
+		from flow.api.api import get_agent_tools
+
+		row = frappe.get_doc(self._script("panel_script", requires_confirmation=0)).insert()
+		self.assertEqual(row.requires_confirmation, 0)
+		self.assertTrue(row.to_tool().requires_confirmation)
+
+		self.assertEqual(get_agent_tools(self._agent_with(row.name)), {"panel_script": True})
+
+	def test_a_tool_whose_code_says_it_needs_no_asking_is_still_reported_ungated(self):
+		"""The control. Without it "report everything gated" would satisfy the two tests above,
+		and every inline tool call in the panel would grow an approval badge it never had."""
+		from flow.api.api import get_agent_tools
+
+		row = frappe.get_doc(
+			self._imported("panel_ungated", f"{_HERE}.an_ungated_tool", requires_confirmation=0)
+		).insert()
+		self.assertFalse(row.to_tool().requires_confirmation)
+
+		self.assertEqual(get_agent_tools(self._agent_with(row.name)), {"panel_ungated": False})
+
+	def test_a_row_the_runtime_cannot_build_is_reported_gated(self):
+		"""A row whose import path no longer resolves cannot be classified, and the panel's job
+		is to not mislabel an approval. It says gated rather than saying nothing, and the call
+		still answers for the agent's other tools instead of failing outright."""
+		from flow.api.api import get_agent_tools
+
+		row = frappe.get_doc(
+			self._imported("panel_broken", f"{_HERE}.no_such_attribute", requires_confirmation=0)
+		).insert(ignore_permissions=True)
+
+		self.assertEqual(get_agent_tools(self._agent_with(row.name)), {"panel_broken": True})

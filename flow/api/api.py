@@ -159,9 +159,29 @@ def get_agent_tools(agent: str) -> dict[str, bool]:
 	if not tool_names:
 		return {}
 	rows = frappe.get_all(
-		"Flow Tool", filters={"name": ["in", tool_names]}, fields=["slug", "requires_confirmation"]
+		"Flow Tool",
+		filters={"name": ["in", tool_names]},
+		fields=["name", "slug", "requires_confirmation"],
 	)
-	return {row.slug: bool(row.requires_confirmation) for row in rows}
+	# What the RUNTIME would build, not what the row says. A record may turn an approval on and
+	# may never take one off, so a row already saying yes needs no resolving; a row saying no is
+	# only half the answer, because code with no voice of its own — a bare callable behind an
+	# import path, a Script tool — is gated by the code floor in `flow/lib/resolver.py` whatever
+	# the row says. Reading the row alone told the panel a gated tool was ungated, and the panel
+	# is what decides whether a refusal or a denial is shown as one.
+	tools: dict[str, bool] = {}
+	for row in rows:
+		if row.requires_confirmation:
+			tools[row.slug] = True
+			continue
+		try:
+			tools[row.slug] = bool(frappe.get_doc("Flow Tool", row.name).to_tool().requires_confirmation)
+		except Exception:
+			# A row the runtime cannot build is a row nothing will run ungated. Say gated rather
+			# than say nothing, and keep answering for the agent's other tools: mislabelling an
+			# approval is the one thing this call exists to avoid.
+			tools[row.slug] = True
+	return tools
 
 
 @frappe.whitelist()
