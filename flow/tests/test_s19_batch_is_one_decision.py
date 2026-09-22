@@ -22,7 +22,7 @@ import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from flow.lib.agent import CONFIRM_ANSWER_OPTIONS, Agent, Done, Question, ToolEnded, ToolStarted
-from flow.lib.model import ChatResponse, ToolCall
+from flow.lib.model import ChatResponse, ToolCall, ToolCallBegin
 from flow.lib.tool import tool
 
 
@@ -45,8 +45,18 @@ class FakeModel:
 
 
 def _scripted_stream(response: ChatResponse):
+	"""A scripted stream that carries the mid-stream tool announcements the real one carries.
+
+	`flow/lib/model.py:_consume_stream` yields one `ToolCallBegin` per tool call, for EVERY call
+	in the reply, the moment its id and name are known. Without them this helper produced no
+	`ToolStarted` events at all, so AT8's "no card was opened" assertion was over an empty list
+	and could not fail — the exact shape CLAUDE.md names: a gate whose failure mode has never
+	been observed is a comment.
+	"""
 	if response.content:
 		yield response.content
+	for call in response.tool_calls or []:
+		yield ToolCallBegin(id=call.id, name=call.name)
 	return response
 
 
@@ -358,15 +368,23 @@ class TestABatchIsOneDecision(UnitTestCase):
 		self.assertEqual(_tool_results(resumed.messages)["r1"], "")
 
 	def test_the_streamed_loop_defers_the_same_calls(self):
-		"""AT8. The streaming loop is a second copy of the same decision, and a UI card left
-		spinning on a call that never ran is its own kind of lie."""
+		"""AT8. The streaming loop is a second copy of the same decision, and telling a client an
+		action is starting when it will not run in this step is its own kind of lie.
+
+		Written against a stream that announces every call mid-stream, the way the real one does.
+		The first version of this test scripted a stream that announced nothing, so its "no card
+		was opened" assertion held over an empty list while the shipped engine opened a card for
+		the held-back call — with no arguments in it — on the very screen where someone was being
+		asked to approve its neighbour.
+		"""
 		books = _Books()
 		model = FakeModel(
 			[
 				_calls(
 					("read_balance", {"account": "alice"}, "r1"),
 					("send_money", {"to": "alice", "amount": 500}, "c2"),
-				)
+				),
+				_final("done"),
 			]
 		)
 		agent = Agent(model=model, tools=books.tools)
@@ -375,13 +393,90 @@ class TestABatchIsOneDecision(UnitTestCase):
 
 		self.assertEqual(books.read, [])
 		self.assertEqual(books.wrote, [])
-		started = [e.id for e in events if isinstance(e, ToolStarted)]
-		self.assertNotIn("r1", started, "a card was opened for a call that never ran")
-		ended = [(e.id, e.result) for e in events if isinstance(e, ToolEnded)]
-		self.assertIn(("r1", ""), ended, "the deferred call's card was left spinning")
+		started = [(e.id, e.arguments) for e in events if isinstance(e, ToolStarted)]
+		self.assertEqual(
+			[call_id for call_id, _args in started],
+			# Twice for the asked call, and that is the contract the client reads: once mid-stream
+			# with no arguments yet, once with the full arguments (frontend/src/store.js:393-399).
+			# Not once for the held-back one.
+			["c2", "c2"],
+			"a call was announced as starting when it was being held back",
+		)
+		self.assertEqual(started[-1][1], {"to": "alice", "amount": 500})
+		self.assertEqual(
+			[(e.id, e.result) for e in events if isinstance(e, ToolEnded)],
+			[("c2", "")],
+			"a call the client cannot see was ended for it",
+		)
 		done = next(e for e in events if isinstance(e, Done))
 		self.assertTrue(done.result.paused)
 		self.assertEqual(done.result.tool_calls, [])
+
+		# ...and it is announced when it actually runs, carrying what it ran with.
+		resumed = list(
+			agent.resume(done.result.messages, {"c2": "Approve"}, stream=True, asked=done.result.questions)
+		)
+
+		self.assertEqual(books.read, [{"account": "alice"}])
+		announced = [e for e in resumed if isinstance(e, ToolStarted) and e.id == "r1"]
+		self.assertEqual(len(announced), 1, "the held-back call ran without ever being announced")
+		self.assertEqual(
+			announced[0].arguments,
+			{"account": "alice"},
+			"the held-back call was announced with no arguments to show",
+		)
+		self.assertEqual(announced[0].name, "read_balance")
+		self.assertIn(("r1", "120"), [(e.id, e.result) for e in resumed if isinstance(e, ToolEnded)])
+
+	def test_a_reply_with_nothing_to_approve_streams_exactly_as_it_did(self):
+		"""AT8b. The control for AT8: attended behaviour is unchanged.
+
+		When no call in the reply needs a person, every call runs in this step, so every
+		announcement goes out — same events, same payloads, same order as before. Without this
+		test "announce nothing until the reply is complete" would satisfy AT8 by making every
+		client wait for everything.
+		"""
+		books = _Books()
+		model = FakeModel(
+			[
+				_calls(
+					("read_balance", {"account": "alice"}, "r1"),
+					("read_balance", {"account": "bob"}, "r2"),
+				),
+				_final("done"),
+			]
+		)
+		agent = Agent(model=model, tools=books.tools)
+
+		events = list(agent.run("read both", stream=True))
+
+		shape: list[Any] = []
+		for event in events:
+			if isinstance(event, ToolStarted):
+				shape.append(("started", event.id, event.name, event.arguments))
+			elif isinstance(event, ToolEnded):
+				shape.append(("ended", event.id, event.result))
+			elif isinstance(event, Done):
+				shape.append(("done", event.result.paused))
+			else:
+				shape.append(("text", event.text))
+
+		self.assertEqual(
+			shape,
+			[
+				# announced the moment the model starts emitting each call, arguments still empty
+				("started", "r1", "read_balance", {}),
+				("started", "r2", "read_balance", {}),
+				# re-announced with the full arguments, immediately before each one runs
+				("started", "r1", "read_balance", {"account": "alice"}),
+				("ended", "r1", "120"),
+				("started", "r2", "read_balance", {"account": "bob"}),
+				("ended", "r2", "120"),
+				("text", "done"),
+				("done", False),
+			],
+		)
+		self.assertEqual(books.read, [{"account": "alice"}, {"account": "bob"}])
 
 	def test_the_pause_and_answer_shapes_are_unchanged(self):
 		"""AT18. The web apps read these three things and nothing else about a pause. How much

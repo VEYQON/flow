@@ -212,7 +212,12 @@ class Agent:
 		the tool cards that were awaiting an answer, then continue the agent loop (or stop
 		if the user denied)."""
 		messages, resolved = self._prepare_resume(messages, answers, asked)
-		for call, content in resolved:
+		for call, content, announce in resolved:
+			# A call held back for the group has no card: it was not announced when the run
+			# paused, because it was not starting then. Here it is — with the arguments that ran,
+			# so the card the client draws is the action, not an empty box.
+			if announce:
+				yield ToolStarted(id=call.id, name=call.name, arguments=call.arguments)
 			yield ToolEnded(id=call.id, name=call.name, result=content)
 		if _has_denial(answers):
 			yield Done(result=self._stopped_result(messages))
@@ -247,9 +252,12 @@ class Agent:
 
 	def _prepare_resume(
 		self, messages: list[dict[str, Any]], answers: dict[str, Any], asked: list[Any] | None = None
-	) -> tuple[list[dict[str, Any]], list[tuple[ToolCall, str]]]:
+	) -> tuple[list[dict[str, Any]], list[tuple[ToolCall, str, bool]]]:
 		"""Append a tool result for each pending call. Returns the new messages plus the
-		(call, content) pairs resolved, so a streaming resume can replay them as events.
+		(call, content, announce) triples resolved, so a streaming resume can replay them as
+		events. `announce` is true for a call no question was ever raised for — one held back for
+		the group. No card was drawn for it when the run paused, because it was not starting then;
+		the client is told about it here, where it is, with the arguments that are about to run.
 
 		A pause can hold several questions, and they are answered as one group. If any answer
 		in the group is a denial, nothing in the group runs: an "Approve" beside it is recorded
@@ -292,9 +300,12 @@ class Agent:
 		approval_keys = _approval_question_keys(asked)
 		question_keys = _all_question_keys(asked)
 		have_record = bool(asked)
-		resolved: list[tuple[ToolCall, str]] = []
+		resolved: list[tuple[ToolCall, str, bool]] = []
 		for call in pending:
 			answer = answers.get(call.id)
+			# Nothing was asked about this call, so the client has no card for it: it was held
+			# back, and a held-back call is announced when it runs, not before.
+			announce = call.id not in question_keys
 			tool = self._tools_by_name.get(call.name)
 			# What the person was asked. With no record of the pause there is nothing to read it
 			# from, so the tool's own gate stands in and the two can never disagree — which is
@@ -340,7 +351,7 @@ class Agent:
 			else:
 				content = _serialize_tool_result(answer)
 			messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
-			resolved.append((call, content))
+			resolved.append((call, content, announce))
 		return messages, resolved
 
 	def _resolve_confirmation(self, call: ToolCall, answer: Any) -> str:
@@ -446,18 +457,36 @@ class Agent:
 
 		for iteration in range(1, self.max_iterations + 1):
 			chunks = self.model.chat(messages, tools=tool_schemas, stream=True)
-			# Tool calls are announced mid-stream (ToolCallBegin) so the UI shows the tool the moment
-			# the model starts it, before its arguments finish streaming.
+			# Tool calls are announced (ToolCallBegin) the moment the model starts emitting them,
+			# so the UI can show the tool before its arguments finish streaming. They are held
+			# here rather than sent straight out: whether a call runs in this step is a property
+			# of the WHOLE reply — one call needing a person holds every other call in that reply
+			# back — and that cannot be known until the reply is complete. Announcing mid-stream
+			# opened a card for an action that was not starting, on exactly the screen where
+			# someone was being asked to approve its neighbour.
+			held: list[ToolStarted] = []
 			try:
 				while True:
 					item = next(chunks)
 					if isinstance(item, ToolCallBegin):
-						yield ToolStarted(id=item.id, name=item.name, arguments={})
+						held.append(ToolStarted(id=item.id, name=item.name, arguments={}))
 					else:
 						yield TextChunk(text=item)
 			except StopIteration as e:
 				response = e.value
 			_accumulate_usage(usage_total, response.usage)
+			# Classified before the turn is admitted, only so the announcements can be released in
+			# the order a client has always seen them. `_disposition` reads the tool's own flag and
+			# nothing else — it runs no tool body and touches no message — so the refusal
+			# `_assistant_message` may raise below still happens before anything is invoked.
+			plan = [(call, self._disposition(call)) for call in response.tool_calls or []]
+			asked_ids = {call.id for call, disposition in plan if disposition == "ask"}
+			for event in held:
+				# Nothing is announced that will not run in this step. When the reply has to ask
+				# someone, the only calls that go anywhere are the ones being asked about; the rest
+				# are held back and are announced on resume, when they run.
+				if not asked_ids or event.id in asked_ids:
+					yield event
 			messages.append(_assistant_message(response))
 
 			if not response.tool_calls:
@@ -473,17 +502,18 @@ class Agent:
 				return
 
 			questions: list[Question] = []
-			# The same one decision as `_loop`, in the loop the web apps actually use. A deferred
-			# call is never announced as started, and is ended with an empty result, so no card is
-			# left spinning for something that has not run.
-			plan = [(call, self._disposition(call)) for call in response.tool_calls]
-			if any(disposition == "ask" for _call, disposition in plan):
+			# The same one decision as `_loop`, in the loop the web apps actually use. A held-back
+			# call produces NO event here — not a start, not an end. It is not running, so there is
+			# nothing to draw; `_resume_stream` announces it when the answers come back and it
+			# actually runs, with its full arguments. (`plan` was built above.)
+			if asked_ids:
 				for call, disposition in plan:
-					if disposition == "ask":
-						yield ToolStarted(id=call.id, name=call.name, arguments=call.arguments)
-						question = self._invoke(call)
-						question.key = call.id
-						questions.append(question)
+					if disposition != "ask":
+						continue
+					yield ToolStarted(id=call.id, name=call.name, arguments=call.arguments)
+					question = self._invoke(call)
+					question.key = call.id
+					questions.append(question)
 					yield ToolEnded(id=call.id, name=call.name, result="")
 				yield Done(
 					result=RunResult(
