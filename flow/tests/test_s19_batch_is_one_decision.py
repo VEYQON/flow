@@ -658,6 +658,100 @@ class TestOnlyTheInvokeDigestMoved(UnitTestCase):
 			self.assertEqual(Pin.BASELINE_DIGESTS[name], digest)
 
 
+class TestAnAbandonedTurnNeverExecutesLater(UnitTestCase):
+	"""SEC-H1, from the run 11 security adversary. The deferred branch was guarded by
+	`have_record` but not by WHICH pause the record belongs to.
+
+	A resume is handed the whole session transcript (`FlowSession._build_prompt_messages`), and
+	`_pending_calls` returns every assistant tool call in it that has no tool result, whatever run
+	produced it. When a batch pauses, the assistant turn carrying BOTH calls is persisted and
+	neither gets a tool result. If that pause is then abandoned — the person presses Stop, which
+	clears the run's questions but not its messages, or a resume raises and the run is marked
+	failed — the held-back call stays pending in the transcript for ever.
+
+	The next time anything in that session is approved, for anything at all, the abandoned call
+	satisfied every condition of the deferred branch and RAN, with its original arguments, on the
+	strength of an approval given for something else. Before S19 it fell through to the branch
+	below and produced an empty result, so this was a path S19 introduced.
+
+	The rule is the same one R10 settled one door over: act on the turn that is live, never on a
+	session's wreckage.
+	"""
+
+	def _abandoned_then_a_new_pause(self, books: _Books):
+		"""A transcript holding an abandoned mixed-batch pause, then a fresh, unrelated pause."""
+		agent, _model, paused = _pause_on_a_mixed_batch(books, extra=[_final("done")])
+		self.assertEqual(books.read, [], "the held-back read ran in the pausing turn")
+
+		messages = list(paused.messages)  # the run was stopped: questions cleared, messages kept
+		messages.append({"role": "user", "content": "forget that, pay carol"})
+		messages.append(
+			{
+				"role": "assistant",
+				"content": None,
+				"tool_calls": [
+					{
+						"id": "z9",
+						"type": "function",
+						"function": {
+							"name": "send_money",
+							"arguments": '{"to": "carol", "amount": 5}',
+						},
+					}
+				],
+			}
+		)
+		asked = [
+			Question(
+				prompt="Approve `send_money`?",
+				options=list(CONFIRM_ANSWER_OPTIONS),
+				allow_other=True,
+				key="z9",
+			)
+		]
+		return agent, messages, asked
+
+	def test_a_held_back_call_from_an_abandoned_pause_does_not_run_on_a_later_approval(self):
+		books = _Books()
+		agent, messages, asked = self._abandoned_then_a_new_pause(books)
+		agent.model = FakeModel([_final("paid carol")])
+
+		resumed = agent.resume(messages, {"z9": "Approve"}, asked=asked)
+
+		self.assertEqual(
+			books.read,
+			[],
+			"a call from a turn the person abandoned ran on an approval given for something else",
+		)
+		self.assertEqual(books.wrote, [{"to": "carol", "amount": 5}], "the real approval must run")
+		self.assertEqual(
+			_tool_results(resumed.messages)["r1"],
+			"",
+			"the abandoned call must be closed out with nothing, as it was before S19",
+		)
+
+	def test_the_same_holds_when_the_later_pause_is_denied(self):
+		"""A Deny must not execute it either — it reaches the branch by a different arm."""
+		books = _Books()
+		agent, messages, asked = self._abandoned_then_a_new_pause(books)
+
+		agent.resume(messages, {"z9": "Deny"}, asked=asked)
+
+		self.assertEqual(books.read, [])
+		self.assertEqual(books.wrote, [])
+
+	def test_control_a_held_back_call_in_the_live_turn_still_runs(self):
+		"""The control. Without it, "never defer" would satisfy both tests above and would undo
+		the whole of Part A's contract that a held-back call is held, not dropped."""
+		books = _Books()
+		agent, _model, paused = _pause_on_a_mixed_batch(books, extra=[_final("done")])
+
+		agent.resume(paused.messages, {"c2": "Approve"}, asked=paused.questions)
+
+		self.assertEqual(books.read, [{"account": "alice"}])
+		self.assertEqual(books.wrote, [{"to": "alice", "amount": 500}])
+
+
 class TestWhatAPartialAnswerDoesToTheHeldBackCalls(UnitTestCase):
 	"""L4, from REVIEW-FLOW-10 — pinned rather than changed, so it is a decision and not an
 	accident. **The owner's call, recorded OPEN in run 11.**

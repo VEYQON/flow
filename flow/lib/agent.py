@@ -315,6 +315,10 @@ class Agent:
 			raise ValueError("No questions awaiting an answer in the provided messages")
 
 		denied_group = _has_denial(answers)
+		# The calls of the turn this pause is actually on. Everything earlier that is still
+		# unanswered is the wreckage of a run that was stopped or that failed, and a transcript is
+		# replayed whole on every later turn, so that wreckage stays pending for ever.
+		live_turn = _live_turn_ids(messages)
 		approval_keys = _approval_question_keys(asked)
 		question_keys = _all_question_keys(asked)
 		have_record = bool(asked)
@@ -342,12 +346,27 @@ class Agent:
 					content = self._resolve_confirmation(call, answer)
 			elif asked_to_approve or tool.requires_confirmation:
 				content = _not_executed("approval_no_longer_applies")
-			elif have_record and call.id not in answers and call.id not in question_keys:
+			elif (
+				have_record
+				and call.id in live_turn
+				and call.id not in answers
+				and call.id not in question_keys
+			):
 				# Nobody was asked about this call: it was held back so that nothing in its turn
 				# ran before the person answered. `not in`, never `.get(...) is None` — an answer
 				# of None is an answer, and running a tool on the strength of one would be the
 				# same defect one branch down. Refusing one action in the group refuses this one
 				# with it, because it was held back for the group's sake.
+				#
+				# `live_turn` is the other half, and it is the one a person can reach in two clicks.
+				# `_pending_calls` spans the WHOLE transcript, so a batch that paused and was then
+				# abandoned — Stop clears a run's questions but not its messages, and a resume that
+				# raises does the same — leaves its held-back call pending for ever. Without this
+				# it satisfied every condition below and RAN, with its original arguments, the next
+				# time anything at all in that session was approved: half of a decision the person
+				# walked away from, executed arbitrarily later on the strength of an approval given
+				# for something else. Everything outside the live turn falls through to the branch
+				# below and is closed out with nothing, which is what it did before S19.
 				#
 				# `have_record` first, and it is the whole of the fix: a call HELD BACK and a call
 				# whose own question went unanswered are indistinguishable from `answers` alone —
@@ -361,10 +380,16 @@ class Agent:
 					if denied_group
 					else _serialize_tool_result(self._run_tool(call))
 				)
-			elif have_record and call.id not in question_keys:
+			elif have_record and call.id in answers and call.id not in question_keys:
 				# An answer arrived for a call no question was ever raised for. `answers` is
 				# validated for shape only, so this is reachable from the web: acting on it would
 				# hand the model whatever text was sent as this tool's result.
+				#
+				# `call.id in answers` is what the sentence above always meant, and it has to be
+				# said out loud now that the branch above can decline a call with no answer: an
+				# UNANSWERED call from a turn nobody is resuming is not an answer that no longer
+				# applies — nothing was asked and nothing was given — so it falls through to the
+				# branch below and is closed out with nothing, exactly as it was before S19.
 				content = _not_executed("approval_no_longer_applies")
 			else:
 				content = _serialize_tool_result(answer)
@@ -722,6 +747,32 @@ def _indistinguishable_tool_call(ids: Iterable[Any]) -> tuple[bool, str] | None:
 			return True, reference
 		seen.add(reference)
 	return None
+
+
+def _live_turn_ids(messages: Iterable[Any]) -> set[Any]:
+	"""The call ids of the LAST assistant turn that still has a call with no result.
+
+	The turn a pause is on. A resume is handed the whole session transcript, and `_pending_calls`
+	returns every unanswered assistant tool call in it whatever run produced it — including the
+	held-back calls of a batch the person abandoned, which nothing ever resolves. Only this turn
+	may be acted on; the rest is history, and history is not a decision anybody is making.
+
+	The LAST such turn, not the first: a session accumulates abandoned pauses and the newest is the
+	one being answered. A turn whose calls all have results is finished and is skipped, so an
+	abandoned turn that was later closed out cannot shadow the live one.
+	"""
+	has_result = {m.get("tool_call_id") for m in messages if isinstance(m, dict) and m.get("role") == "tool"}
+	live: set[Any] = set()
+	for message in messages:
+		if not isinstance(message, dict) or message.get("role") != "assistant":
+			continue
+		tool_calls = message.get("tool_calls")
+		if not tool_calls:
+			continue
+		ids = [tc.get("id") if isinstance(tc, dict) else None for tc in tool_calls]
+		if any(id not in has_result for id in ids):
+			live = set(ids)
+	return live
 
 
 def _refuse_indistinguishable_live_turn(messages: Iterable[Any], answers: Any) -> None:
