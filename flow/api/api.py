@@ -174,12 +174,20 @@ def get_agent_tools(agent: str) -> dict[str, bool]:
 		if row.requires_confirmation:
 			tools[row.slug] = True
 			continue
+		# `frappe.throw` writes to the message log BEFORE it raises, and catching the exception
+		# does not undo that — the framework still serialises the log into the response. The
+		# resolver's failure message carries the tool's dotted import path and the underlying
+		# import error verbatim, so without this snapshot a panel refresh handed both to anyone
+		# who can read the agent. Restored rather than emptied, so a message something else put
+		# there survives.
+		log = list(getattr(frappe.local, "message_log", None) or [])
 		try:
 			tools[row.slug] = bool(frappe.get_doc("Flow Tool", row.name).to_tool().requires_confirmation)
 		except Exception:
 			# A row the runtime cannot build is a row nothing will run ungated. Say gated rather
 			# than say nothing, and keep answering for the agent's other tools: mislabelling an
 			# approval is the one thing this call exists to avoid.
+			frappe.local.message_log = log
 			tools[row.slug] = True
 	return tools
 

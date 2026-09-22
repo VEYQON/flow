@@ -26,6 +26,8 @@ deleted. The inserts elsewhere pass `ignore_permissions=True` and prove nothing 
 they are written that way because what they measure is the resolver, not the doctype.
 """
 
+import json
+
 import frappe
 from frappe.tests import IntegrationTestCase
 
@@ -394,6 +396,42 @@ class TestThePanelIsToldWhatTheEngineWillBuild(S20Base):
 		self.assertFalse(row.to_tool().requires_confirmation)
 
 		self.assertEqual(get_agent_tools(self._agent_with(row.name)), {"panel_ungated": False})
+
+	def test_a_row_the_runtime_cannot_build_leaks_nothing_about_why(self):
+		"""SEC-M2, from the run 11 security adversary. `frappe.throw` appends to
+		`frappe.local.message_log` BEFORE it raises, and catching the exception does not undo that
+		— the framework still serialises the log into `_server_messages` on the response. So the
+		panel call, readable by anyone with read on the agent, handed back the tool's dotted
+		import path and the underlying ImportError text.
+
+		The resolver's own message is `Could not import tool from {0}: {1}`
+		(`flow/lib/resolver.py:50-53`), which carries the path verbatim.
+		"""
+		from flow.api.api import get_agent_tools
+
+		row = frappe.get_doc(
+			self._imported("panel_leak", f"{_HERE}.no_such_attribute", requires_confirmation=0)
+		).insert(ignore_permissions=True)
+		agent = self._agent_with(row.name)
+
+		frappe.local.message_log = []
+		self.assertEqual(get_agent_tools(agent), {"panel_leak": True})
+
+		leaked = json.dumps(frappe.local.message_log)
+		self.assertEqual(frappe.local.message_log, [], f"the panel call leaked: {leaked}")
+		self.assertNotIn("no_such_attribute", leaked)
+
+	def test_control_the_leak_check_can_go_red(self):
+		"""Without this the assertion above would hold against a `frappe.throw` that never
+		reached the log at all, and would be measuring nothing."""
+		frappe.local.message_log = []
+		try:
+			frappe.throw("a message that must show up in the log")
+		except Exception:
+			pass
+
+		self.assertNotEqual(frappe.local.message_log, [], "frappe.throw no longer logs; rewrite this")
+		frappe.local.message_log = []
 
 	def test_a_row_the_runtime_cannot_build_is_reported_gated(self):
 		"""A row whose import path no longer resolves cannot be classified, and the panel's job
