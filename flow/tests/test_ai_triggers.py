@@ -378,9 +378,9 @@ class TestFire(IntegrationTestCase):
 			_final("done"),
 		]
 
-	def test_fire_refuses_confirmation_tools_when_auto_approve_is_enabled(self):
-		# auto_approve trigger: the requires_confirmation tool (execute) is refused rather than
-		# parking the run in Paused. The refusal is a result, not a pause, so the run completes.
+	def test_fire_auto_approves_confirmation_tools_when_enabled(self):
+		# auto_approve trigger: the requires_confirmation tool (execute) runs unattended
+		# instead of parking the run in Paused.
 		self.trigger.auto_approve = 1
 		self.trigger.save()
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "auto-approve"}).insert()
