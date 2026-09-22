@@ -658,6 +658,84 @@ class TestOnlyTheInvokeDigestMoved(UnitTestCase):
 			self.assertEqual(Pin.BASELINE_DIGESTS[name], digest)
 
 
+class TestAnUnattendedRunCannotParkAtAll(UnitTestCase):
+	"""M2 — the other way a run pauses, which the rule did not name.
+
+	Part B closes the `requires_confirmation` route. It did not close the second one: a tool whose
+	BODY returns a `Question`. `_disposition` deliberately excludes those — by the time such a
+	question exists the tool has already run, so holding its neighbours back would protect nothing,
+	which is correct for Part A and does not carry to Part B. In an unattended run such a question
+	still parked the run in `Paused`, holding its session, with nobody who could ever answer it:
+	exactly the failure S19 exists to remove, arriving by the other door.
+
+	Not reachable from shipped configuration — the only `Question(` built outside tests in
+	`flow/{tools,lib,memory,knowledge}` is `_confirmation_question` (measured; that same grep is
+	the positive control for "no other hits"). It is a supported pattern for code agents and
+	upstream exercises it, so it is reachable for anyone writing one.
+	"""
+
+	def _asking_tool(self, ran: list[str]):
+		@tool
+		def ask_user(prompt: str) -> Question:
+			"""Ask the user something."""
+			ran.append(prompt)
+			return Question(prompt=prompt, options=["A", "B"])
+
+		return ask_user
+
+	def test_a_tools_own_question_does_not_park_an_unattended_run(self):
+		ran: list[str] = []
+		agent = Agent(
+			model=FakeModel([_calls(("ask_user", {"prompt": "ok?"}, "c1")), _final("done")]),
+			tools=[self._asking_tool(ran)],
+			unattended=True,
+		)
+
+		result = agent.run("ask me")
+
+		self.assertFalse(result.paused, "an unattended run parked on a question nobody can answer")
+		self.assertEqual(result.questions, [])
+		self.assertEqual(ran, ["ok?"], "the tool body did not run")
+		refused = json.loads(_tool_results(result.messages)["c1"])
+		self.assertEqual(refused["status"], "not_executed")
+		self.assertEqual(refused["reason"], "unattended")
+		self.assertEqual(result.output, "done")
+
+	def test_the_streamed_loop_does_not_park_either(self):
+		"""The second copy of the same decision. A fix in one loop and not the other is how the
+		web path keeps a defect the unit path no longer has."""
+		ran: list[str] = []
+		agent = Agent(
+			model=FakeModel([_calls(("ask_user", {"prompt": "ok?"}, "c1")), _final("done")]),
+			tools=[self._asking_tool(ran)],
+			unattended=True,
+		)
+
+		events = list(agent.run("ask me", stream=True))
+
+		done = next(e for e in events if isinstance(e, Done))
+		self.assertFalse(done.result.paused)
+		self.assertEqual(done.result.questions, [])
+		self.assertEqual(ran, ["ok?"])
+		ended = {e.id: e.result for e in events if isinstance(e, ToolEnded)}
+		self.assertEqual(json.loads(ended["c1"])["reason"], "unattended")
+
+	def test_control_an_attended_run_still_pauses_on_a_tools_own_question(self):
+		"""Without this, "refuse every question" would satisfy both tests above and would break
+		the pattern upstream's own `test_other_tools_run_while_a_question_pauses` relies on."""
+		ran: list[str] = []
+		agent = Agent(
+			model=FakeModel([_calls(("ask_user", {"prompt": "ok?"}, "c1"))]),
+			tools=[self._asking_tool(ran)],
+		)
+
+		result = agent.run("ask me")
+
+		self.assertTrue(result.paused)
+		self.assertEqual([q.key for q in result.questions], ["c1"])
+		self.assertEqual(ran, ["ok?"])
+
+
 class TestAResumeIsNeverUnattended(UnitTestCase):
 	"""AT17, the unit half. A resume exists because a person is answering.
 

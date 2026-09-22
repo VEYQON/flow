@@ -437,9 +437,18 @@ class Agent:
 			for call, disposition in plan:
 				result = self._invoke(call)
 				if isinstance(result, Question):
-					result.key = call.id
-					questions.append(result)
-					continue
+					# The second way a run pauses, and the one `_disposition` cannot classify:
+					# a question the TOOL ITSELF returned, after its body had already run. In a
+					# run with nobody in it that parks the run in `Paused`, holding its session,
+					# waiting for an answer that can never come — the same failure a gated tool
+					# used to cause, arriving by the other door. The body has run and is not
+					# undone; what is refused is the QUESTION, so the model is told the action
+					# was not carried through rather than being left mid-sentence.
+					if not self._is_unattended():
+						result.key = call.id
+						questions.append(result)
+						continue
+					result = _not_executed("unattended")
 
 				# A refused call is told to the model like any other result, and the run carries
 				# on — but it did not run, so it is not one of the calls this turn executed.
@@ -552,10 +561,19 @@ class Agent:
 				yield ToolStarted(id=call.id, name=call.name, arguments=call.arguments)
 				result = self._invoke(call)
 				if isinstance(result, Question):
-					result.key = call.id
-					questions.append(result)
-					yield ToolEnded(id=call.id, name=call.name, result="")
-					continue
+					# The second way a run pauses, and the one `_disposition` cannot classify:
+					# a question the TOOL ITSELF returned, after its body had already run. In a
+					# run with nobody in it that parks the run in `Paused`, holding its session,
+					# waiting for an answer that can never come — the same failure a gated tool
+					# used to cause, arriving by the other door. The body has run and is not
+					# undone; what is refused is the QUESTION, so the model is told the action
+					# was not carried through rather than being left mid-sentence.
+					if not self._is_unattended():
+						result.key = call.id
+						questions.append(result)
+						yield ToolEnded(id=call.id, name=call.name, result="")
+						continue
+					result = _not_executed("unattended")
 
 				if disposition != "refuse":
 					executed_calls.append(call)

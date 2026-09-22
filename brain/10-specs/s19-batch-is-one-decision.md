@@ -3,6 +3,8 @@ type: spec
 status: approved  # draft → approved (HUMAN ONLY) → in-progress → implemented
 approved-by: owner, run 10
 amended-by: owner, run 11 — AT17's leak, found by REVIEW-FLOW-10 (M1)
+amended-by: owner, run 11 — Part B also covers the OTHER way a run pauses, a question a tool's own
+  body returns (REVIEW-FLOW-10 M2). See the amendment at the end of Part B.
 notes-on-approval: |
   Two things the v2 draft could not know, settled by the owner for run 10:
   1. The exception IS extended to `flow/tests/test_ai_triggers.py:393-400` (and the rename at
@@ -553,3 +555,34 @@ is a reasonable upstream proposal on its own, but it needs upstream to agree tha
 3. **The blocker: extend the exception to `flow/tests/test_ai_triggers.py:393-400`?** Without it
    Part B cannot be green. The assertion changes from "the run is stuck in Paused" to "the run
    finished and nothing was written", which is strictly stronger.
+
+---
+
+## AMENDED, run 11 — Part B covers the other way a run pauses (REVIEW-FLOW-10 M2)
+
+Part B as written closes one of the two routes into `Paused`: a tool whose RECORD or CODE says it
+needs approving. The second route is a tool whose **body returns a `Question`**. `_disposition`
+excludes those on purpose — by the time such a question exists the body has already run, so holding
+its neighbours back would protect nothing — and that reasoning is right for Part A and does not
+carry to Part B. In an unattended run such a question still parked the run in `Paused`, holding its
+session, with nobody who could ever answer it. That is the exact failure this spec exists to remove,
+arriving by the other door, and it is the one `_rebind_memory_tool` was written to dodge for a
+single tool.
+
+**The rule extends:** in an unattended run, a `Question` returned by a tool is converted to
+`_not_executed("unattended")` instead of being appended to `questions`. Both loops, identically.
+The tool's BODY is not undone — it has run, and nothing pretends otherwise; what is refused is the
+question, so the model is told the action was not carried through rather than left mid-sentence.
+`_invoke` is untouched and its byte pin does not move: the conversion is in the loops, where the
+`Question` is consumed.
+
+Reachability: no shipped tool returns a `Question`. The only `Question(` construction outside tests
+in `flow/{tools,lib,memory,knowledge}` is `_confirmation_question`, and that same grep hitting
+exactly one line is the positive control for the claim. It is a supported pattern for code agents
+and upstream exercises it (`test_other_tools_run_while_a_question_pauses`), so it is reachable for
+anyone writing one.
+
+**AT19** `test_a_tools_own_question_does_not_park_an_unattended_run`, **AT19b** the streamed twin,
+**AT19c** the control that an attended run still pauses on such a question. All three in
+`flow/tests/test_s19_batch_is_one_decision.py`. *Mutation:* drop the conversion in both loops ->
+AT19 and AT19b come back `paused=True`.
