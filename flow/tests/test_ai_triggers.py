@@ -1,7 +1,6 @@
 # Copyright (c) 2026, Frappe Technologies and contributors
 # License: MIT. See LICENSE
 
-import json
 from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
@@ -395,6 +394,8 @@ class TestFire(IntegrationTestCase):
 		# Default trigger (auto_approve off): nobody is there to approve either, so a
 		# confirmation tool is refused and the run finishes instead of parking in Paused
 		# waiting for an answer that can never come.
+		import json
+
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "needs approval"}).insert()
 
 		with patch.object(Model, "chat", side_effect=self._execute_then_final()):
