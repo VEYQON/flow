@@ -18,7 +18,7 @@
     { "id": 14, "description": "Part B. An unattended run still executes an ungated tool.", "passes": true },
     { "id": 15, "description": "Part B. An attended run is unaffected: a gated tool still pauses and asks.", "passes": true },
     { "id": 16, "description": "Part B. A trigger with auto_approve off refuses instead of parking the run in Paused, as the user it runs as.", "passes": true },
-    { "id": 17, "description": "Part B. A resume is never unattended: an approved gated call still executes.", "passes": false },
+    { "id": 17, "description": "Part B. A resume is never unattended: an approved gated call still executes.", "passes": true },
     { "id": 18, "description": "Part B. The refusal text names no platform, vendor or model, and the check that says so can itself go red.", "passes": true },
     { "id": 19, "description": "Part B. Only the _invoke digest moved; the other three load-bearing functions are byte-identical.", "passes": true }
   ]

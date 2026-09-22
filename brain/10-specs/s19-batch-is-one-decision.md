@@ -2,6 +2,7 @@
 type: spec
 status: approved  # draft → approved (HUMAN ONLY) → in-progress → implemented
 approved-by: owner, run 10
+amended-by: owner, run 11 — AT17's leak, found by REVIEW-FLOW-10 (M1)
 notes-on-approval: |
   Two things the v2 draft could not know, settled by the owner for run 10:
   1. The exception IS extended to `flow/tests/test_ai_triggers.py:393-400` (and the rename at
@@ -143,6 +144,18 @@ _set_active_run(run.name, unattended=unattended)
 
 `FlowSession.resume` (`:358-397`) sets neither, and must not: a resume is a person answering. Its
 runtime is rebuilt from the record, so both default False. **AT17** pins that.
+
+> **Amended, run 11 (REVIEW-FLOW-10 M1).** "Its runtime is rebuilt from the record" is true of the
+> request path and only of the request path. `flow/lib/session.py:78-79` hands back the CALLER'S OWN
+> `Agent` when one was passed in, and `FlowSession.chat` mutates `unattended` on that object every
+> turn — so an in-process caller (a code agent, `evals/run.py`) that ran one unattended turn and then
+> resumed carried `unattended=True` into a run a person was answering. The approval itself still ran
+> (`_resolve_confirmation` never consults `_disposition`), but the model's next gated call in that
+> same resumed run was refused as having nobody to approve it. The invariant is now stated rather
+> than inherited, once, in `Agent.resume`: `self.unattended = False`, because every resume means the
+> same thing whatever object it is on. `auto_approve` is deliberately untouched. AT17 is now two
+> tests — a unit half on a reused `Agent` and an integration half on a reused `FlowSession` runtime,
+> the latter running as a named non-Administrator — and both were watched red before the fix.
 
 ### D2 — one predicate, in one place (`flow/lib/agent.py`, new, next to `_invoke` at `:477`)
 ```python

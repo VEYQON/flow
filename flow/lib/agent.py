@@ -198,6 +198,16 @@ class Agent:
 		present now; it is read from the record or not at all. Passing nothing is supported and
 		safe: see `_prepare_resume`.
 		"""
+		# A resume exists because a person is answering, so it is attended by definition — and the
+		# runtime that resumes is not always a fresh one. `flow/lib/session.py:78-79` hands back the
+		# CALLER'S OWN object, and `FlowSession.chat` mutates this attribute on it every turn, so an
+		# in-process caller that ran one unattended turn and then resumed carried `unattended=True`
+		# into a run somebody was sitting in front of: their approval was honoured, and the model's
+		# very next gated call in the same run was refused as having nobody to approve it.
+		# Set here rather than in each caller, because every resume means the same thing.
+		# `auto_approve` is deliberately left alone: it is a caller's standing instruction about the
+		# whole run, not a statement about who is present, and upstream's callers rely on it.
+		self.unattended = False
 		if stream:
 			return self._resume_stream(messages, answers, asked)
 		messages, _ = self._prepare_resume(messages, answers, asked)

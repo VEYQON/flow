@@ -658,6 +658,150 @@ class TestOnlyTheInvokeDigestMoved(UnitTestCase):
 			self.assertEqual(Pin.BASELINE_DIGESTS[name], digest)
 
 
+class TestAResumeIsNeverUnattended(UnitTestCase):
+	"""AT17, the unit half. A resume exists because a person is answering.
+
+	`FlowSession.chat` assigns `unattended` every turn; `FlowSession.resume` assigned neither flag,
+	and `flow/lib/session.py:78-79` hands back the CALLER'S OWN `Agent` object when one was passed
+	in. So an in-process caller that ran an unattended turn and then resumed on the same object
+	carried `unattended=True` into a run a person was answering, and the model's next gated call in
+	that run was refused as though nobody were there.
+	"""
+
+	def test_a_resume_is_never_unattended(self):
+		books = _Books()
+		agent = Agent(
+			model=FakeModel([_calls(("send_money", {"to": "alice", "amount": 500}, "c1"))]),
+			tools=books.tools,
+		)
+		paused = agent.run("pay alice")
+		self.assertTrue(paused.paused, "attended: it must ask")
+
+		# A previous unattended turn mutated this object, and nothing clears it.
+		agent.unattended = True
+		agent.model = FakeModel([_calls(("send_money", {"to": "bob", "amount": 10}, "c2")), _final("done")])
+		resumed = agent.resume(paused.messages, {"c1": "Approve"}, asked=paused.questions)
+
+		self.assertEqual(
+			books.wrote,
+			[{"to": "alice", "amount": 500}],
+			"the approval a person gave was refused as though nobody were there",
+		)
+		self.assertTrue(resumed.paused, "a new gated call in a resumed run must ask, not be refused")
+		self.assertEqual([q.key for q in resumed.questions], ["c2"])
+
+
+class TestASessionResumeIsNeverUnattended(IntegrationTestCase):
+	"""AT17, the half that pins the fix. The runtime a session holds is reused across turns, so a
+	resume must say what it is rather than inherit what the last turn happened to be.
+
+	Runs as a named non-Administrator, because a resume is a permission-bearing path
+	(`assert_run_owner`) and Administrator would not measure it.
+	"""
+
+	S19_RESUMER = "s19-resumer@example.com"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		from flow.tools.builtins import sync_builtin_tools
+
+		sync_builtin_tools()
+		cls.enterClassContext(cls.enable_safe_exec())
+
+	def setUp(self):
+		if not frappe.db.exists("User", self.S19_RESUMER):
+			user = frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": self.S19_RESUMER,
+					"first_name": "S19R",
+					"send_welcome_email": 0,
+				}
+			).insert(ignore_permissions=True)
+			user.add_roles("System Manager")
+		model = frappe.get_doc(
+			{
+				"doctype": "Flow Model",
+				"title": "S19R Model",
+				"model_id": "openai/gpt-4o-mini",
+				"enabled": 1,
+			}
+		).insert(ignore_permissions=True)
+		self.agent_doc = frappe.get_doc(
+			{
+				"doctype": "Flow Agent",
+				"title": "S19R Agent",
+				"model": model.name,
+				"instructions": "Be terse.",
+				"enabled": 1,
+			}
+		).insert(ignore_permissions=True)
+		frappe.set_user(self.S19_RESUMER)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.rollback()
+
+	def test_a_resumed_run_still_asks_on_a_runtime_a_previous_turn_left_unattended(self):
+		"""The approval itself is not the test: `_resolve_confirmation` runs the approved tool
+		without consulting `_disposition`, so a leaked `unattended` cannot show up there. It shows
+		up in the CONTINUATION — the model's next gated call in the same run a person is sitting
+		in front of, which was refused with "this run has nobody who can approve it" while they
+		were the one who had just approved something.
+		"""
+		from unittest.mock import patch
+
+		from flow.lib.model import Model
+		from flow.lib.session import load_session
+
+		seen_users: list[str] = []
+
+		def _script(*args, **kwargs):
+			seen_users.append(frappe.session.user)
+			call_id = "c1" if len(seen_users) == 1 else "c2"
+			if len(seen_users) <= 2:
+				return ChatResponse(
+					content=None,
+					tool_calls=[ToolCall(id=call_id, name="execute", arguments={"code": "result = 7"})],
+					finish_reason="tool_calls",
+					usage={},
+				)
+			return _final("done")
+
+		with patch.object(Model, "chat", side_effect=_script):
+			run = self.agent_doc.run("compute something")
+		self.assertEqual(run.status, "Paused", "an attended run must ask")
+		self.assertEqual(seen_users[0], self.S19_RESUMER, "the run did not run as the asking user")
+
+		session = load_session(frappe.db.get_value("Flow Run", run.name, "session"))
+		# Stand in for a runtime a previous unattended turn mutated. `FlowSession.resume` never
+		# cleared this, and `_disposition` reads it on every later call in the resumed run.
+		session._runtime.unattended = True
+
+		with patch.object(Model, "chat", side_effect=_script):
+			resumed = session.resume({"c1": "Approve"})
+
+		results = [
+			m.content
+			for m in frappe.get_all(
+				"Flow Session Message",
+				filters={"parent": run.session, "role": "tool"},
+				fields=["content"],
+				order_by="idx",
+			)
+		]
+		self.assertTrue(results, "the resumed run stored no tool result at all")
+		self.assertIn("7", results[0], "the approval a person gave did not run")
+		self.assertEqual(
+			resumed.status,
+			"Paused",
+			"a new gated call was refused as though nobody were there, in a run a person was in",
+		)
+		for content in results:
+			self.assertNotIn("not_executed", content)
+
+
 class TestARealTriggerRunRefusesInsteadOfParking(IntegrationTestCase):
 	"""AT16. Part B pinned to a real run rather than to a code `Agent`.
 
