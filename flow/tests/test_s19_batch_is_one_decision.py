@@ -21,7 +21,7 @@ from typing import Any
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
-from flow.lib.agent import Agent, CONFIRM_ANSWER_OPTIONS, Done, Question, ToolEnded, ToolStarted
+from flow.lib.agent import CONFIRM_ANSWER_OPTIONS, Agent, Done, Question, ToolEnded, ToolStarted
 from flow.lib.model import ChatResponse, ToolCall
 from flow.lib.tool import tool
 
@@ -144,7 +144,10 @@ class TestABatchIsOneDecision(UnitTestCase):
 		# read before anyone was asked, because by resume time the recorder looks the same.
 		self.assertEqual(books.read, [], "the read ran in the pausing turn")
 
-		resumed = agent.resume(paused.messages, {"c2": "Approve"})
+		# `asked` is what the production resume always passes (flow_session.py:384,393). It is
+		# what tells a call HELD BACK from a call whose own question went unanswered — see AT7d —
+		# so a test about a held-back call has to resume the way the engine's own caller does.
+		resumed = agent.resume(paused.messages, {"c2": "Approve"}, asked=paused.questions)
 
 		self.assertEqual(books.read, [{"account": "alice"}])
 		self.assertEqual(books.wrote, [{"to": "alice", "amount": 500}])
@@ -158,7 +161,7 @@ class TestABatchIsOneDecision(UnitTestCase):
 		books = _Books()
 		agent, model, paused = _pause_on_a_mixed_batch(books)
 
-		resumed = agent.resume(paused.messages, {"c2": "Deny"})
+		resumed = agent.resume(paused.messages, {"c2": "Deny"}, asked=paused.questions)
 
 		self.assertEqual(books.read, [])
 		self.assertEqual(books.wrote, [])
@@ -305,14 +308,67 @@ class TestABatchIsOneDecision(UnitTestCase):
 		self.assertEqual(asked_calls, ["ok?"], "the tool ran a second time, unasked")
 		self.assertEqual(_tool_results(resumed.messages)["c1"], "")
 
+	def test_with_no_record_a_tools_own_question_still_does_not_run_it_again(self):
+		"""AT7d. The same pause as AT7c, resumed with NO record of what was asked.
+
+		`asked=None` is a supported, documented call (`Agent.resume`), it is what
+		`_asked_questions` returns for a run whose stored questions are missing or unreadable,
+		and it is what `evals/run.py` passes. The docstring of `_prepare_resume` promises that
+		with no record behaviour is exactly what it was before any of this was recorded —
+		nothing runs on the strength of an answer nobody gave. The deferred branch broke that
+		promise: with no record its guard collapsed to "true for every unanswered call", so the
+		tool's body ran a SECOND time.
+		"""
+		asked_calls: list[str] = []
+
+		@tool
+		def ask_user(prompt: str) -> Question:
+			"""Ask the user."""
+			asked_calls.append(prompt)
+			return Question(prompt=prompt, options=["A", "B"])
+
+		agent = Agent(model=FakeModel([_calls(("ask_user", {"prompt": "ok?"}, "c1"))]), tools=[ask_user])
+		paused = agent.run("ask me")
+		self.assertTrue(paused.paused)
+		self.assertEqual(asked_calls, ["ok?"])
+
+		agent.model = FakeModel([_final("done")])
+		resumed = agent.resume(paused.messages, {}, asked=None)
+
+		self.assertEqual(asked_calls, ["ok?"], "the tool ran a second time, unasked")
+		self.assertEqual(_tool_results(resumed.messages)["c1"], "")
+
+	def test_with_no_record_an_unanswered_call_does_not_run(self):
+		"""AT7e. The other half of AT7d: a call nobody answered, in a pause with no record.
+
+		Without a record there is nothing that can say whether this call was held back for the
+		group or was a question in its own right, so it must not execute on the strength of an
+		answer that does not exist. Before the fix it did — and for a call that was gated when
+		the run paused and has since been un-gated, it executed with no answer of any kind.
+		"""
+		books = _Books()
+		agent, _model, paused = _pause_on_a_mixed_batch(books, extra=[_final("done")])
+		self.assertTrue(paused.paused)
+		self.assertEqual(books.read, [])
+
+		resumed = agent.resume(paused.messages, {}, asked=None)
+
+		self.assertEqual(books.read, [], "a held-back call ran with no answer and no record")
+		self.assertEqual(books.wrote, [])
+		self.assertEqual(_tool_results(resumed.messages)["r1"], "")
+
 	def test_the_streamed_loop_defers_the_same_calls(self):
 		"""AT8. The streaming loop is a second copy of the same decision, and a UI card left
 		spinning on a call that never ran is its own kind of lie."""
 		books = _Books()
-		model = FakeModel([_calls(
-			("read_balance", {"account": "alice"}, "r1"),
-			("send_money", {"to": "alice", "amount": 500}, "c2"),
-		)])
+		model = FakeModel(
+			[
+				_calls(
+					("read_balance", {"account": "alice"}, "r1"),
+					("send_money", {"to": "alice", "amount": 500}, "c2"),
+				)
+			]
+		)
 		agent = Agent(model=model, tools=books.tools)
 
 		events = list(agent.run("read and pay", stream=True))

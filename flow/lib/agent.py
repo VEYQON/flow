@@ -313,12 +313,20 @@ class Agent:
 					content = self._resolve_confirmation(call, answer)
 			elif asked_to_approve or tool.requires_confirmation:
 				content = _not_executed("approval_no_longer_applies")
-			elif call.id not in answers and not (have_record and call.id in question_keys):
+			elif have_record and call.id not in answers and call.id not in question_keys:
 				# Nobody was asked about this call: it was held back so that nothing in its turn
 				# ran before the person answered. `not in`, never `.get(...) is None` — an answer
 				# of None is an answer, and running a tool on the strength of one would be the
 				# same defect one branch down. Refusing one action in the group refuses this one
 				# with it, because it was held back for the group's sake.
+				#
+				# `have_record` first, and it is the whole of the fix: a call HELD BACK and a call
+				# whose own question went unanswered are indistinguishable from `answers` alone —
+				# both simply have no answer — and only the record tells them apart. Without one,
+				# running is the wrong guess in both directions: the second has already executed
+				# once, and the first has no answer of any kind behind it. So with no record this
+				# falls through to the pre-existing branch below and nothing runs, which is what
+				# the ladder in this docstring promises for a pause it cannot read.
 				content = (
 					_not_executed("group_refused")
 					if denied_group
