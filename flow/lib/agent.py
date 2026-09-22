@@ -327,7 +327,14 @@ class Agent:
 			answer = answers.get(call.id)
 			# Nothing was asked about this call, so the client has no card for it: it was held
 			# back, and a held-back call is announced when it runs, not before.
-			announce = call.id not in question_keys
+			#
+			# All three clauses, and each closes a real card. `index >= live_from`: a call from a
+			# turn nobody is resuming is not going to run, and announcing it drew model-authored
+			# arguments onto the screen where the person had just approved something else — a
+			# question's shape is never steered by values a model wrote. `have_record`: with no
+			# record the engine cannot tell a held-back call from an unanswered one and runs
+			# neither, so it announces neither. Announce exactly what this resume will run.
+			announce = index >= live_from and have_record and call.id not in question_keys
 			tool = self._tools_by_name.get(call.name)
 			# What the person was asked. With no record of the pause there is nothing to read it
 			# from, so the tool's own gate stands in and the two can never disagree — which is

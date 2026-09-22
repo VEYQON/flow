@@ -731,12 +731,77 @@ class TestAnAbandonedTurnNeverExecutesLater(UnitTestCase):
 		)
 
 	def test_the_same_holds_when_the_later_pause_is_denied(self):
-		"""A Deny must not execute it either — it reaches the branch by a different arm."""
+		"""A Deny must not execute it either — and the abandoned call must be told NOTHING.
+
+		The two "nothing ran" assertions alone cannot fail: on the unfixed engine a Deny makes
+		`denied_group` true, so the abandoned held-back call takes `group_refused` and the
+		abandoned gated one takes `approval_no_longer_applies` — neither runs either way. Found by
+		the run 11 QA adversary, which is exactly the class of defect this run exists to remove.
+
+		What actually differs between the two worlds is the RESULT TEXT, and it is not cosmetic:
+		both of those sentences are false for a call from a turn nobody is resuming. It was never
+		in the group that was refused, and no approval was ever given for it to stop applying.
+		"""
 		books = _Books()
 		agent, messages, asked = self._abandoned_then_a_new_pause(books)
 
-		agent.resume(messages, {"z9": "Deny"}, asked=asked)
+		resumed = agent.resume(messages, {"z9": "Deny"}, asked=asked)
 
+		self.assertEqual(books.read, [])
+		self.assertEqual(books.wrote, [])
+		results = _tool_results(resumed.messages)
+		self.assertEqual(
+			results["r1"], "", "an abandoned call was told it was refused with a group it was never in"
+		)
+		self.assertEqual(
+			results["c2"],
+			"",
+			"an abandoned gated call was told an approval no longer applied to it",
+		)
+
+	def test_an_abandoned_call_is_not_announced_on_a_streamed_resume(self):
+		"""The streamed half of the same rule, and the one a person actually sees.
+
+		`announce` was computed from the question record alone, so a call from an abandoned turn —
+		which by construction nobody was asked about — was announced with its FULL ARGUMENTS on the
+		resumed stream, immediately before being ended with an empty result. The engine correctly
+		refused to run it and then drew a card for it, on the screen where the person had just
+		approved something else. Those arguments are model-authored text; CLAUDE.md's last lesson
+		is that model-controlled values never change the shape of what a person is shown around an
+		approval.
+		"""
+		books = _Books()
+		agent, messages, asked = self._abandoned_then_a_new_pause(books)
+		agent.model = FakeModel([_final("paid carol")])
+
+		events = list(agent.resume(messages, {"z9": "Approve"}, asked=asked, stream=True))
+
+		# Nothing at all is announced here: the abandoned calls are not going to run, and z9 was
+		# announced when the run paused on it — it is the call the person has been looking at.
+		# Before the fix this read ['r1', 'c2'], both with their arguments.
+		self.assertEqual(
+			[e.id for e in events if isinstance(e, ToolStarted)],
+			[],
+			"a card was opened for an action from a turn the person abandoned",
+		)
+		self.assertNotIn("alice", json.dumps([e.arguments for e in events if isinstance(e, ToolStarted)]))
+		self.assertEqual(books.read, [])
+		self.assertEqual(books.wrote, [{"to": "carol", "amount": 5}])
+
+	def test_with_no_question_record_a_streamed_resume_announces_nothing_either(self):
+		"""The second instance of the same root cause. With `asked=None` — a supported,
+		documented call — `question_keys` is empty, so every resolved call looked un-asked-about
+		and was announced, including the ones the engine then refuses to act on."""
+		books = _Books()
+		agent, _model, paused = _pause_on_a_mixed_batch(books, extra=[_final("done")])
+
+		events = list(agent.resume(paused.messages, {}, asked=None, stream=True))
+
+		self.assertEqual(
+			[e.id for e in events if isinstance(e, ToolStarted)],
+			[],
+			"a card was opened for a call the engine refused to act on",
+		)
 		self.assertEqual(books.read, [])
 		self.assertEqual(books.wrote, [])
 
