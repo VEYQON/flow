@@ -908,3 +908,59 @@ class TestARealTriggerRunRefusesInsteadOfParking(IntegrationTestCase):
 		refused = json.loads(results[-1])
 		self.assertEqual(refused["status"], "not_executed")
 		self.assertEqual(refused["reason"], "unattended")
+
+	def test_a_trigger_with_auto_approve_on_refuses_too_and_the_name_upstream_kept_says_otherwise(self):
+		"""AT16b. The fork's accurate copy of upstream's
+		`test_fire_auto_approves_confirmation_tools_when_enabled`.
+
+		That upstream test asserts only `status == "Completed"`, which was true BEFORE S19 (the
+		tool ran, the run completed) and is true AFTER (the tool is refused, the run completes) —
+		it cannot tell the difference, and its name now says the opposite of what happens. Run 10
+		renamed it; run 11 put the name back, because the rename was outside the window the owner
+		allowed and a rename asserts nothing anyway. The behaviour is asserted here instead, in a
+		file the fork owns: the tool did not run, the run did not park, and the refusal is on the
+		record with its reason.
+		"""
+		from unittest.mock import patch
+
+		from flow.lib.model import Model
+		from flow.triggers import fire
+
+		self.trigger.auto_approve = 1
+		self.trigger.save(ignore_permissions=True)
+
+		seen_users: list[str] = []
+
+		def _script(*args, **kwargs):
+			seen_users.append(frappe.session.user)
+			if len(seen_users) == 1:
+				return ChatResponse(
+					content=None,
+					tool_calls=[ToolCall(id="c1", name="execute", arguments={"code": "result = 1"})],
+					finish_reason="tool_calls",
+					usage={},
+				)
+			return _final("done")
+
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "s19-auto"}).insert(ignore_permissions=True)
+		with patch.object(Model, "chat", side_effect=_script):
+			run_name = fire(self.trigger.name, target_doctype="ToDo", target_name=todo.name)
+
+		run = frappe.get_doc("Flow Run", run_name)
+		self.assertNotEqual(run.status, "Paused", "the run parked with nobody who can answer")
+		self.assertEqual(run.status, "Completed")
+		self.assertEqual(json.loads(run.tool_calls or "[]"), [], "the gated tool ran unattended")
+		self.assertEqual(seen_users[0], self.S19_TESTER, "the run did not run as the trigger's user")
+		results = [
+			m.content
+			for m in frappe.get_all(
+				"Flow Session Message",
+				filters={"parent": run.session, "role": "tool"},
+				fields=["content"],
+				order_by="idx",
+			)
+		]
+		self.assertTrue(results, "the run stored no tool result at all")
+		refused = json.loads(results[-1])
+		self.assertEqual(refused["status"], "not_executed")
+		self.assertEqual(refused["reason"], "unattended")
