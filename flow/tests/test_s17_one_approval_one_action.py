@@ -1066,26 +1066,28 @@ class TestASessionWhoseHistoryIsPoisonedStaysUsable(IntegrationTestCase):
 
 
 class TestWhatIsStillRefusedOnTheApprovalPath(UnitTestCase):
-	"""R10 — found by the run 10 review, pinned rather than changed. **An owner decision.**
+	"""R10 — narrowed by the owner in run 11, after being pinned unchanged in run 10.
 
 	R7 moved the refusal off the replay path, so a session whose history holds an
-	indistinguishable turn can chat again. It is still refused on the APPROVAL path, and
-	`_prepare_resume` validates the WHOLE transcript rather than the turn the answers address —
-	so a collision anywhere in that history, including one whose calls already have results and
-	can therefore never execute, refuses every later resume in that session. The person is shown
-	a sentence that is false for their situation: nobody was about to approve the old turn.
+	indistinguishable turn can chat again. `_prepare_resume` still validated the WHOLE transcript,
+	so a collision anywhere in that history — including one whose calls already have results and
+	can therefore never execute — refused every later resume in that session, forever, recoverable
+	only by someone who can delete the stored row. The person was shown a sentence that was false
+	for their situation: nobody was about to approve the old turn.
 
-	This is the same class of blast radius R7 was raised about, one door over, and no test covered
-	it until this one. It is NOT narrowed here: scoping the resume-time refusal to the calls being
-	resolved changes the reach of a refusal in an approved spec, which belongs to the owner.
+	The owner's rule, the same one R7 settled: **validation refuses what is about to RUN, never old
+	history.** A resume now checks the turn it is resolving and only that turn.
 
-	What is NOT at risk, and why this is a decision rather than an emergency: the calls of a
-	collision that already has one result are BOTH counted answered by `_transcript_calls`, so
-	`_prepare_resume` never iterates them and nothing from such a turn can execute on resume.
-	Refusing it buys nothing; the cost is that the session can never approve anything again.
+	Nothing is given away by it, and the sibling test below is the measurement: once either of a
+	colliding pair has a result, `_transcript_calls` counts BOTH answered, so `_prepare_resume`
+	never iterates them and nothing from such a turn can execute on resume. Refusing it bought
+	nothing. The S17 guarantee is untouched — a resumed reply that itself cannot be told apart is
+	still refused and still runs nothing, including when there is a bad turn behind it too.
 	"""
 
-	def test_a_resolved_collision_in_history_still_refuses_a_later_unrelated_approval(self):
+	def test_a_resolved_collision_in_history_no_longer_refuses_a_later_approval(self):
+		"""R10, the narrowing itself. The person is approving z9; c1 is history and can never
+		execute again. Before run 11 this raised and the session could never approve anything."""
 		recorder = _Recorder()
 		history = _transcript_with_two_colliding_calls()
 		history.append({"role": "tool", "tool_call_id": "c1", "content": "sent 500 to alice"})
@@ -1106,9 +1108,47 @@ class TestWhatIsStillRefusedOnTheApprovalPath(UnitTestCase):
 		)
 		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
 
-		# The person is approving z9. c1 is history and can never execute again.
+		resumed = agent.resume(history, {"z9": "Approve"})
+
+		self.assertEqual(
+			recorder.ran,
+			[("send_money", {"to": "bob", "amount": 10})],
+			"one bad turn in the past refused an approval that had nothing to do with it",
+		)
+		self.assertEqual(resumed.output, "paid")
+
+	def test_a_bad_turn_in_the_past_does_not_excuse_a_bad_turn_being_resumed(self):
+		"""The S17 guarantee, under the narrowed rule. The history holds a RESOLVED collision and
+		the turn being resumed holds a LIVE one: the live one is still refused and nothing runs.
+
+		Without this, "check only the pending turn" could have been read as "check nothing when
+		the history is already dirty".
+		"""
+		recorder = _Recorder()
+		history = _transcript_with_two_colliding_calls()
+		history.append({"role": "tool", "tool_call_id": "c1", "content": "sent 500 to alice"})
+		history.append({"role": "user", "content": "do it again"})
+		history.extend(_transcript_with_two_colliding_calls("z9")[1:])
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
 		with self.assertRaises(ValueError) as caught:
 			agent.resume(history, {"z9": "Approve"})
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_a_pending_turn_with_no_usable_reference_is_still_refused_behind_a_dirty_history(self):
+		"""The likelier half of the same shape: two calls carrying no reference at all, in the
+		turn being resumed, with a resolved collision behind them."""
+		recorder = _Recorder()
+		history = _transcript_with_two_colliding_calls()
+		history.append({"role": "tool", "tool_call_id": "c1", "content": "sent 500 to alice"})
+		history.append({"role": "user", "content": "do it again"})
+		history.extend(_transcript_with_two_colliding_calls(None)[1:])
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(history, {None: "Approve"})
 
 		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
 		self.assertEqual(recorder.ran, [])

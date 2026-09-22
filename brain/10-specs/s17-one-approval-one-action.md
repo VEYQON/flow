@@ -8,6 +8,8 @@ approved-by: owner, run 9
 amended-by: owner, run 10, R7 — the refusal applies to the model's NEW reply and to resume, NOT to
   replayed history in `_build_initial_messages`. Status stays approved/implemented; see D3 and
   "Found in the build review".
+amended-by: owner, run 11, R10 — the same rule one door over: a resume refuses the turn it is
+  LIVE on, never old history. Status stays approved/implemented; see "R10" below.
 created: 2026-09-21
 revised: 2026-09-21 (v2)
 upstreamable: yes (the engine change only — see "Upstream")
@@ -611,8 +613,27 @@ pending set `_prepare_resume` already builds — so a collision among PENDING ca
 and a resolved one in history is not. That is the security-relevant condition exactly. It was not
 applied in run 10 because it changes the reach of a refusal in an approved spec.
 
-Pinned by `TestWhatIsStillRefusedOnTheApprovalPath`, both halves: the refusal, and the proof that
-the turn it refuses over could not have executed.
+**DECIDED AND APPLIED, run 11 (owner).** The rule is the one R7 settled: *validation refuses what is
+about to RUN, never old history.* `_prepare_resume` now calls
+`_validate_messages(messages, refuse_indistinguishable_calls=False)` for structure and
+`_refuse_indistinguishable_live_turn(messages, answers)` for indistinguishability.
+
+A turn is **live** — and therefore checked — when either is true:
+1. it still has a call with no result (the only turns a resume can execute from); or
+2. one of its references is a key in `answers` (a person is answering THAT turn).
+
+Condition 2 is not decoration. It is what keeps the nastiest stored shape closed: two colliding
+calls of which one already ran leave NOTHING pending, because `_transcript_calls` counts both of a
+colliding pair answered — yet an answer carrying that reference would resolve the one that had
+already executed. A narrowing written only around the pending set (the candidate fix above, as
+worded) would have opened exactly that, and
+`test_a_colliding_turn_that_already_has_one_result_is_still_refused` is the test that caught it
+mid-build. A reference that is `None` or `""` can never be in `has_result`, so such a turn is
+always live and always checked.
+
+Everything else is history and is let through. `TestWhatIsStillRefusedOnTheApprovalPath` now pins
+the narrowing itself plus two guarantees behind it: a LIVE collision behind a dirty history is still
+refused, and so is a live pair carrying no reference at all.
 
 **R8 — two distinct non-string references are refused although they are answerable.** `[1, 2]` as
 integers fold to one bucket and the turn is refused, though a set of ids, `answers.get(1)` and

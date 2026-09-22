@@ -300,7 +300,15 @@ class Agent:
 		cannot fire, and behaviour is exactly what it was — the right fallback for a run that
 		paused before any of this existed. Row 1 needs no record at all.
 		"""
-		_validate_messages(messages)
+		# Structure over the whole list; indistinguishability over the turn about to be acted on,
+		# and only that turn. A collision whose calls already have results can never execute again
+		# — `_transcript_calls` counts BOTH of a colliding pair answered, so `_prepare_resume` does
+		# not even iterate them — so refusing it stops nothing and costs everything: it refused
+		# every later approval in that session, forever, recoverable only by deleting the stored
+		# row, with a sentence that was false for the person reading it. Validation refuses what is
+		# about to RUN, never old history — the same rule R7 settled for the replay path.
+		_validate_messages(messages, refuse_indistinguishable_calls=False)
+		_refuse_indistinguishable_live_turn(messages, answers)
 		messages = list(messages)
 		pending = self._pending_calls(messages)
 		if not pending:
@@ -696,6 +704,43 @@ def _indistinguishable_tool_call(ids: Iterable[Any]) -> tuple[bool, str] | None:
 			return True, reference
 		seen.add(reference)
 	return None
+
+
+def _refuse_indistinguishable_live_turn(messages: Iterable[Any], answers: Any) -> None:
+	"""Refuse an assistant turn a resume is LIVE on and whose calls cannot be told apart.
+
+	The resume-path half of the rule `_validate_messages` applies to a model's new reply. A turn is
+	live if it still has a call with no result — the only turns a resume can execute from — or if
+	one of its calls is a key in `answers`, which is a person answering THIS turn. The second half
+	is what keeps the nastiest stored shape closed: two colliding calls, one of which already ran,
+	leaves nothing pending (`_transcript_calls` counts BOTH of a colliding pair answered), yet an
+	answer for that reference would resolve the one that had already executed.
+
+	Everything else is history. A finished turn nobody is answering cannot execute again, so
+	refusing it stops nothing and costs a session every later approval it will ever make.
+
+	A call whose reference is `None` or `""` can never be in `has_result` — `_validate_messages`
+	rejects a tool message with no `tool_call_id` outright — so a turn carrying those is always
+	live and always reaches the check. That is the likelier half of the defect and the half a test
+	written only around duplicate strings would miss.
+
+	Iterated exactly as `_transcript_calls` iterates it, and an entry this cannot read folds to the
+	sentinel rather than being skipped, for the same reason it does there.
+	"""
+	answered_keys = answers if isinstance(answers, dict) else {}
+	has_result = {m.get("tool_call_id") for m in messages if isinstance(m, dict) and m.get("role") == "tool"}
+	for message in messages:
+		if not isinstance(message, dict) or message.get("role") != "assistant":
+			continue
+		tool_calls = message.get("tool_calls")
+		if not tool_calls:
+			continue
+		ids = [tc.get("id") if isinstance(tc, dict) else None for tc in tool_calls]
+		live = any(id not in has_result for id in ids) or any(id in answered_keys for id in ids)
+		if not live:
+			continue
+		if _indistinguishable_tool_call(ids) is not None:
+			raise ValueError(_UNANSWERABLE_TURN)
 
 
 def _validate_messages(messages: Any, *, refuse_indistinguishable_calls: bool = True) -> None:
