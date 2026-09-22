@@ -315,15 +315,15 @@ class Agent:
 			raise ValueError("No questions awaiting an answer in the provided messages")
 
 		denied_group = _has_denial(answers)
-		# The calls of the turn this pause is actually on. Everything earlier that is still
-		# unanswered is the wreckage of a run that was stopped or that failed, and a transcript is
-		# replayed whole on every later turn, so that wreckage stays pending for ever.
-		live_turn = _live_turn_ids(messages)
+		# Where the turn this pause is on begins in `pending`. Everything before it is the
+		# wreckage of a run that was stopped or that failed; it is resolved with nothing and never
+		# acted on — see the first branch of the ladder below.
+		live_from = len(pending) - _live_turn_pending_count(messages)
 		approval_keys = _approval_question_keys(asked)
 		question_keys = _all_question_keys(asked)
 		have_record = bool(asked)
 		resolved: list[tuple[ToolCall, str, bool]] = []
-		for call in pending:
+		for index, call in enumerate(pending):
 			answer = answers.get(call.id)
 			# Nothing was asked about this call, so the client has no card for it: it was held
 			# back, and a held-back call is announced when it runs, not before.
@@ -335,7 +335,20 @@ class Agent:
 			asked_to_approve = (
 				call.id in approval_keys if have_record else bool(tool and tool.requires_confirmation)
 			)
-			if tool is None:
+			if index < live_from:
+				# Not the turn this pause is on. `_pending_calls` spans the WHOLE transcript, so
+				# every batch that paused and was then abandoned — Stop clears a run's questions
+				# but not its messages, and a resume that raises does the same — leaves its calls
+				# pending for ever. Decided FIRST, above every other rule, because acting on such
+				# a call at all is the mistake: it ran a held-back action from a decision the
+				# person walked away from, and where its reference happened to match the live
+				# turn's it took the live turn's answer as its own, so one "Approve" executed two
+				# gated writes. By POSITION, never by reference: two turns can carry the same
+				# reference, and that is exactly the case this exists to separate.
+				# Nothing here is a decision anybody is making. Closed out with
+				# nothing, as it was before S19 — which also stops it being pending a second time.
+				content = _serialize_tool_result(None)
+			elif tool is None:
 				content = _not_executed("unavailable")
 			elif asked_to_approve and tool.requires_confirmation:
 				# Only the exact "Approve" ever executes, so that is the only answer the group's
@@ -346,29 +359,16 @@ class Agent:
 					content = self._resolve_confirmation(call, answer)
 			elif asked_to_approve or tool.requires_confirmation:
 				content = _not_executed("approval_no_longer_applies")
-			elif (
-				have_record
-				and call.id in live_turn
-				and call.id not in answers
-				and call.id not in question_keys
-			):
+			elif have_record and call.id not in answers and call.id not in question_keys:
 				# Nobody was asked about this call: it was held back so that nothing in its turn
 				# ran before the person answered. `not in`, never `.get(...) is None` — an answer
 				# of None is an answer, and running a tool on the strength of one would be the
 				# same defect one branch down. Refusing one action in the group refuses this one
 				# with it, because it was held back for the group's sake.
 				#
-				# `live_turn` is the other half, and it is the one a person can reach in two clicks.
-				# `_pending_calls` spans the WHOLE transcript, so a batch that paused and was then
-				# abandoned — Stop clears a run's questions but not its messages, and a resume that
-				# raises does the same — leaves its held-back call pending for ever. Without this
-				# it satisfied every condition below and RAN, with its original arguments, the next
-				# time anything at all in that session was approved: half of a decision the person
-				# walked away from, executed arbitrarily later on the strength of an approval given
-				# for something else. Everything outside the live turn falls through to the branch
-				# below and is closed out with nothing, which is what it did before S19.
+				# Reached only for the live turn — everything else was decided above.
 				#
-				# `have_record` first, and it is the whole of the fix: a call HELD BACK and a call
+				# `have_record` first: a call HELD BACK and a call
 				# whose own question went unanswered are indistinguishable from `answers` alone —
 				# both simply have no answer — and only the record tells them apart. Without one,
 				# running is the wrong guess in both directions: the second has already executed
@@ -749,20 +749,24 @@ def _indistinguishable_tool_call(ids: Iterable[Any]) -> tuple[bool, str] | None:
 	return None
 
 
-def _live_turn_ids(messages: Iterable[Any]) -> set[Any]:
-	"""The call ids of the LAST assistant turn that still has a call with no result.
+def _live_turn_pending_count(messages: Iterable[Any]) -> int:
+	"""How many of `_pending_calls`'s results belong to the turn the pause is on.
 
-	The turn a pause is on. A resume is handed the whole session transcript, and `_pending_calls`
-	returns every unanswered assistant tool call in it whatever run produced it — including the
-	held-back calls of a batch the person abandoned, which nothing ever resolves. Only this turn
-	may be acted on; the rest is history, and history is not a decision anybody is making.
+	`_transcript_calls` walks the transcript in order, so the unanswered calls of the LAST
+	assistant turn that has any are exactly the TAIL of the list it returns. This returns the
+	length of that tail.
 
-	The LAST such turn, not the first: a session accumulates abandoned pauses and the newest is the
-	one being answered. A turn whose calls all have results is finished and is skipped, so an
-	abandoned turn that was later closed out cannot shadow the live one.
+	Counted, never matched by reference, and that is the whole point: two turns can carry the same
+	`tool_call_id`, which is precisely the case where taking the live turn's answer for an older
+	turn's call executes a second gated write on one approval. A reference is not an identity
+	across turns, so nothing here uses one.
+
+	Everything before that tail is the wreckage of a run that was stopped or that failed — Stop
+	clears a run's questions but not its messages, and a resume that raises does the same — and a
+	transcript is replayed whole on every later turn, so that wreckage stays pending for ever.
 	"""
 	has_result = {m.get("tool_call_id") for m in messages if isinstance(m, dict) and m.get("role") == "tool"}
-	live: set[Any] = set()
+	count = 0
 	for message in messages:
 		if not isinstance(message, dict) or message.get("role") != "assistant":
 			continue
@@ -770,9 +774,10 @@ def _live_turn_ids(messages: Iterable[Any]) -> set[Any]:
 		if not tool_calls:
 			continue
 		ids = [tc.get("id") if isinstance(tc, dict) else None for tc in tool_calls]
-		if any(id not in has_result for id in ids):
-			live = set(ids)
-	return live
+		unanswered = [id for id in ids if id not in has_result]
+		if unanswered:
+			count = len(unanswered)
+	return count
 
 
 def _refuse_indistinguishable_live_turn(messages: Iterable[Any], answers: Any) -> None:

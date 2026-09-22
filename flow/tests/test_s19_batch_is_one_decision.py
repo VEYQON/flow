@@ -740,6 +740,64 @@ class TestAnAbandonedTurnNeverExecutesLater(UnitTestCase):
 		self.assertEqual(books.read, [])
 		self.assertEqual(books.wrote, [])
 
+	def test_one_approval_cannot_execute_a_gated_call_from_an_abandoned_turn_as_well(self):
+		"""SEC-M1. The S17 guarantee across turns, not only within one.
+
+		Every indistinguishability check in the engine is per assistant message. Two SEPARATE
+		turns each holding an unanswered call with the same reference are never compared — and
+		`_prepare_resume` looks every answer up by `call.id`, so one "Approve" is handed to both.
+		If both are gated, `_resolve_confirmation` runs both tools: one approval, two writes,
+		which is the single thing this fork exists to prevent.
+
+		Reachable the same way SEC-H1 is: pause, abandon the run, and collide on an id — certain
+		if a provider ever emits an empty or constant reference, since such a call can never be
+		marked answered and so stays pending for ever.
+		"""
+		books = _Books()
+		agent, _model, paused = _pause_on_a_mixed_batch(books, extra=[_final("done")])
+		gated = {
+			"id": "c2",
+			"type": "function",
+			"function": {"name": "send_money", "arguments": '{"to": "mallory", "amount": 9000}'},
+		}
+		messages = list(paused.messages)  # abandoned: the pause on c2 was never answered
+		messages.append({"role": "user", "content": "actually pay dave"})
+		messages.append(
+			{
+				"role": "assistant",
+				"content": None,
+				"tool_calls": [
+					{
+						"id": "c2",  # the same reference as the abandoned turn's gated call
+						"type": "function",
+						"function": {
+							"name": "send_money",
+							"arguments": '{"to": "dave", "amount": 5}',
+						},
+					}
+				],
+			}
+		)
+		messages[1]["tool_calls"][1] = gated  # the abandoned one pays mallory 9000
+		asked = [
+			Question(
+				prompt="Approve `send_money`?",
+				options=list(CONFIRM_ANSWER_OPTIONS),
+				allow_other=True,
+				key="c2",
+			)
+		]
+		agent.model = FakeModel([_final("paid dave")])
+
+		agent.resume(messages, {"c2": "Approve"}, asked=asked)
+
+		self.assertEqual(
+			books.wrote,
+			[{"to": "dave", "amount": 5}],
+			"one approval executed a second gated call from a turn nobody answered",
+		)
+		self.assertEqual(books.read, [])
+
 	def test_control_a_held_back_call_in_the_live_turn_still_runs(self):
 		"""The control. Without it, "never defer" would satisfy both tests above and would undo
 		the whole of Part A's contract that a held-back call is held, not dropped."""
