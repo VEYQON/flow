@@ -658,6 +658,61 @@ class TestOnlyTheInvokeDigestMoved(UnitTestCase):
 			self.assertEqual(Pin.BASELINE_DIGESTS[name], digest)
 
 
+class TestWhatAPartialAnswerDoesToTheHeldBackCalls(UnitTestCase):
+	"""L4, from REVIEW-FLOW-10 — pinned rather than changed, so it is a decision and not an
+	accident. **The owner's call, recorded OPEN in run 11.**
+
+	Only a denial holds the group back: `_has_denial` matches the exact string "Deny" and nothing
+	else. So a person who REDIRECTS ("no, do it differently") and a client that posts `{}` both get
+	the held-back calls executed anyway. That follows the documented group rule, and it is no worse
+	than before S19, where the held-back read had already run before anyone was asked at all.
+
+	It is not nothing, though: a redirect reads to a person like a refusal, and the read they were
+	shown in the same breath as the write goes ahead. The shipped client cannot reach it — it sends
+	answers for exactly the recorded questions (`frontend/src/store.js:375-379`), so the deferred
+	keys are absent and the group is neither denied nor redirected. Narrowing it means deciding
+	that a redirect refuses the group, which changes the reach of an approved spec.
+
+	These tests exist so that a later change to `_has_denial`'s reach is seen rather than
+	discovered.
+	"""
+
+	def test_a_free_text_redirect_still_runs_the_held_back_call(self):
+		books = _Books()
+		agent, _model, paused = _pause_on_a_mixed_batch(books, extra=[_final("ok")])
+
+		resumed = agent.resume(paused.messages, {"c2": "send 400 instead"}, asked=paused.questions)
+
+		self.assertEqual(books.wrote, [], "a redirect is not an approval")
+		self.assertEqual(
+			books.read,
+			[{"account": "alice"}],
+			"today's rule: only an exact Deny holds the group back",
+		)
+		self.assertFalse(resumed.paused)
+
+	def test_an_empty_answers_map_still_runs_the_held_back_call(self):
+		books = _Books()
+		agent, _model, paused = _pause_on_a_mixed_batch(books, extra=[_final("ok")])
+
+		resumed = agent.resume(paused.messages, {}, asked=paused.questions)
+
+		self.assertEqual(books.wrote, [])
+		self.assertEqual(books.read, [{"account": "alice"}])
+		self.assertFalse(resumed.paused)
+
+	def test_and_an_exact_deny_does_hold_it_back(self):
+		"""The control that makes the two above mean something: the group rule is real, it is
+		just narrow."""
+		books = _Books()
+		agent, _model, paused = _pause_on_a_mixed_batch(books)
+
+		agent.resume(paused.messages, {"c2": "Deny"}, asked=paused.questions)
+
+		self.assertEqual(books.read, [])
+		self.assertEqual(books.wrote, [])
+
+
 class TestAnUnattendedRunCannotParkAtAll(UnitTestCase):
 	"""M2 — the other way a run pauses, which the rule did not name.
 
