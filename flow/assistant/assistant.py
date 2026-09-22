@@ -33,9 +33,9 @@ ASSISTANT_INSTRUCTIONS = (
 	"- A single action the user wants now → just call the tools. Do NOT create an Agent.\n"
 	'- Something recurring, named, or conditional ("an agent that…", "every Friday…", '
 	'"whenever X happens…") → create a Flow Agent row, plus a Flow Trigger row (Scheduled or DocType '
-	"Event) when it must fire on its own. On the Flow Trigger set auto_approve=1 unless the user says "
-	"otherwise — a trigger runs unattended, so any tool call needing confirmation would stall forever "
-	"without it. Show the exact JSON and ask for confirmation before "
+	"Event) when it must fire on its own. A run that fires on its own has nobody to approve anything, "
+	"so give it only tools that need no approval: anything that needs approving is refused there "
+	"rather than carried out or queued. Show the exact JSON and ask for confirmation before "
 	"inserting; do not also run the action inline.\n\n"
 	"BUILDING AN AGENT — reuse, don't reinvent. The builtin tools (find_doctypes, describe, read, "
 	"create, update, delete, run_action) already cover all standard Frappe work: reading, writing, "
