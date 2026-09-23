@@ -730,6 +730,11 @@ class Agent:
 # the same question key, the same answer lookup and the same membership test, which is the defect.
 # Anything that is not a non-empty string is folded into one bucket rather than skipped: skipping it
 # is what would leave the likelier half of this defect live.
+#
+# A SINGLE call folding to this sentinel is refused as well, by the sibling rule in
+# `_assistant_message` and with its own sentence. That is not this rule reaching further: one call
+# collides with nothing. It is the other thing a reference is for — filing the result — and the
+# comment there says why waving one through ended the conversation rather than misrouting an answer.
 NO_CALL_REFERENCE = "<none>"
 
 # A plain literal, deliberately, like every other module-level message in this file. `_()` here
@@ -739,6 +744,18 @@ NO_CALL_REFERENCE = "<none>"
 _UNANSWERABLE_TURN = (
 	"Two actions in one reply could not be told apart, so one approval would have answered both. "
 	"Nothing was carried out."
+)
+
+# Its sibling, and deliberately not the same sentence. A single call carrying no usable reference
+# is refused too (see `_assistant_message`), but nothing collided: there is one action, nothing to
+# tell it apart from, and — the shape a provider actually produces is as often an ungated tool as a
+# gated one — frequently no approval question at all. Telling that person two actions could not be
+# told apart and that one approval would have answered both is false on every clause, and a refusal
+# a person cannot believe is the defect the rest of this run exists to remove. What IS true is the
+# reason: a reference is how an answer is matched AND how the result is filed, and this reply
+# carries neither.
+_UNFILEABLE_CALL = (
+	"An action in this reply arrived with nothing to answer or record it by. Nothing was carried out."
 )
 
 
@@ -923,24 +940,33 @@ def _assistant_message(response: ChatResponse) -> dict[str, Any]:
 	message: dict[str, Any] = {"role": "assistant", "content": response.content}
 	if response.tool_calls:
 		references = [_call_reference(call.id) for call in response.tool_calls]
-		if NO_CALL_REFERENCE in references or _indistinguishable_tool_call(references) is not None:
-			# One question cannot address two actions: both would carry the same key, one answer
-			# would resolve both, and the tool would run twice on one approval. Refused HERE,
-			# before the message is returned to be appended and therefore before anything is
-			# invoked — both loops build this message before they touch `response.tool_calls`.
-			#
-			# `is not None`, never `if collided:` — the no-reference case is a real collision and
-			# its reference is the falsy one. The predicate returns a tuple so this cannot be
-			# "simplified" into a bug.
-			#
-			# A SINGLE unusable reference is refused too, and not because one call could be
-			# confused with another. A reference is also how a result is filed: `_prepare_resume`
-			# writes `tool_call_id=call.id`, and a tool message with no reference is one the
-			# structural check has always rejected. So letting one through wrote a message into
-			# the stored transcript that made every later turn in that conversation raise — the
-			# conversation ended, recoverable only by deleting the stored row. Refused before
-			# anything is written, so nothing is lost but the one unanswerable reply.
+		# Two rules, two sentences, and the order between them is what decides which sentence a
+		# person reads. Refused HERE, before the message is returned to be appended and therefore
+		# before anything is invoked — both loops build this message before they touch
+		# `response.tool_calls`.
+		#
+		# COLLISION FIRST, and not for tidiness. Two calls that both carry no usable reference are
+		# both things at once, and the collision is the graver of the two: one question cannot
+		# address two actions — both would carry the same key, one answer would resolve both, and
+		# the tool would run twice on one approval. That is what such a person needs told, so that
+		# shape keeps the sentence it has always had.
+		#
+		# `is not None`, never `if collided:` — the no-reference case is a real collision and its
+		# reference is the falsy one. The predicate returns a tuple so this cannot be "simplified"
+		# into a bug.
+		if _indistinguishable_tool_call(references) is not None:
 			raise ValueError(_UNANSWERABLE_TURN)
+		# What is left here is a SINGLE unusable reference, and it is refused for a different
+		# reason than confusion: one call is confusable with nothing. A reference is also how a
+		# result is FILED — `_prepare_resume` and both loops write `tool_call_id=call.id`, and a
+		# tool message with no usable reference is one the structural check has always rejected.
+		# So letting one through wrote a message into the stored transcript that made every later
+		# turn in that conversation raise: the conversation ended, recoverable only by deleting
+		# the stored row. Refused before anything is written, so nothing is lost but the one
+		# unanswerable reply. Its own sentence, because the collision one is false for it — there
+		# was one action, and the tool is as often ungated, so there was no approval either.
+		if NO_CALL_REFERENCE in references:
+			raise ValueError(_UNFILEABLE_CALL)
 		message["tool_calls"] = [
 			{
 				"id": call.id,

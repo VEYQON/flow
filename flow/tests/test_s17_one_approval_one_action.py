@@ -36,7 +36,7 @@ import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from flow.lib import agent as agent_module
-from flow.lib.agent import _UNANSWERABLE_TURN, Agent, Done, ToolEnded, ToolStarted
+from flow.lib.agent import _UNANSWERABLE_TURN, _UNFILEABLE_CALL, Agent, Done, ToolEnded, ToolStarted
 from flow.lib.model import ChatResponse, Model, ToolCall, ToolCallBegin
 from flow.lib.session import load_session
 from flow.lib.tool import tool
@@ -310,6 +310,11 @@ class TestTwoCallsWithNoUsableReference(UnitTestCase):
 		The control this test used to be is not lost — see
 		`TestAReplyWithNoUsableReferenceIsRefusedBeforeItIsStored.test_the_control_a_usable_
 		reference_still_runs`, and AT10c below, which both pin that usable references still run.
+
+		The sentence is its OWN, and that is the second half of what this pins. One call collides
+		with nothing: telling a person "two actions could not be told apart, so one approval would
+		have answered both" when there was one action and — the tool here is ungated — no approval
+		at all is a false sentence, the very defect class the other run-11b fixes remove.
 		"""
 		recorder = _Recorder()
 		model = FakeModel([_calls(("append_line", {"text": "x"}, None)), _final("done")])
@@ -318,7 +323,7 @@ class TestTwoCallsWithNoUsableReference(UnitTestCase):
 		with self.assertRaises(ValueError) as caught:
 			agent.run("append once")
 
-		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(str(caught.exception), _UNFILEABLE_CALL)
 		self.assertEqual(recorder.ran, [])
 
 	def test_ids_differing_only_by_case_or_whitespace_are_two_answerable_calls(self):
@@ -528,6 +533,22 @@ class TestTheRefusalIsFitToBeRead(UnitTestCase):
 		self.assertIn("nothing was carried out", _UNANSWERABLE_TURN.lower())
 		self.assertNotIn("tool_call", _UNANSWERABLE_TURN)
 		self.assertNotIn("messages[", _UNANSWERABLE_TURN)
+
+	def test_the_unfileable_refusal_is_held_to_the_same_two_rules(self):
+		"""Run 11b's second literal reaches a person by the identical path — `mark_failed`, the
+		run's error field, the stream — so it is checked identically. A literal that is only ever
+		read by whoever wrote it is not what either of these rules is about."""
+		for word in FORBIDDEN:
+			with self.subTest(word=word):
+				self.assertNotIn(word, _UNFILEABLE_CALL.lower())
+		# the control, in the identical form: the same loop over the same text with one forbidden
+		# word planted must report it, or the loop above proves nothing.
+		planted = f"{_UNFILEABLE_CALL} Frappe".lower()
+		self.assertEqual([word for word in FORBIDDEN if word in planted], ["frappe"])
+
+		self.assertIn("nothing was carried out", _UNFILEABLE_CALL.lower())
+		self.assertNotIn("tool_call", _UNFILEABLE_CALL)
+		self.assertNotIn("messages[", _UNFILEABLE_CALL)
 
 
 class TestTheCheckItself(UnitTestCase):
@@ -1241,13 +1262,15 @@ class TestAReplyWithNoUsableReferenceIsRefusedBeforeItIsStored(UnitTestCase):
 	"""
 
 	def test_a_single_empty_reference_is_refused_and_nothing_runs(self):
+		"""The exact sentence, asserted, because it is the sentence a person reads. `assertEqual`
+		and not `assertIn`: the text is the contract here, not a substring of it."""
 		recorder = _Recorder()
 		agent = Agent(model=FakeModel([_calls(("append_line", {"text": "one"}, ""))]), tools=recorder.tools)
 
 		with self.assertRaises(ValueError) as caught:
 			agent.run("append a line")
 
-		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(str(caught.exception), _UNFILEABLE_CALL)
 		self.assertEqual(recorder.ran, [])
 
 	def test_a_single_null_reference_is_refused_too(self):
@@ -1257,11 +1280,24 @@ class TestAReplyWithNoUsableReferenceIsRefusedBeforeItIsStored(UnitTestCase):
 		with self.assertRaises(ValueError) as caught:
 			agent.run("append a line")
 
-		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(str(caught.exception), _UNFILEABLE_CALL)
 		self.assertEqual(recorder.ran, [])
 
+	def test_the_two_refusals_cannot_be_conflated_again(self):
+		"""One reply, two different things wrong with it, two different true sentences — and they
+		are not the same string, so neither branch can quietly start raising the other's.
+
+		A single unusable reference is not a collision and must not be described as one. Two calls
+		that share a reference ARE a collision, and the collision sentence is the one that matters
+		for them: it is the shape where one approval would have run two actions."""
+		self.assertNotEqual(_UNFILEABLE_CALL, _UNANSWERABLE_TURN)
+		self.assertNotIn("two", _UNFILEABLE_CALL.lower())
+		self.assertNotIn("approval", _UNFILEABLE_CALL.lower())
+
 	def test_a_duplicate_reference_is_still_refused(self):
-		"""Unchanged by this: the rule gains a shape, it does not trade one for another."""
+		"""Unchanged by this: the rule gains a shape, it does not trade one for another. The
+		sentence is unchanged too — for two calls sharing a reference, "one approval would have
+		answered both" is exactly what is true, and it stays theirs."""
 		recorder = _Recorder()
 		agent = Agent(
 			model=FakeModel(
