@@ -1383,3 +1383,151 @@ class TestASessionAlreadyBrickedByOneStaysUsable(IntegrationTestCase):
 			("tool", ""),
 			[(m.get("role"), m.get("tool_call_id")) for m in replayed if m.get("role") == "tool"],
 		)
+
+
+class TestTheUnusableResultRuleAndBothOfItsOptOuts(UnitTestCase):
+	"""`_validate_messages`' unusable-RESULT rule, and the two call sites that switch it off.
+
+	The rule refuses a tool message whose `tool_call_id` is present but carries no usable
+	reference. Both callers that replay stored history pass `refuse_unusable_tool_results=False`,
+	on the rule R7 and R10 settled: **validation refuses what is about to RUN, never old history.**
+	A tool result with no reference is a record of something that already happened, so refusing it
+	ends a conversation and prevents nothing; the reply that would CREATE one is refused in
+	`_assistant_message` instead, before it is stored.
+
+	Everything in that paragraph was true of the code and pinned by almost nothing. The default was
+	reachable from no call site and asserted by no test, so the branch could be deleted with the
+	suite still green; and of the two opt-outs only `_build_initial_messages`' was covered, by one
+	integration test — deleting `_prepare_resume`'s re-bricked every PAUSED conversation that
+	already holds such a message, silently, with nothing going red. One test each, here.
+	"""
+
+	def _bricked_history(self) -> list[dict[str, Any]]:
+		"""A stored transcript holding the message this whole rule is about: a tool result filed
+		under an empty reference, written before run 11b refused the reply that creates one."""
+		return [
+			{"role": "user", "content": "log one"},
+			{
+				"role": "assistant",
+				"content": None,
+				"tool_calls": [
+					{
+						"id": "",
+						"type": "function",
+						"function": {"name": "append_line", "arguments": '{"text": "one"}'},
+					}
+				],
+			},
+			{"role": "tool", "tool_call_id": "", "content": "appended one"},
+		]
+
+	def test_the_default_refuses_an_unusable_result_and_the_replay_flag_is_what_allows_it(self):
+		"""The `True` default, directly — the only thing that can reach it, since both call sites
+		opt out. Without this the branch is deletable with the whole suite still green, which is a
+		gate whose failure mode has never been observed."""
+		from flow.lib.agent import _validate_messages
+
+		bad = [{"role": "tool", "tool_call_id": "", "content": "appended one"}]
+
+		with self.assertRaises(ValueError) as caught:
+			_validate_messages(bad)
+		self.assertIn("no usable tool_call_id", str(caught.exception))
+
+		# and the opt-out the two replay paths pass is what lets the same message through
+		_validate_messages(bad, refuse_unusable_tool_results=False)
+
+		# the control: the FIELD missing altogether is malformed rather than historical, and is
+		# refused on every path, opt-out or not — so the two are not one lenient rule.
+		with self.assertRaises(ValueError):
+			_validate_messages([{"role": "tool", "content": "x"}], refuse_unusable_tool_results=False)
+
+	def test_the_replay_opt_out_on_the_run_path_keeps_such_a_transcript_readable(self):
+		"""`_build_initial_messages`. Red if its `refuse_unusable_tool_results=False` is removed:
+		every later turn of a conversation holding one such message raises again, which is the
+		defect fbccf45 was for. Pinned at the unit level as well as by
+		`TestASessionAlreadyBrickedByOneStaysUsable`, which needs a site and a stored session."""
+		recorder = _Recorder()
+		history = self._bricked_history()
+		history.append({"role": "user", "content": "now something unrelated"})
+		agent = Agent(model=FakeModel([_final("sure")]), tools=recorder.tools)
+
+		result = agent.run(history)
+
+		self.assertEqual(result.output, "sure")
+		self.assertEqual(recorder.ran, [])
+		# the unusable message was replayed, not quietly dropped — without this the test would
+		# pass against a path that had simply discarded it.
+		self.assertIn(("tool", ""), [(m.get("role"), m.get("tool_call_id")) for m in result.messages])
+
+	def test_the_replay_opt_out_on_the_resume_path_keeps_a_paused_conversation_answerable(self):
+		"""`_prepare_resume`. The half nothing pinned: a conversation that was bricked while
+		PAUSED on an approval. With the opt-out the person answers and the tool runs; remove it
+		and the resume raises before any of that, so the approval can never be given.
+
+		Red if `refuse_unusable_tool_results=False` is removed from `_prepare_resume` — and only
+		that, which is why the pending call here carries a perfectly usable reference."""
+		recorder = _Recorder()
+		history = self._bricked_history()
+		history.append(
+			{
+				"role": "assistant",
+				"content": None,
+				"tool_calls": [
+					{
+						"id": "c1",
+						"type": "function",
+						"function": {
+							"name": "send_money",
+							"arguments": '{"to": "alice", "amount": 500}',
+						},
+					}
+				],
+			}
+		)
+		agent = Agent(model=FakeModel([_final("paid")]), tools=recorder.tools)
+
+		result = agent.resume(history, {"c1": "Approve"})
+
+		self.assertEqual(result.output, "paid")
+		self.assertEqual(recorder.ran, [("send_money", {"to": "alice", "amount": 500})])
+		self.assertIn(("tool", ""), [(m.get("role"), m.get("tool_call_id")) for m in result.messages])
+
+	def test_a_reference_that_is_not_a_string_folds_the_same_way_on_both_paths(self):
+		"""L1 — the structural check and `_assistant_message` read a reference through the SAME
+		definition, so they cannot disagree about what counts as usable.
+
+		`_call_reference` folds anything that is not a non-empty string to `NO_CALL_REFERENCE`,
+		because that is what every lookup downstream does with it. The unusable-result check used
+		to test `not message["tool_call_id"]` instead, which accepts a truthy non-string — `42`, a
+		dict — while a REPLY carrying that same `42` is refused. The docstring claiming one
+		definition fed both rules was the thing that was not true.
+
+		**Which behaviour the code chose, and why it is safe.** Both, one per path, and the split
+		is the same one the rule already makes:
+
+		- by DEFAULT (a caller handing in a list to validate) `42` is now REFUSED, matching the
+		  reply rule exactly. Safe because it can only tighten a path no shipped call site takes
+		  and no provider reaches — `flow/lib/model.py` accumulates ids into a slot initialised to
+		  `""` and defaults to `""`, so a reference from the model layer is always a `str`;
+		- on the REPLAY paths it is folded and FILED — allowed through as history, like the empty
+		  reference beside it. Safe because replayed history is read, never executed (`_loop`
+		  invokes only the current reply's calls; `_prepare_resume` closes out every call outside
+		  the live turn), and because refusing it would do the one thing this rule exists to avoid:
+		  end a conversation over a record of something that already happened.
+		"""
+		from flow.lib.agent import _validate_messages
+
+		for reference in (42, {"id": "c1"}, ["c1"]):
+			with self.subTest(reference=reference):
+				result = [{"role": "tool", "tool_call_id": reference, "content": "x"}]
+
+				with self.assertRaises(ValueError) as caught:
+					_validate_messages(result)
+				self.assertIn("no usable tool_call_id", str(caught.exception))
+
+				_validate_messages(result, refuse_unusable_tool_results=False)
+
+		# the control: a usable reference is refused on neither path, so the fold has an edge.
+		usable = [{"role": "tool", "tool_call_id": "c1", "content": "x"}]
+		_validate_messages(usable)
+		_validate_messages(usable, refuse_unusable_tool_results=False)
