@@ -765,7 +765,10 @@ def _call_reference(id: Any) -> str:
 	Anything that is not a non-empty string folds to one sentinel, because that is what every
 	lookup downstream does with it: the question key, the answer lookup, the `has_result`
 	membership test, and the `tool_call_id` a result is written with. One definition, used by
-	both rules below, so the two can never disagree about what counts as usable.
+	every rule that asks the question — the collision check, the reply check in
+	`_assistant_message`, and the unusable-result check in `_validate_messages` — so no two of
+	them can disagree about what counts as usable. `_validate_messages` tested the value's own
+	truthiness until run 11b, and that is exactly where they did disagree.
 	"""
 	return id if isinstance(id, str) and id else NO_CALL_REFERENCE
 
@@ -843,10 +846,21 @@ def _refuse_indistinguishable_live_turn(messages: list[Any], answers: Any) -> No
 	approval it will ever make, which is the whole of what R10 is about. "Last turn with something
 	pending", not "any turn with something pending", is the difference between the two.
 
-	A call whose reference is `None` or `""` can never be in `has_result` — `_validate_messages`
-	rejects a tool message with no `tool_call_id` outright — so a turn carrying those counts as
-	holding something pending, and the last such turn is checked. That is the likelier half of the
-	defect and the half a test written only around duplicate strings would miss.
+	A call whose reference is `None` or `""` CAN be in `has_result`, and until run 11b this
+	paragraph said it could not: it reasoned from `_validate_messages` rejecting such a tool
+	message outright, which is what both replay paths stopped doing. What holds now is the other
+	way round — a reply carrying an unusable reference is refused in `_assistant_message` before it
+	can be stored, so only a transcript written earlier can hold one, and the replay paths READ
+	those rather than execute from them.
+
+	Where one is held, references are matched raw (`_transcript_calls`), so a single stored
+	empty-reference result marks EVERY empty-reference call in the transcript answered. A turn
+	carrying only those then counts as holding nothing pending, and the last turn with something
+	pending is a later turn than the old sentence implied. Nothing executes wrongly either way: the
+	worst case is a legacy transcript whose still-pending empty-reference call is counted answered,
+	and that resume ends on the ordinary "No questions awaiting an answer in the provided
+	messages" rather than running anything. A turn whose references are duplicate STRINGS — the
+	shape this function is really for — is unaffected, and is still the last-pending turn it was.
 
 	`messages` is a list, not an `Iterable`: this walks it twice, and a generator would silently
 	report that no turn is live at all.
@@ -907,7 +921,15 @@ def _validate_messages(
 			raise ValueError(f"messages[{i}].role must be one of {sorted(VALID_ROLES)}, got {role!r}")
 		if role == "tool" and "tool_call_id" not in message:
 			raise ValueError(f"messages[{i}] is a tool message but has no tool_call_id")
-		if refuse_unusable_tool_results and role == "tool" and not message["tool_call_id"]:
+		# Through `_call_reference`, never `not message["tool_call_id"]`: one definition of "usable"
+		# for the structural check and for `_assistant_message`, so the two cannot disagree. They
+		# did — a truthy non-string (`42`, a dict) is unusable to every lookup downstream and was
+		# refused in a REPLY, while a RESULT carrying the same value passed here.
+		if (
+			refuse_unusable_tool_results
+			and role == "tool"
+			and _call_reference(message["tool_call_id"]) == NO_CALL_REFERENCE
+		):
 			# Two different defects, and only one of them is history's. A message with no
 			# `tool_call_id` FIELD is malformed — the caller built the wrong shape, and that is
 			# refused wherever it arrives. A field that is present and empty is a RECORD of
