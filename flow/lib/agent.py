@@ -308,7 +308,7 @@ class Agent:
 		# every later approval in that session, forever, recoverable only by deleting the stored
 		# row, with a sentence that was false for the person reading it. Validation refuses what is
 		# about to RUN, never old history — the same rule R7 settled for the replay path.
-		_validate_messages(messages, refuse_indistinguishable_calls=False)
+		_validate_messages(messages, refuse_indistinguishable_calls=False, refuse_unusable_tool_results=False)
 		_refuse_indistinguishable_live_turn(messages, answers)
 		messages = list(messages)
 		pending = self._pending_calls(messages)
@@ -674,7 +674,7 @@ class Agent:
 		# conversation, forever, recoverable only by someone who can delete the stored row.
 		# The refusal belongs where a tool can be reached from the calls in question: the model's
 		# new reply, and a resume.
-		_validate_messages(input, refuse_indistinguishable_calls=False)
+		_validate_messages(input, refuse_indistinguishable_calls=False, refuse_unusable_tool_results=False)
 		return list(input)
 
 	def _is_unattended(self) -> bool:
@@ -742,6 +742,17 @@ _UNANSWERABLE_TURN = (
 )
 
 
+def _call_reference(id: Any) -> str:
+	"""The reference a call will be answered by, and have its result filed under.
+
+	Anything that is not a non-empty string folds to one sentinel, because that is what every
+	lookup downstream does with it: the question key, the answer lookup, the `has_result`
+	membership test, and the `tool_call_id` a result is written with. One definition, used by
+	both rules below, so the two can never disagree about what counts as usable.
+	"""
+	return id if isinstance(id, str) and id else NO_CALL_REFERENCE
+
+
 def _indistinguishable_tool_call(ids: Iterable[Any]) -> tuple[bool, str] | None:
 	"""The first reference that appears twice in one assistant turn, or None.
 
@@ -755,7 +766,7 @@ def _indistinguishable_tool_call(ids: Iterable[Any]) -> tuple[bool, str] | None:
 	"""
 	seen: set[str] = set()
 	for id in ids:
-		reference = id if isinstance(id, str) and id else NO_CALL_REFERENCE
+		reference = _call_reference(id)
 		if reference in seen:
 			return True, reference
 		seen.add(reference)
@@ -850,12 +861,24 @@ def _refuse_indistinguishable_live_turn(messages: list[Any], answers: Any) -> No
 			raise ValueError(_UNANSWERABLE_TURN)
 
 
-def _validate_messages(messages: Any, *, refuse_indistinguishable_calls: bool = True) -> None:
+def _validate_messages(
+	messages: Any,
+	*,
+	refuse_indistinguishable_calls: bool = True,
+	refuse_unusable_tool_results: bool = True,
+) -> None:
 	"""Structural checks on a message list, plus — unless asked not to — the refusal of an
-	assistant turn whose calls cannot be told apart.
+	assistant turn whose calls cannot be told apart, and of a tool result carrying no reference.
 
-	`refuse_indistinguishable_calls` defaults to True so a new call site is guarded unless it
-	says otherwise: the only caller that opts out is `_build_initial_messages`, and it says why.
+	Both flags default to True so a new call site is guarded unless it says otherwise. The callers
+	that opt out are the two that replay STORED history, and they say why: validation refuses what
+	is about to RUN, never old history. A tool result with no reference is a record of something
+	that already happened, so refusing it ends a conversation and prevents nothing — exactly the
+	blast radius R7 and R10 settled for the other rule. A reply that would CREATE one is refused
+	where every other unanswerable reply is, in `_assistant_message`, before it is stored.
+
+	`refuse_unusable_tool_results` governs an EMPTY reference only. A tool message missing the
+	field altogether is malformed rather than historical, and is refused on every path.
 	"""
 	if not isinstance(messages, list):
 		raise TypeError(f"input must be a str or list of message dicts, got {type(messages).__name__}")
@@ -865,8 +888,15 @@ def _validate_messages(messages: Any, *, refuse_indistinguishable_calls: bool = 
 		role = message.get("role")
 		if role not in VALID_ROLES:
 			raise ValueError(f"messages[{i}].role must be one of {sorted(VALID_ROLES)}, got {role!r}")
-		if role == "tool" and not message.get("tool_call_id"):
+		if role == "tool" and "tool_call_id" not in message:
 			raise ValueError(f"messages[{i}] is a tool message but has no tool_call_id")
+		if refuse_unusable_tool_results and role == "tool" and not message["tool_call_id"]:
+			# Two different defects, and only one of them is history's. A message with no
+			# `tool_call_id` FIELD is malformed — the caller built the wrong shape, and that is
+			# refused wherever it arrives. A field that is present and empty is a RECORD of
+			# something that already ran and was filed under nothing; refusing it ends a
+			# conversation and prevents nothing, so the replay paths let it through.
+			raise ValueError(f"messages[{i}] is a tool message with no usable tool_call_id")
 		if "content" not in message and "tool_calls" not in message:
 			raise ValueError(f"messages[{i}] must have 'content' or 'tool_calls'")
 		if refuse_indistinguishable_calls and role == "assistant" and message.get("tool_calls"):
@@ -892,7 +922,8 @@ def _validate_messages(messages: Any, *, refuse_indistinguishable_calls: bool = 
 def _assistant_message(response: ChatResponse) -> dict[str, Any]:
 	message: dict[str, Any] = {"role": "assistant", "content": response.content}
 	if response.tool_calls:
-		if _indistinguishable_tool_call(call.id for call in response.tool_calls) is not None:
+		references = [_call_reference(call.id) for call in response.tool_calls]
+		if NO_CALL_REFERENCE in references or _indistinguishable_tool_call(references) is not None:
 			# One question cannot address two actions: both would carry the same key, one answer
 			# would resolve both, and the tool would run twice on one approval. Refused HERE,
 			# before the message is returned to be appended and therefore before anything is
@@ -901,6 +932,14 @@ def _assistant_message(response: ChatResponse) -> dict[str, Any]:
 			# `is not None`, never `if collided:` — the no-reference case is a real collision and
 			# its reference is the falsy one. The predicate returns a tuple so this cannot be
 			# "simplified" into a bug.
+			#
+			# A SINGLE unusable reference is refused too, and not because one call could be
+			# confused with another. A reference is also how a result is filed: `_prepare_resume`
+			# writes `tool_call_id=call.id`, and a tool message with no reference is one the
+			# structural check has always rejected. So letting one through wrote a message into
+			# the stored transcript that made every later turn in that conversation raise — the
+			# conversation ended, recoverable only by deleting the stored row. Refused before
+			# anything is written, so nothing is lost but the one unanswerable reply.
 			raise ValueError(_UNANSWERABLE_TURN)
 		message["tool_calls"] = [
 			{

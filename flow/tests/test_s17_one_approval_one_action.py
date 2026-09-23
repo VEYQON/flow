@@ -294,17 +294,32 @@ class TestTwoCallsWithNoUsableReference(UnitTestCase):
 			with self.subTest(id=call_id):
 				self._refused(call_id)
 
-	def test_a_single_call_with_no_id_is_unchanged(self):
-		"""AT10b. The control, and the non-goal. ONE call with no reference is answerable —
-		there is nothing to confuse it with — so it behaves exactly as it did."""
+	def test_a_single_call_with_no_id_is_refused_as_well(self):
+		"""AT10b, INVERTED in run 11b by the owner's decision, and renamed to say what it now
+		pins. It read: "ONE call with no reference is answerable — there is nothing to confuse it
+		with — so it behaves exactly as it did."
+
+		That was right about confusion and wrong about cost. A reference is not only how an answer
+		is matched, it is how a result is FILED: the loops write `tool_call_id=call.id`, and a tool
+		message with no reference is one the structural check has always rejected. So waving a
+		single one through wrote a message into the stored transcript that made every later turn in
+		that conversation raise — the conversation was over, recoverable only by deleting the
+		stored row. The refusal is not a collision rule here; it is the same rule one door along:
+		a reply nobody can answer or file is refused before it is stored.
+
+		The control this test used to be is not lost — see
+		`TestAReplyWithNoUsableReferenceIsRefusedBeforeItIsStored.test_the_control_a_usable_
+		reference_still_runs`, and AT10c below, which both pin that usable references still run.
+		"""
 		recorder = _Recorder()
 		model = FakeModel([_calls(("append_line", {"text": "x"}, None)), _final("done")])
 		agent = Agent(model=model, tools=recorder.tools)
 
-		result = agent.run("append once")
+		with self.assertRaises(ValueError) as caught:
+			agent.run("append once")
 
-		self.assertEqual(result.output, "done")
-		self.assertEqual(recorder.ran, [("append_line", {"text": "x"})])
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
 
 	def test_ids_differing_only_by_case_or_whitespace_are_two_answerable_calls(self):
 		"""AT10c. Nothing downstream normalises a reference — membership, the answer lookup and
@@ -1205,3 +1220,130 @@ class TestWhatIsStillRefusedOnTheApprovalPath(UnitTestCase):
 		self.assertEqual(agent._pending_calls(history), [])
 		self.assertEqual([c.id for c in agent._answered_calls(history)], ["c1", "c1"])
 		self.assertEqual(recorder.ran, [])
+
+
+class TestAReplyWithNoUsableReferenceIsRefusedBeforeItIsStored(UnitTestCase):
+	"""SEC-L4 / F7-3 — one call carrying no reference at all is as unanswerable as two.
+
+	`_assistant_message` refused a REPEATED unusable reference and let a single one through, on
+	the reasoning that one call cannot be confused with another. But a reference is not only how
+	an answer is matched, it is how the tool's RESULT is attached: `_prepare_resume` writes
+	`{"role": "tool", "tool_call_id": call.id, ...}`, and a tool message with no reference is one
+	the structural check has always rejected. So a single empty reference did not misroute an
+	approval — it wrote a message into the stored transcript that made every later turn in that
+	conversation raise. The conversation was over, recoverable only by someone who could delete
+	the stored row.
+
+	The module already says this shape is real: `NO_CALL_REFERENCE` exists because a provider
+	"omits the field or never streams it". So it is refused where every other unanswerable reply
+	is refused — before the message is returned to be appended, and therefore before anything is
+	invoked. Nothing is written, and the conversation carries on.
+	"""
+
+	def test_a_single_empty_reference_is_refused_and_nothing_runs(self):
+		recorder = _Recorder()
+		agent = Agent(model=FakeModel([_calls(("append_line", {"text": "one"}, ""))]), tools=recorder.tools)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.run("append a line")
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_a_single_null_reference_is_refused_too(self):
+		recorder = _Recorder()
+		agent = Agent(model=FakeModel([_calls(("append_line", {"text": "one"}, None))]), tools=recorder.tools)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.run("append a line")
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_a_duplicate_reference_is_still_refused(self):
+		"""Unchanged by this: the rule gains a shape, it does not trade one for another."""
+		recorder = _Recorder()
+		agent = Agent(
+			model=FakeModel(
+				[_calls(("append_line", {"text": "one"}, "c1"), ("append_line", {"text": "two"}, "c1"))]
+			),
+			tools=recorder.tools,
+		)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.run("append two lines")
+
+		self.assertEqual(str(caught.exception), _UNANSWERABLE_TURN)
+		self.assertEqual(recorder.ran, [])
+
+	def test_the_control_a_usable_reference_still_runs(self):
+		"""Without this the three above are satisfied by refusing every reply there is."""
+		recorder = _Recorder()
+		agent = Agent(
+			model=FakeModel([_calls(("append_line", {"text": "one"}, "c1")), _final("done")]),
+			tools=recorder.tools,
+		)
+
+		result = agent.run("append a line")
+
+		self.assertEqual(result.output, "done")
+		self.assertEqual(recorder.ran, [("append_line", {"text": "one"})])
+
+
+class TestASessionAlreadyBrickedByOneStaysUsable(IntegrationTestCase):
+	"""The other half, and the one the refusal above cannot reach: transcripts that already hold
+	such a message. Refusing the reply stops new ones; it does nothing for a conversation that has
+	one stored already, and those are exactly the conversations this defect has ruined.
+
+	The owner's rule, the same one settled for R7 and R10: **validation refuses what is about to
+	RUN, never old history.** A stored tool result with no reference is not about to run anything
+	— it is a record of something that already did — so replaying it must not end the
+	conversation. Runs as Administrator deliberately: what is under test is whether a stored
+	transcript can be replayed at all, and no permission rule is involved.
+	"""
+
+	def tearDown(self):
+		frappe.db.rollback()
+
+	def _bricked_session(self):
+		recorder = _Recorder()
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), name="Payer", tools=recorder.tools)
+		with patch.object(Model, "chat", return_value=_final("hello")):
+			run = agent.new_session().chat("hi")
+
+		session = load_session(run.session, agent=agent)
+		session.append_run_messages(
+			[
+				{
+					"role": "assistant",
+					"content": None,
+					"tool_calls": [
+						{
+							"id": "",
+							"type": "function",
+							"function": {"name": "append_line", "arguments": '{"text": "one"}'},
+						}
+					],
+				},
+				{"role": "tool", "tool_call_id": "", "content": "appended one"},
+			],
+			run.name,
+		)
+		return agent, recorder, load_session(run.session, agent=agent)
+
+	def test_a_later_message_in_that_session_still_gets_an_answer(self):
+		_agent, recorder, session = self._bricked_session()
+
+		with patch.object(Model, "chat", return_value=_final("sure")) as chat:
+			run = session.chat("now something unrelated")
+
+		self.assertEqual(run.status, "Completed")
+		self.assertEqual(run.output, "sure")
+		self.assertEqual(recorder.ran, [])
+		# The unusable turn really was in the prompt this turn was built from — without this the
+		# test could pass against a session that had quietly dropped it.
+		replayed = chat.call_args.args[0] if chat.call_args.args else chat.call_args.kwargs["messages"]
+		self.assertIn(
+			("tool", ""),
+			[(m.get("role"), m.get("tool_call_id")) for m in replayed if m.get("role") == "tool"],
+		)
