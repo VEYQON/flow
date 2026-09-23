@@ -4,7 +4,7 @@
   "features": [
     { "id": 1, "description": "Two tool calls in one response sharing an id raise before any tool is invoked.", "passes": true },
     { "id": 2, "description": "Two tool calls in one response that carry no usable id - None or empty string - are refused the same way, and neither runs.", "passes": true },
-    { "id": 3, "description": "A single call carrying no id is unchanged (control for 2).", "passes": true },
+    { "id": 3, "description": "A single call carrying no id is unchanged (control for 2).", "passes": false },
     { "id": 4, "description": "Ids differing only by case or whitespace are two answerable calls and both execute (control).", "passes": true },
     { "id": 5, "description": "The colliding assistant message never enters the transcript.", "passes": true },
     { "id": 6, "description": "The refusal is identical in the streamed loop.", "passes": true },

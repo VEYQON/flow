@@ -10,6 +10,13 @@ amended-by: owner, run 10, R7 — the refusal applies to the model's NEW reply a
   "Found in the build review".
 amended-by: owner, run 11, R10 — the same rule one door over: a resume refuses the turn it is
   LIVE on, never old history. Status stays approved/implemented; see "R10" below.
+amended-by: owner, run 11b (2026-09-23) — a SINGLE call carrying an unusable reference is refused
+  too, before the reply is stored. The non-goal this withdraws said one such call "is answerable —
+  there is nothing to confuse it with"; the owner accepts the counter-reasoning that a reference is
+  also how a RESULT is filed, and a stored tool message with no usable reference bricked every later
+  turn of that conversation. AT10b is inverted; the refusal carries its own sentence, because the
+  two-actions one is false for a single call. Status stays approved/implemented; see "Non-goals",
+  the AT10b row, and acceptance entry 3.
 created: 2026-09-21
 revised: 2026-09-21 (v2)
 upstreamable: yes (the engine change only — see "Upstream")
@@ -119,10 +126,31 @@ anyone to answer.
 ## Non-goals
 - **Deduplication.** Explicitly not built; see §2. Owner-decided.
 - **Making a colliding model usable.** If a provider collides ids, this engine stops.
-- **A *single* call with no id.** One id-less call is answerable — there is nothing to confuse it with
-  — and refusing it would be a behaviour change this spec has no evidence for. Only a turn in which
-  **two or more** calls share an id, or lack one, is refused. This asymmetry is deliberate and is
-  pinned by a control test (AT10b).
+- **A *single* call with no id — WITHDRAWN. Amended by the owner, run 11b (2026-09-23).**
+  It read, and this is the text being withdrawn: *"One id-less call is answerable — there is nothing
+  to confuse it with — and refusing it would be a behaviour change this spec has no evidence for.
+  Only a turn in which **two or more** calls share an id, or lack one, is refused. This asymmetry is
+  deliberate and is pinned by a control test (AT10b)."*
+
+  **Why it changed.** The evidence the old text said did not exist arrived. A reference is not only
+  how an answer is matched, it is how a RESULT is filed: both loops and `_prepare_resume` write
+  `{"role": "tool", "tool_call_id": call.id, ...}`, and a tool message with no usable reference is
+  one the structural check has always rejected. So one such call waved through and executed wrote a
+  message into the stored transcript that made *every later turn of that conversation* raise — the
+  conversation was over, recoverable only by someone who could delete the stored row. Refusing the
+  reply costs the one unanswerable reply; waving it through cost the conversation. It is refused
+  before anything is stored or invoked, in `_assistant_message`, where every other unanswerable
+  reply is refused.
+
+  This is **not** the collision rule reaching further, and it does not borrow the collision rule's
+  sentence: a single call collides with nothing, and telling a person "two actions could not be told
+  apart, so one approval would have answered both" when there was one action and no approval is the
+  same untruth the run-11b fixes exist to remove. It raises its own literal (`_UNFILEABLE_CALL`).
+
+  **What is still a non-goal here.** Repairing a transcript that already holds such a message.
+  Replay reads history, never refuses it — R7's and R10's rule, unchanged: `_build_initial_messages`
+  and `_prepare_resume` both pass `refuse_unusable_tool_results=False`, and each of those two
+  opt-outs is now pinned by its own test.
 - **`auto_approve`** (run 7 rank 1) and **the batch execution order** (rank 2). Untouched. See
   `S3-next.md`. Each new test says so in its docstring rather than implying coverage.
 - **Ids colliding across *different* assistant messages in one transcript.** Out of scope — see R3.
@@ -374,7 +402,7 @@ named-non-Administrator-user rule does not apply — stated explicitly rather th
 | **AT8** | `test_the_four_reviewed_functions_were_not_touched` | imports `TestTheLoadBearingFunctionsAreUntouched` from `flow.tests.test_deny_stops_batch` and re-asserts its `BASELINE_DIGESTS` against the engine on disk | change one character inside `_invoke` → red. **This is a constraint check, not an acceptance test of S17**: it is green before and after this change and no S17 edit can move it, and the existing `test_the_four_functions_are_byte_identical_to_their_reviewed_form` (`:378`) catches the same mutation with its own control at `:386`. Kept only so the constraint is visible in this spec's own file. *(Review F8: v1 imported a module-level name that does not exist and counted this as criterion 8.)* |
 | **AT9** | `test_the_refusal_names_no_platform_vendor_or_model` | the raised message from **both** D2 and D3, lower-cased, contains none of `frappe`, `erpnext`, `mariadb`, `openai`, `anthropic`, `gpt-`, `claude`; and the control — that the assertion can fail — by running the same check over a string that does contain one | put `frappe` in the refusal literal → red |
 | **AT10** | `test_two_calls_with_no_id_are_refused_like_any_other_collision` | two calls with `id=None`, and separately two with `id=""`, are both refused and neither tool runs — the two shapes a provider actually produces (`flow/lib/model.py:244`, `:185`) | restore v1's `if not isinstance(id, str): continue` skip → the tool runs twice. **Inverted from v1**, which asserted the opposite and pinned the bypass open (review F1) |
-| **AT10b** | `test_a_single_call_with_no_id_is_unchanged` | the control for AT10 and for the non-goal: **one** call with `id=None` is not refused and behaves exactly as today | make `_indistinguishable_tool_call` refuse any non-string id outright → red |
+| **AT10b** | `test_a_single_call_with_no_id_is_refused_as_well` | **INVERTED by the owner, run 11b (2026-09-23)** — **one** call with `id=None` (and, in `TestAReplyWithNoUsableReferenceIsRefusedBeforeItIsStored`, with `id=""`) is refused before the reply is stored and nothing runs; the sentence raised is `_UNFILEABLE_CALL`, not `_UNANSWERABLE_TURN`. Its old control role is rehomed to AT10c and to `test_the_control_a_usable_reference_still_runs`, which pin that a usable reference still executes. *(v2's row read: "the control for AT10 and for the non-goal: one call with `id=None` is not refused and behaves exactly as today", with the mutation "make `_indistinguishable_tool_call` refuse any non-string id outright → red" — the shipped behaviour, which is why the row had to move rather than stand.)* | delete the `if NO_CALL_REFERENCE in references: raise ValueError(_UNFILEABLE_CALL)` branch from `_assistant_message` → the single call executes and its result is filed under nothing → red |
 | **AT10c** | `test_ids_differing_only_by_case_or_whitespace_are_two_answerable_calls` | `"c1"`/`"C1"` and `"c1"`/`"c1 "` both execute; no raise | add `.strip().lower()` to D1's comparison → red. Pins that no normalisation creeps in, since nothing downstream normalises either (review F14) |
 | **AT11** | *(in `evals/tests/test_runner.py`)* `test_a_scenario_that_expects_a_refusal_passes_on_it`, `test_a_scenario_that_expects_a_refusal_fails_on_the_wrong_one`, `test_a_raise_with_no_expectation_still_fails`, `test_a_forbidden_word_in_the_refusal_fails_even_when_raises_matched` | D4's four branches, calling `refusal_failures(expect, error)` directly — **no engine import**, which is what lets these run under `python3 -m unittest discover -s evals/tests -t .` as both eval test modules' docstrings require | remove the `expect.get("raises")` branch → the first goes red while the third stays green; remove the `absent_text` application → the fourth goes red *(review F4, F5: v1 said "built on `Result` objects directly", which cannot reach `run_scenario`'s `except` branch at all)* |
 
@@ -522,7 +550,11 @@ entries (the builder may only flip `passes`):
 1. Two tool calls in one response sharing an id raise before any tool is invoked.
 2. Two tool calls in one response that carry no usable id — `None` or `""` — are refused the same way,
    and neither runs.
-3. A single call carrying no id is unchanged (control for 2).
+3. ~~A single call carrying no id is unchanged (control for 2).~~ **WITHDRAWN by the owner, run 11b
+   (2026-09-23) — see "Non-goals".** The shipped engine refuses it. The entry may not be reworded or
+   removed (`features.json` allows only `passes` to be flipped), so entry 3 there is flipped to
+   `false`: it is a record that the engine no longer does what that sentence says, which is the
+   decision, not a defect. What it used to control for is covered by entries 4, 7 and 8.
 4. Ids differing only by case or whitespace are two answerable calls and both execute (control).
 5. The colliding assistant message never enters the transcript.
 6. The refusal is identical in the streamed loop.
