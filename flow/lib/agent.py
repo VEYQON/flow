@@ -325,6 +325,28 @@ class Agent:
 		approval_keys = _approval_question_keys(asked)
 		question_keys = _all_question_keys(asked)
 		have_record = bool(asked)
+		# The turn the person answered has to be the turn this is about to act on, and `live_from`
+		# alone cannot promise that. It is positional, but the position is read off which calls
+		# still lack a result, and `has_result` is flat over the whole transcript — so a live call
+		# whose reference was ALREADY USED by a finished call counts answered, drops out of
+		# `pending`, and takes its whole turn out of the reckoning. The last turn with anything
+		# unanswered is then an older, abandoned one, `index >= live_from` holds for its calls, and
+		# one of them RAN — announced with the model's own arguments — on an approval the person
+		# gave for something else, while the action they did approve got no result at all. A
+		# provider hands us these references verbatim and scopes them to nothing, and the model can
+		# see, in the transcript it is given, which of them already have results.
+		#
+		# Nothing here can tell those two turns apart (the review's F1-1: pairing each result with
+		# the turn it follows is a real change, not this one), so refuse rather than guess.
+		#
+		# `approval_keys`, never `question_keys`: a call a person was asked to APPROVE has not run,
+		# so on any sound transcript it is still pending, and its absence from the live slice is
+		# therefore a signal rather than a shrug. A tool's OWN question is not that — its call
+		# already has a result — and gating on one would refuse sound resumes. With no record there
+		# is nothing to check against, and that path already runs nothing it was not asked about.
+		live_ids = {call.id for call in pending[live_from:]}
+		if have_record and approval_keys and approval_keys.isdisjoint(live_ids):
+			raise ValueError(_UNRESOLVABLE_PAUSE)
 		resolved: list[tuple[ToolCall, str, bool]] = []
 		for index, call in enumerate(pending):
 			answer = answers.get(call.id)
@@ -768,6 +790,17 @@ _UNANSWERABLE_TURN = (
 # carries neither.
 _UNFILEABLE_CALL = (
 	"An action in this reply arrived with nothing to answer or record it by. Nothing was carried out."
+)
+
+# The third sentence of the family, and it is about a STORED transcript rather than a new reply. A
+# reference the model reused from a call that already has a result takes the live turn out of the
+# reckoning `live_from` is computed from, and then nothing in the transcript can say which turn the
+# person just answered. Its own sentence again, for the reason `_UNFILEABLE_CALL` has one: nothing
+# collided inside a single turn, and no reply was refused before it was stored — this is an answer
+# arriving for a conversation whose record can no longer be read, and saying so is all that is true.
+_UNRESOLVABLE_PAUSE = (
+	"An action still waiting here cannot be told apart from one already carried out in this "
+	"conversation, so nothing was carried out. Please ask again."
 )
 
 

@@ -21,7 +21,15 @@ from typing import Any
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
-from flow.lib.agent import CONFIRM_ANSWER_OPTIONS, Agent, Done, Question, ToolEnded, ToolStarted
+from flow.lib.agent import (
+	_UNRESOLVABLE_PAUSE,
+	CONFIRM_ANSWER_OPTIONS,
+	Agent,
+	Done,
+	Question,
+	ToolEnded,
+	ToolStarted,
+)
 from flow.lib.model import ChatResponse, ToolCall, ToolCallBegin
 from flow.lib.tool import tool
 
@@ -78,6 +86,26 @@ def _calls(*specs: tuple[str, dict[str, Any], str]) -> ChatResponse:
 		finish_reason="tool_calls",
 		usage={},
 	)
+
+
+def _assistant_turn(specs: list[tuple[str, dict[str, Any], str]]) -> dict[str, Any]:
+	"""One stored assistant turn, in the shape a transcript holds it.
+
+	Hand-built rather than produced by a run, because the shapes below are what a STORED transcript
+	can hold after a run was stopped or failed, and no scripted run reaches some of them.
+	"""
+	return {
+		"role": "assistant",
+		"content": None,
+		"tool_calls": [
+			{
+				"id": call_id,
+				"type": "function",
+				"function": {"name": name, "arguments": json.dumps(args)},
+			}
+			for name, args, call_id in specs
+		],
+	}
 
 
 def _tool_results(messages: list[dict[str, Any]]) -> dict[str, str]:
@@ -874,6 +902,103 @@ class TestAnAbandonedTurnNeverExecutesLater(UnitTestCase):
 			"",
 			"an abandoned gated call was told an approval no longer applied to it",
 		)
+
+	def _a_reference_the_history_already_answered(self, books: _Books, live_id: str, old_id: str):
+		"""An abandoned turn, then a FINISHED turn, then a live gated pause whose call reuses the
+		finished turn's reference. Built by hand: the point is the shape of a stored transcript, and
+		a provider hands us these references verbatim (`flow/lib/model.py` stores `id` as it comes).
+		"""
+		agent = Agent(model=FakeModel([_final("unreachable")]), tools=books.tools)
+		messages = [
+			{"role": "user", "content": "read the ledger"},
+			# The wreckage: a turn that paused and was then stopped, so its calls stay pending for ever.
+			_assistant_turn([("read_balance", {"account": "victim"}, "w1")]),
+			{"role": "user", "content": "read alice"},
+			_assistant_turn([("read_balance", {"account": "alice"}, old_id)]),
+			{"role": "tool", "tool_call_id": old_id, "content": "120"},
+			{"role": "user", "content": "pay bob"},
+			_assistant_turn([("send_money", {"to": "bob", "amount": 5}, live_id)]),
+		]
+		asked = [
+			Question(
+				prompt="Approve `send_money`?",
+				options=list(CONFIRM_ANSWER_OPTIONS),
+				allow_other=True,
+				key=live_id,
+			)
+		]
+		return agent, messages, asked
+
+	def test_a_reference_the_history_already_answered_refuses_the_resume_and_runs_nothing(self):
+		"""S1 (run 11b security review, HIGH, observed). The positional split is defeated by a
+		reference, which is the one thing it was built not to trust.
+
+		`live_from` is positional, but the position is computed from which calls still lack a result,
+		and `has_result` is a flat set over the whole transcript. So a live gated call whose reference
+		was already used by a FINISHED call counts answered: it drops out of `pending`, the last turn
+		with anything unanswered is then an older, abandoned one, and the tail — the wreckage — is
+		taken for the live turn. It was announced with the model's own arguments and it RAN, on an
+		approval the person gave for something else, while the action they did approve got no result
+		at all. An ungated neighbour of an abandoned pause is a tool of the model's choosing with
+		arguments of the model's choosing.
+
+		Nothing in the transcript can tell the two turns apart — that is F1-1, and its fix is not a
+		small one — so this refuses instead of guessing. Fail closed: the approval is lost and the
+		person is told, which is the outcome this engine already produces for a pause it cannot read.
+		"""
+		books = _Books()
+		agent, messages, asked = self._a_reference_the_history_already_answered(books, "c1", "c1")
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(messages, {"c1": "Approve"}, asked=asked)
+
+		self.assertEqual(str(caught.exception), _UNRESOLVABLE_PAUSE)
+		self.assertEqual(books.read, [], "a call from a turn the person abandoned ran on their approval")
+		self.assertEqual(books.wrote, [])
+
+	def test_the_streamed_resume_of_that_shape_announces_nothing_either(self):
+		"""The same refusal on the path a person watches: no card is opened before it raises."""
+		books = _Books()
+		agent, messages, asked = self._a_reference_the_history_already_answered(books, "c1", "c1")
+
+		seen: list[Any] = []
+		with self.assertRaises(ValueError):
+			for event in agent.resume(messages, {"c1": "Approve"}, asked=asked, stream=True):
+				seen.append(event)
+
+		self.assertEqual([e for e in seen if isinstance(e, ToolStarted)], [])
+		self.assertEqual(books.read, [])
+
+	def test_the_same_shape_made_of_empty_references_is_refused_too(self):
+		"""S1's second door, and the one this run opened. A stored result whose reference is `""`
+		was refused outright by the structural check until run 11b let the replay paths read one —
+		so this transcript used to raise before anything ran, and then it ran the wreckage instead.
+		The refusal has to cover the shape the relaxation made reachable, not only the tidy one.
+		"""
+		books = _Books()
+		agent, messages, asked = self._a_reference_the_history_already_answered(books, "", "")
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(messages, {"": "Approve"}, asked=asked)
+
+		self.assertEqual(str(caught.exception), _UNRESOLVABLE_PAUSE)
+		self.assertEqual(books.read, [])
+		self.assertEqual(books.wrote, [])
+
+	def test_the_control_a_live_reference_of_its_own_still_executes_the_approval(self):
+		"""The control, and it is what stops the refusal above being written too wide: the identical
+		transcript with one token changed — the live call carries its own reference — approves, runs
+		the write once, and closes the abandoned call out with nothing.
+		"""
+		books = _Books()
+		agent, messages, asked = self._a_reference_the_history_already_answered(books, "c9", "c1")
+		agent.model = FakeModel([_final("paid bob")])
+
+		resumed = agent.resume(messages, {"c9": "Approve"}, asked=asked)
+
+		self.assertEqual(books.wrote, [{"to": "bob", "amount": 5}])
+		self.assertEqual(books.read, [], "the abandoned turn's call must still not run")
+		self.assertEqual(_tool_results(resumed.messages)["w1"], "")
 
 	def test_an_abandoned_call_is_not_announced_on_a_streamed_resume(self):
 		"""The streamed half of the same rule, and the one a person actually sees.
