@@ -264,8 +264,10 @@ class Agent:
 		self, messages: list[dict[str, Any]], answers: dict[str, Any], asked: list[Any] | None = None
 	) -> tuple[list[dict[str, Any]], list[tuple[ToolCall, str, bool]]]:
 		"""Append a tool result for each pending call. Returns the new messages plus the
-		(call, content, announce) triples resolved, so a streaming resume can replay them as
-		events. `announce` is true for a call no question was ever raised for — one held back for
+		(call, content, announce) triples a streaming resume may replay as events — one per call
+		of the turn being resumed, and none for an earlier, abandoned turn, whose calls are
+		resolved in `messages` but described to nobody: the client holds no part for them.
+		`announce` is true for a call no question was ever raised for — one held back for
 		the group. No card was drawn for it when the run paused, because it was not starting then;
 		the client is told about it here, where it is, with the arguments that are about to run —
 		and not at all when the answers hold a denial, because then it is not about to run either.
@@ -407,7 +409,17 @@ class Agent:
 			else:
 				content = _serialize_tool_result(answer)
 			messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
-			resolved.append((call, content, announce))
+			# The record gets every resolution; the CLIENT gets the turn it is answering. A call
+			# before `live_from` belongs to a turn nobody is resuming: it has no card — none was
+			# drawn when its own run was abandoned, and `announce` is false for it here — so an
+			# ending replayed for it is a result for a part the client does not hold. Both shipped
+			# clients drop exactly that, which is why nothing looked broken; the invariant a
+			# consumer is entitled to rely on, that every `tool_ended` in a stream is one the same
+			# stream started or one the person was asked about, was false all the same. Dropped
+			# from the events only: `messages` above still closes the call out with nothing, and
+			# the stored record is byte-for-byte what it was.
+			if index >= live_from:
+				resolved.append((call, content, announce))
 		return messages, resolved
 
 	def _resolve_confirmation(self, call: ToolCall, answer: Any) -> str:

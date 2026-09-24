@@ -904,6 +904,44 @@ class TestAnAbandonedTurnNeverExecutesLater(UnitTestCase):
 		self.assertEqual(books.read, [])
 		self.assertEqual(books.wrote, [{"to": "carol", "amount": 5}])
 
+	def test_an_abandoned_call_closes_no_card_either_on_a_streamed_resume(self):
+		"""F2-2. The other half of the same frame: the start was gated, the end never was.
+
+		`announce` decided whether a `tool_started` went out, and the `tool_ended` beside it went
+		out unconditionally. So a resume replayed an ending for a call from a turn nobody is
+		resuming — a call that did not run, has no card, and is not part of the message block the
+		client is streaming into. Both shipped clients drop it (a result for a part they do not
+		hold), so nothing is visibly broken; the invariant a client is entitled to rely on is
+		nonetheless false, and a consumer that draws a card ON a result rather than dropping it
+		would draw the abandoned action at the end of an approval it had nothing to do with.
+
+		What the person is answering is one turn. That turn is what the resumed stream describes:
+		every id it ends either started in this same stream, or is one of the questions the person
+		has been looking at. The abandoned turn is still closed out in `messages` — the record is
+		unchanged, and `test_a_held_back_call_from_an_abandoned_pause_does_not_run_on_a_later_approval`
+		pins that — it is only no longer narrated to a client that has nowhere to put it.
+		"""
+		books = _Books()
+		agent, messages, asked = self._abandoned_then_a_new_pause(books)
+		agent.model = FakeModel([_final("paid carol")])
+
+		events = list(agent.resume(messages, {"z9": "Approve"}, asked=asked, stream=True))
+
+		started = [e.id for e in events if isinstance(e, ToolStarted)]
+		ended = [e.id for e in events if isinstance(e, ToolEnded)]
+		# Before the fix this read ['r1', 'c2', 'z9']: two endings for calls the person never saw.
+		self.assertEqual(ended, ["z9"], "an ending was replayed for a call from an abandoned turn")
+		self.assertLessEqual(
+			set(ended),
+			set(started) | {q.key for q in asked},
+			"a tool_ended arrived for an id with no card: not started here, and never asked about",
+		)
+		# The record is untouched: the abandoned call is still resolved with nothing in `messages`.
+		resumed = next(e for e in events if isinstance(e, Done)).result
+		self.assertEqual(_tool_results(resumed.messages)["r1"], "")
+		self.assertEqual(books.read, [])
+		self.assertEqual(books.wrote, [{"to": "carol", "amount": 5}])
+
 	def test_with_no_question_record_a_streamed_resume_announces_nothing_either(self):
 		"""The second instance of the same root cause. With `asked=None` — a supported,
 		documented call — `question_keys` is empty, so every resolved call looked un-asked-about
