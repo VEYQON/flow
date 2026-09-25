@@ -350,13 +350,23 @@ class Agent:
 		# and let all of the above happen exactly as it did before the guard existed. Including
 		# `question_keys` refuses no sound resume, for the same reason it closes this one.
 		#
-		# Folded through `_call_reference` on both sides, like every other rule that asks this
-		# question: a stored key the reader cannot use is not an absent question, and treating it
-		# as one skipped the guard by a second route. With no record there is nothing to check
-		# against, and that path already runs nothing it was not asked about.
-		live_ids = {_call_reference(call.id) for call in pending[live_from:]}
+		# An UNUSABLE reference is subtracted, never folded to a value that matches itself, and
+		# the record's emptiness is read from `asked` rather than from its keys. Folding both
+		# sides of this test was the obvious-looking way to fold it, and it was wrong in the one
+		# way that matters: `_call_reference` exists to say a reference cannot answer anything, so
+		# making two of them equal turned "neither of these can be identified" into "these are the
+		# same call", skipped the guard, and ran the wreckage on a transcript the narrower version
+		# had refused (the 11d review's M1, executed). A reference that identifies nothing is not
+		# evidence that the record and the live turn are the same turn.
+		#
+		# `have_record` alone, with no `and recorded`: a pause whose keys are ALL unusable recorded
+		# questions all the same, and cannot say which turn they were about — which is the case to
+		# refuse, not the case to wave through. That short-circuit is what C1 was made of, and it
+		# is gone rather than narrowed. With no record at all there is nothing to check against,
+		# and that path already runs nothing it was not asked about.
+		live_ids = {_call_reference(call.id) for call in pending[live_from:]} - {NO_CALL_REFERENCE}
 		recorded = approval_keys | question_keys
-		if have_record and recorded and recorded.isdisjoint(live_ids):
+		if have_record and recorded.isdisjoint(live_ids):
 			raise ValueError(_UNRESOLVABLE_PAUSE)
 		resolved: list[tuple[ToolCall, str, bool]] = []
 		for index, call in enumerate(pending):
@@ -1241,17 +1251,19 @@ def _all_question_keys(asked: list[Any] | None) -> frozenset[str]:
 	and its call is not deferred. Both are read from the record for the same reason — the runtime
 	resuming a run is not always the one that paused it.
 
-	Every key folds through `_call_reference`, so a key the reader cannot use is still A KEY here.
-	A question was raised for that call whatever its reference looked like, and dropping it made
-	the record read as though no question had been raised at all — which skipped the live-slice
-	guard in `_prepare_resume` and let an abandoned turn's call run (the review's C3). The sentinel
-	is a string no raw key comparison below can match, so the three `call.id not in question_keys`
-	tests decide exactly what they decided before: a raw `None` id was never equal to it either.
+	A key the reader cannot use is dropped, and this set is therefore NOT the answer to "did the
+	record hold a question". It was briefly folded through `_call_reference` so that it would be,
+	and that was wrong twice over: the sentinel is a real string, a stored transcript can hold it
+	as a literal `tool_call_id`, and every reader below compares a RAW `call.id` — so the fold
+	moved `announce` and the ladder's own branches, one of them into writing a caller's answer
+	text in as a tool's result, which is the harm that branch exists to prevent (the 11d review's
+	L1, executed). The live-slice guard asks its question of `asked` itself instead.
 	"""
 	keys: set[str] = set()
 	for question in asked or []:
 		key = question.get("key") if isinstance(question, dict) else getattr(question, "key", None)
-		keys.add(_call_reference(key))
+		if isinstance(key, str):
+			keys.add(key)
 	return frozenset(keys)
 
 

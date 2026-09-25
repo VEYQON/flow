@@ -1791,3 +1791,61 @@ class TestAPauseThatRaisedNoApprovalQuestionIsHeldToTheSameRule(UnitTestCase):
 
 		self.assertEqual(str(caught.exception), _UNRESOLVABLE_PAUSE)
 		self.assertEqual(claims.read, [], "the wreckage ran because a key the record held was dropped")
+
+	def test_an_unusable_reference_is_not_an_identity_that_satisfies_the_guard(self):
+		"""M1 (run 11d security review, MEDIUM, EXECUTED). The regression the first draft of this
+		fix introduced, and the reason the sentinel is subtracted rather than compared.
+
+		`_call_reference` exists to say a reference is UNUSABLE. Folding it onto BOTH sides of a
+		set test turned "unusable" into a value that matches ITSELF: an unusable recorded key and
+		an unusable live call id both became the sentinel, the sets intersected, and the guard was
+		skipped — on a transcript 3c10043 refused. The abandoned turn's `read_balance` then ran on
+		the model's own `{"account": "victim"}` and was announced with them, while the call the
+		person approved got no result. A reference that cannot answer anything cannot be evidence
+		that the record and the live turn are the same turn.
+		"""
+		claims = _Claims()
+		agent = Agent(model=FakeModel([_final("unreachable")]), tools=claims.tools)
+		messages = [
+			{"role": "user", "content": "read the ledger"},
+			_assistant_turn([("read_balance", {"account": "victim"}, None)]),
+			{"role": "user", "content": "file the claim"},
+			_assistant_turn([("file_claim", {"reference": "AB-1"}, "c1")]),
+			{"role": "tool", "tool_call_id": "c1", "content": "already done"},
+		]
+		asked = [
+			Question(prompt="Approve?", options=list(CONFIRM_ANSWER_OPTIONS), allow_other=True, key="c1"),
+			Question(prompt="Which address?", options=["Yes", "No"], allow_other=True, key=None),
+		]
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(messages, {"c1": "Approve"}, asked=asked)
+
+		self.assertEqual(str(caught.exception), _UNRESOLVABLE_PAUSE)
+		self.assertEqual(
+			claims.read, [], "the abandoned turn's call ran because two unusable references matched"
+		)
+
+	def test_and_the_ladder_still_decides_a_literal_sentinel_reference_as_it_always_did(self):
+		"""L1 (same review, LOW, EXECUTED). The other half of the same mistake, one branch down.
+
+		`question_keys` is read by `announce` and by three branches of the ladder, all comparing a
+		RAW `call.id`. A stored transcript can hold the literal string `"<none>"` as an id, and that
+		string IS the sentinel — so folding the keys moved two of those decisions, and one of them
+		wrote the CALLER'S OWN ANSWER TEXT into the transcript as that tool's result, which is the
+		exact harm the branch above it exists to prevent. The keys are no longer folded; the record
+		being non-empty is what the guard reads, and it reads it from `asked`, not from a sentinel.
+		"""
+		claims = _Claims()
+		agent = Agent(model=FakeModel([_final("unreachable")]), tools=claims.tools)
+		messages = [
+			{"role": "user", "content": "read the ledger"},
+			_assistant_turn([("read_balance", {"account": "victim"}, "<none>")]),
+		]
+		asked = [Question(prompt="Which address?", options=["Yes", "No"], allow_other=True, key=None)]
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(messages, {"<none>": "INJECTED TEXT AS TOOL RESULT"}, asked=asked)
+
+		self.assertEqual(str(caught.exception), _UNRESOLVABLE_PAUSE)
+		self.assertEqual(claims.read, [])
