@@ -339,13 +339,24 @@ class Agent:
 		# Nothing here can tell those two turns apart (the review's F1-1: pairing each result with
 		# the turn it follows is a real change, not this one), so refuse rather than guess.
 		#
-		# `approval_keys`, never `question_keys`: a call a person was asked to APPROVE has not run,
-		# so on any sound transcript it is still pending, and its absence from the live slice is
-		# therefore a signal rather than a shrug. A tool's OWN question is not that — its call
-		# already has a result — and gating on one would refuse sound resumes. With no record there
-		# is nothing to check against, and that path already runs nothing it was not asked about.
-		live_ids = {call.id for call in pending[live_from:]}
-		if have_record and approval_keys and approval_keys.isdisjoint(live_ids):
+		# EVERY key the record holds, of either kind, and the reason is one fact about both: a
+		# question of either kind belongs to a call that is still PENDING, so its absence from the
+		# live slice is a signal rather than a shrug. An approval's call has not run. A tool's own
+		# question is filed no differently — `_loop_stream` `continue`s before the line that writes
+		# that call's tool result, so it has none either, which the ladder's own last branch below
+		# relies on. This comment said the opposite until run 11d ("its call already has a result"),
+		# and gated the guard on `approval_keys` alone on the strength of it; a pause that raised no
+		# APPROVAL question then made `approval_keys` empty, short-circuited the whole guard away,
+		# and let all of the above happen exactly as it did before the guard existed. Including
+		# `question_keys` refuses no sound resume, for the same reason it closes this one.
+		#
+		# Folded through `_call_reference` on both sides, like every other rule that asks this
+		# question: a stored key the reader cannot use is not an absent question, and treating it
+		# as one skipped the guard by a second route. With no record there is nothing to check
+		# against, and that path already runs nothing it was not asked about.
+		live_ids = {_call_reference(call.id) for call in pending[live_from:]}
+		recorded = approval_keys | question_keys
+		if have_record and recorded and recorded.isdisjoint(live_ids):
 			raise ValueError(_UNRESOLVABLE_PAUSE)
 		resolved: list[tuple[ToolCall, str, bool]] = []
 		for index, call in enumerate(pending):
@@ -1197,6 +1208,15 @@ def _approval_question_keys(asked: list[Any] | None) -> frozenset[str]:
 	usually reading it back from storage. Anything it cannot read is simply not an approval
 	question here: the branch this guards only ever withholds, so failing to recognise one costs
 	today's behaviour and never an unasked execution.
+
+	That safety argument covers what this set WITHHOLDS, and no longer covers every caller: since
+	run 11b a resume is also REFUSED when the record's keys are absent from the turn about to be
+	acted on. A tool that returns a question of its own carrying these two options is
+	indistinguishable from an engine approval here, so its key lands in this set (the review's
+	C4). The direction is fail-closed — a sound resume refused, nothing run — and since run 11d
+	that guard reads `_all_question_keys` as well, so such a key is in its set either way and
+	recognising it wrongly changes nothing there. Marking engine-authored approvals explicitly,
+	rather than inferring them from their options, is the real answer and wants a spec.
 	"""
 	keys: set[str] = set()
 	for question in asked or []:
@@ -1220,12 +1240,18 @@ def _all_question_keys(asked: list[Any] | None) -> frozenset[str]:
 	is the wrong question for a call that was HELD BACK: a tool's own question is not an approval
 	and its call is not deferred. Both are read from the record for the same reason — the runtime
 	resuming a run is not always the one that paused it.
+
+	Every key folds through `_call_reference`, so a key the reader cannot use is still A KEY here.
+	A question was raised for that call whatever its reference looked like, and dropping it made
+	the record read as though no question had been raised at all — which skipped the live-slice
+	guard in `_prepare_resume` and let an abandoned turn's call run (the review's C3). The sentinel
+	is a string no raw key comparison below can match, so the three `call.id not in question_keys`
+	tests decide exactly what they decided before: a raw `None` id was never equal to it either.
 	"""
 	keys: set[str] = set()
 	for question in asked or []:
 		key = question.get("key") if isinstance(question, dict) else getattr(question, "key", None)
-		if isinstance(key, str):
-			keys.add(key)
+		keys.add(_call_reference(key))
 	return frozenset(keys)
 
 

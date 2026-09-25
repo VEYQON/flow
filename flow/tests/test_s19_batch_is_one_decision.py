@@ -1593,3 +1593,201 @@ class TestARealTriggerRunRefusesInsteadOfParking(IntegrationTestCase):
 		refused = json.loads(results[-1])
 		self.assertEqual(refused["status"], "not_executed")
 		self.assertEqual(refused["reason"], "unattended")
+
+
+class _Claims:
+	"""An ungated read, and an ungated tool that returns a QUESTION of its own.
+
+	The second is the pause `_approval_question_keys` cannot see. Nobody was asked to APPROVE
+	anything: the tool's body ran and handed back a question carrying its own options, so the
+	record of that pause holds a key whose options are not `CONFIRM_ANSWER_OPTIONS`.
+
+	No tool shipped in this repository returns a `Question` today, which is why C1 is latent
+	rather than live — but the engine supports the path in full (`_loop_stream`, "The second way a
+	run pauses"), and a bare callable makes an app-side one a one-liner. A defect reachable by
+	anyone writing an ordinary tool is a defect.
+	"""
+
+	def __init__(self):
+		self.read: list[dict[str, Any]] = []
+		self.filed: list[dict[str, Any]] = []
+		claims = self
+
+		@tool
+		def read_balance(account: str) -> str:
+			"""Read an account balance."""
+			claims.read.append({"account": account})
+			return "120"
+
+		@tool
+		def file_claim(reference: str) -> Any:
+			"""File a claim."""
+			claims.filed.append({"reference": reference})
+			return Question(
+				prompt="Which address should the claim go to?",
+				options=["Yes", "No, use the other address"],
+				allow_other=True,
+			)
+
+		self.read_balance = read_balance
+		self.file_claim = file_claim
+		self.tools = [read_balance, file_claim]
+
+
+class TestAPauseThatRaisedNoApprovalQuestionIsHeldToTheSameRule(UnitTestCase):
+	"""C1 (REVIEW-FLOW-11c, HIGH). The live-slice guard read the record for APPROVAL questions
+	only, so a pause that raised none short-circuited it away and S1 returned verbatim.
+
+	A run pauses two ways: the engine asks a person to approve a gated call, or a tool returns a
+	`Question` of its own. The guard was written `if have_record and approval_keys and ...`, and
+	`_approval_question_keys` keeps a key only when its options are exactly the engine's two — so
+	on the second kind of pause `approval_keys` is empty, the `and` short-circuits, and every rule
+	below is the code the security reviewer broke: an abandoned turn's ungated call RUNS, with the
+	model's own arguments, announced on the screen where a person had just answered about
+	something else, while the action they answered about gets no result at all.
+
+	The record says a pause happened and which calls it was about. Which KIND of question raised
+	it changes nothing about that, and a question of either kind belongs to a call that is still
+	pending — the tool-question path `continue`s before the line that files a result (C2), so its
+	call has none. So the rule is one rule: if the record names calls and none of them is in the
+	turn about to be acted on, the record cannot say which turn this answer belongs to.
+	"""
+
+	def _a_tool_question_pause(self, claims: _Claims, live_id: str, old_id: str, *, approval=False):
+		"""The reviewer's S1 transcript with one token changed: the live pause is a question the
+		TOOL returned, not an approval. Hand-built, because that is the shape a STORED transcript
+		holds after a run was stopped — and a provider hands these references back verbatim.
+		"""
+		agent = Agent(model=FakeModel([_final("unreachable")]), tools=claims.tools)
+		messages = [
+			{"role": "user", "content": "read the ledger"},
+			# The wreckage: a turn that paused and was then stopped, so its call stays pending for ever.
+			_assistant_turn([("read_balance", {"account": "victim"}, "w1")]),
+			{"role": "user", "content": "read alice"},
+			_assistant_turn([("read_balance", {"account": "alice"}, old_id)]),
+			{"role": "tool", "tool_call_id": old_id, "content": "120"},
+			{"role": "user", "content": "file the claim"},
+			_assistant_turn([("file_claim", {"reference": "AB-1"}, live_id)]),
+		]
+		options = list(CONFIRM_ANSWER_OPTIONS) if approval else ["Yes", "No, use the other address"]
+		asked = [
+			Question(
+				prompt="Which address should the claim go to?",
+				options=options,
+				allow_other=True,
+				key=live_id,
+			)
+		]
+		return agent, messages, asked
+
+	def test_a_pause_with_no_approval_question_refuses_the_resume_and_runs_nothing(self):
+		"""(a) C1 itself. Walked against the head bytes before it was written, and observed red:
+		`ToolStarted(id='w1', name='read_balance', arguments={'account': 'victim'})` went out and
+		`read_balance` ran on `{"account": "victim"}` — the model's own argument — because
+		`approval_keys` was empty and the guard was never evaluated.
+		"""
+		claims = _Claims()
+		agent, messages, asked = self._a_tool_question_pause(claims, "c1", "c1")
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(messages, {"c1": "Yes"}, asked=asked)
+
+		self.assertEqual(str(caught.exception), _UNRESOLVABLE_PAUSE)
+		self.assertEqual(
+			claims.read,
+			[],
+			"a call from a turn the person abandoned ran on an answer given for something else",
+		)
+		self.assertEqual(claims.filed, [], "nothing in the live turn re-ran either")
+
+	def test_and_that_refusal_announces_nothing_on_the_streamed_path(self):
+		"""(a), on the path a person watches: no card is opened before it raises. The defect drew
+		the abandoned call's model-authored arguments onto the screen immediately after the
+		person's answer, which is the E5-class defect c7c87dc and 65f18fb removed.
+		"""
+		claims = _Claims()
+		agent, messages, asked = self._a_tool_question_pause(claims, "c1", "c1")
+
+		seen: list[Any] = []
+		with self.assertRaises(ValueError):
+			for event in agent.resume(messages, {"c1": "Yes"}, asked=asked, stream=True):
+				seen.append(event)
+
+		self.assertEqual([e for e in seen if isinstance(e, ToolStarted)], [])
+		self.assertEqual([e for e in seen if isinstance(e, ToolEnded)], [])
+		self.assertEqual(claims.read, [])
+
+	def test_the_same_shape_with_an_approval_question_is_refused_exactly_as_before(self):
+		"""(b) The regression pin. This shape already refused at 3c10043 — it is the half of the
+		rule the narrow guard did cover — and widening the guard must not change it by one byte.
+		Green before the fix and green after it, and that is the point: the fix ADDS a case, it
+		does not move the one that worked.
+		"""
+		claims = _Claims()
+		agent, messages, asked = self._a_tool_question_pause(claims, "c1", "c1", approval=True)
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(messages, {"c1": "Approve"}, asked=asked)
+
+		self.assertEqual(str(caught.exception), _UNRESOLVABLE_PAUSE)
+		self.assertEqual(claims.read, [])
+		self.assertEqual(claims.filed, [])
+
+	def test_the_control_a_sound_tool_question_pause_is_not_refused(self):
+		"""(c) The control that proves the fix is not over-broad, and the one a mutation has to
+		keep green. The identical transcript with one token changed — the live call carries its
+		own reference — resolves the tool's question with the person's answer, runs nothing extra,
+		and closes the abandoned call out with nothing, exactly as it did before the fix.
+
+		This is also the evidence for C2's correction: if a tool-own-question call really "already
+		had a result" it would not be pending, `live_ids` would not hold it, and including
+		`question_keys` in the guard would refuse THIS resume. It does not.
+		"""
+		claims = _Claims()
+		agent, messages, asked = self._a_tool_question_pause(claims, "c9", "c1")
+		agent.model = FakeModel([_final("filed")])
+
+		resumed = agent.resume(messages, {"c9": "Yes"}, asked=asked)
+
+		results = _tool_results(resumed.messages)
+		self.assertEqual(results["c9"], "Yes", "the answer is the tool question's result, as ever")
+		self.assertEqual(results["w1"], "", "the abandoned turn's call is still closed out with nothing")
+		self.assertEqual(claims.read, [], "the abandoned turn's call must still not run")
+		self.assertEqual(claims.filed, [], "the tool's body already ran; a resume must not run it again")
+
+	def test_a_tool_that_asks_its_own_question_leaves_its_call_pending(self):
+		"""C2 (MEDIUM). The one-line assertion that pins the fact the old comment denied.
+
+		The comment justifying `approval_keys, never question_keys` said a tool's own question
+		"already has a result". `_loop_stream` `continue`s before the only line that files one, so
+		the call has NO tool result and is pending exactly like an approval's call. That false
+		premise is what left C1 open, and this assertion is what stops it being written again.
+		"""
+		claims = _Claims()
+		agent = Agent(
+			model=FakeModel([_calls(("file_claim", {"reference": "AB-1"}, "c1"))]), tools=claims.tools
+		)
+
+		paused = agent.run("file the claim")
+
+		self.assertTrue(paused.paused)
+		self.assertNotIn("c1", _tool_results(paused.messages))
+
+	def test_an_approval_question_whose_key_is_unusable_still_refuses_the_wreckage(self):
+		"""C3 (LOW). The same door, reached by a reference rather than by a kind of question.
+
+		Both key readers drop a key that is not a usable string, so a legacy pause whose only
+		question was keyed `None` recorded, as far as the guard could see, no question at all —
+		and the guard was skipped, and the wreckage ran. Every other rule in this file folds a
+		reference through `_call_reference` for exactly this reason: one definition, so no two
+		rules disagree about what counts as usable.
+		"""
+		claims = _Claims()
+		agent, messages, asked = self._a_tool_question_pause(claims, "c1", "c1", approval=True)
+		asked[0].key = None
+
+		with self.assertRaises(ValueError) as caught:
+			agent.resume(messages, {"c1": "Approve"}, asked=asked)
+
+		self.assertEqual(str(caught.exception), _UNRESOLVABLE_PAUSE)
+		self.assertEqual(claims.read, [], "the wreckage ran because a key the record held was dropped")
