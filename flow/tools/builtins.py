@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from math import isfinite
 from typing import Any
 
 import frappe
@@ -44,7 +45,13 @@ def _for_display(value: Any, limit: int = _CONFIRM_STR_LIMIT) -> str:
 	"""
 	from flow.lib.agent import escape_for_display
 
-	text = value if isinstance(value, str) else str(value)
+	try:
+		text = value if isinstance(value, str) else str(value)
+	except (ValueError, OverflowError):
+		# Python itself refuses to render this value — a 5,000-digit integer exceeds its own
+		# integer-to-string limit. Say so rather than let the QUESTION raise: a question nobody is
+		# asked is worse than one that cannot show a value, and the arguments table shows it anyway.
+		return '"" {0}'.format(_one_line(_("(a value too long to show)")))
 	shown: list[str] = []
 	used = 0
 	for ch in text:
@@ -60,7 +67,7 @@ def _for_display(value: Any, limit: int = _CONFIRM_STR_LIMIT) -> str:
 			# carry a newline; the count is what tells a reader something was left out, so it must not
 			# be able to open a line of its own. `_render_confirm_template` flattens an
 			# administrator's sentence for exactly this reason.
-			count = " ".join(_("… ({0} characters in all)").format(len(text)).split())
+			count = _one_line(_("… ({0} characters in all)").format(len(text)))
 			return '"{0}" {1}'.format("".join(shown), count)
 		shown.append(escaped)
 		used += len(escaped)
@@ -114,7 +121,24 @@ def _display_json(value: Any, depth: int = 0) -> str:
 	if isinstance(value, bool):
 		return "true" if value else "false"
 	if isinstance(value, int | float):
-		return json.dumps(value)
+		# Shown as itself only when that is SAFE, which is not the same as being a number. Three ways
+		# it is not, all of them reachable from a model:
+		#   - a 3,000-digit integer is 3,000 characters of engine-register text on a path that skips
+		#     the cap the helper exists to apply;
+		#   - a 4,301-digit one makes `json.dumps` RAISE, and a question that cannot be composed is a
+		#     question nobody is asked;
+		#   - `NaN` and `Infinity` are not JSON at all, yet `json.loads` accepts both from model
+		#     output, so they arrive and would print unquoted, in the engine's own register.
+		# Anything that fails any of the three goes back through the helper: escaped, capped, quoted.
+		try:
+			# `isfinite` is asked only of a float: on a 5,000-digit int it raises OverflowError trying
+			# to convert, which is the same "the question raised" failure by another door.
+			shown = json.dumps(value) if isinstance(value, int) or isfinite(value) else None
+		except (ValueError, OverflowError):
+			shown = None
+		if shown is not None and len(shown) <= _CONFIRM_STR_LIMIT:
+			return shown
+		return _for_display(value)
 	return _for_display(value)
 
 
@@ -409,7 +433,9 @@ def _execute_confirm_prompt(args: dict[str, Any]) -> str:
 	the cut. So the block is bounded by a SENTENCE about its length — always, not past a threshold,
 	because the short-code case is the common one — and then shown whole.
 	"""
-	sentence = _for_display(args.get("description")) if args.get("description") else _("Run Python code")
+	sentence = (
+		_for_display(args.get("description")) if args.get("description") else _one_line(_("Run Python code"))
+	)
 	# Coerced before it is measured. `confirm_prompt` runs before the schema validates anything, so a
 	# model that sends a number here used to make the QUESTION raise — and a question that cannot be
 	# composed is a question nobody is asked, which is a worse failure than an ugly one. Nothing
@@ -424,7 +450,7 @@ def _execute_confirm_prompt(args: dict[str, Any]) -> str:
 	# but the model's own sentence, and the justification for leaving the code raw is precisely that
 	# the block is introduced AS code by someone other than the model. Flattened at use site because
 	# that is now load-bearing: a translation of this msgid must not be able to open a line.
-	introduction = " ".join(_("The code that will run, in full ({0} characters):").format(len(code)).split())
+	introduction = _one_line(_("The code that will run, in full ({0} characters):").format(len(code)))
 	return f"{sentence}\n\n{introduction}\n\n{code}"
 
 
@@ -489,6 +515,17 @@ def _summarize_names(names: list[str] | None, limit: int = 6) -> str:
 	if len(names) > limit:
 		shown += f" … +{len(names) - limit} more"
 	return shown or "—"
+
+
+def _one_line(sentence: str) -> str:
+	"""An engine sentence, flattened, whatever a translation of it contains.
+
+	Every literal in every body here is a translatable msgid, and a translation row is editable. The
+	framing is what tells a reader which words are the engine's, so a translation must not be able to
+	open a line inside it — the same reason `_render_confirm_template` flattens an administrator's
+	sentence before it is shown.
+	"""
+	return " ".join(sentence.split())
 
 
 def _doc_actions(doc: Any, meta: Any) -> dict[str, Any]:
@@ -571,11 +608,12 @@ def _apply_action(doctype: str, name: str, action: str, args: dict[str, Any]) ->
 @tool(
 	requires_confirmation=True,
 	confirm_prompt=lambda args: (
-		_("Create {0} {1} record(s):\n\n{2}").format(
+		_one_line(_("Create {0} {1} record(s):")).format(
 			len(args.get("records") or []),
 			_for_display(args.get("doctype", "?")),
-			_summarize_values((args.get("records") or [{}])[0]),
 		)
+		+ "\n\n"
+		+ _summarize_values((args.get("records") or [{}])[0])
 	),
 )
 def create(doctype: str, records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -603,12 +641,13 @@ def create(doctype: str, records: list[dict[str, Any]]) -> dict[str, Any]:
 @tool(
 	requires_confirmation=True,
 	confirm_prompt=lambda args: (
-		_("Update {0} {1} ({2}):\n\n{3}").format(
+		_one_line(_("Update {0} {1} ({2}):")).format(
 			len(args.get("names") or []),
 			_for_display(args.get("doctype", "?")),
 			_summarize_names(args.get("names")),
-			_summarize_values(args.get("values")),
 		)
+		+ "\n\n"
+		+ _summarize_values(args.get("values"))
 	),
 )
 def update(doctype: str, names: list[str], values: dict[str, Any]) -> dict[str, Any]:
@@ -635,7 +674,7 @@ def update(doctype: str, names: list[str], values: dict[str, Any]) -> dict[str, 
 @tool(
 	requires_confirmation=True,
 	confirm_prompt=lambda args: (
-		_("Delete {0} {1}: {2}").format(
+		_one_line(_("Delete {0} {1}: {2}")).format(
 			len(args.get("names") or []),
 			_for_display(args.get("doctype", "?")),
 			_summarize_names(args.get("names")),
@@ -664,7 +703,7 @@ def delete(doctype: str, names: list[str]) -> dict[str, Any]:
 @tool(
 	requires_confirmation=True,
 	confirm_prompt=lambda args: (
-		_("Run {0} on {1} {2}: {3}").format(
+		_one_line(_("Run {0} on {1} {2}: {3}")).format(
 			_for_display(args.get("action")),
 			len(args.get("names") or []),
 			_for_display(args.get("doctype", "?")),

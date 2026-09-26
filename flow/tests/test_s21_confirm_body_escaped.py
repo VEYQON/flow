@@ -203,6 +203,27 @@ class TestATypeIsNotTurnedIntoText(IntegrationTestCase):
 		self.assertIn(": true", body)
 		self.assertIn(": null", body)
 
+	def test_a_number_too_long_to_show_goes_back_through_the_cap(self):
+		"""QA's R3, a defect the previous fix INTRODUCED. Showing a number as itself meant handing it
+		to `json.dumps` with no cap and no finiteness check, on a path that skips the very helper the
+		cap lives in — 3,000 digits of engine-register text in the question, and a 4,301-digit integer
+		raised outright, re-creating the "a question nobody is asked" failure one commit later."""
+		body = _body(create, {"doctype": "ToDo", "records": [{"qty": 10**3000}]})
+		self.assertLess(len(body), 600, "a long number bypassed the cap")
+		self.assertIn("3001", body, "the true length of the number is not stated")
+
+	def test_a_number_python_refuses_to_print_still_produces_a_question(self):
+		body = _body(create, {"doctype": "ToDo", "records": [{"qty": 10**5000}]})
+		self.assertTrue(body, "composing the question raised instead of asking it")
+
+	def test_a_value_that_is_not_a_number_at_all_is_not_shown_in_the_engines_register(self):
+		"""QA's R4. `NaN` and `Infinity` are not JSON, and `json.loads` accepts both from a model —
+		so they reached the body as bare unquoted tokens, in the register the engine reserves for its
+		own words."""
+		body = _body(create, {"doctype": "ToDo", "records": [{"a": float("nan"), "b": float("inf")}]})
+		self.assertNotIn(": NaN", body)
+		self.assertNotIn(": Infinity", body)
+
 	def test_and_the_text_versions_of_them_are_still_quoted_and_distinguishable(self):
 		body = _body(
 			create, {"doctype": "ToDo", "records": [{"qty": "3", "paid": "True", "remarks": "None"}]}

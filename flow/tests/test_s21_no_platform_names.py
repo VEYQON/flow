@@ -70,6 +70,34 @@ BANNED_NAMES_ANY_CASE = (
 	"Bedrock",
 	"Azure",
 	"AWS",
+	# QA's R2, second half: the list was short again. A name absent from the list is a name the gate
+	# cannot see, so the list errs towards over-reporting — a false positive is a reviewable failure,
+	# a false negative is a shipped one.
+	"ChatGPT",
+	"MySQL",
+	"SQLite",
+	"Elasticsearch",
+	"Groq",
+	"Gemma",
+	"Cohere",
+	"Kimi",
+	"Titan",
+	"Command R",
+	"Falcon",
+	"Phi",
+	"Nova",
+	"Snowflake",
+	"Databricks",
+	"Supabase",
+	"Firebase",
+	"Salesforce",
+	"NetSuite",
+	"Odoo",
+	"SAP",
+	"Tally",
+	"Zoho",
+	"QuickBooks",
+	"Xero",
 )
 # CASE-SENSITIVE, and ONLY these: the lowercase spelling of each is an identifier the model must emit
 # (`frappe` the sandbox namespace, `doctype` a parameter name), so it is PINNED below instead of
@@ -89,6 +117,10 @@ BANNED_PRODUCT_PHRASES = (
 	"Flow Knowledge",
 	"Flow Model",
 	"FLOW TOOL",
+	# The hosting product. Its lowercase spelling is NOT the pinned identifier — `frappe` alone is —
+	# so unlike the bare word this phrase is banned in any case. QA's R2 found `frappe cloud hosting`
+	# walking through the exact-case rule.
+	"Frappe Cloud",
 )
 
 # The lowercase identifiers the model must emit verbatim, and the reason each cannot be removed here.
@@ -119,10 +151,18 @@ PINNED_SURFACES: dict[str, tuple[str, ...]] = {
 
 
 def _scan(text: str) -> list[str]:
-	"""Every banned name and product phrase in `text`, word-bounded at both ends."""
-	hits = {w for w in BANNED_NAMES_ANY_CASE if re.search(rf"\b{re.escape(w)}\b", text, re.IGNORECASE)}
+	"""Every banned name and product phrase in `text`.
+
+	QA's R2, first half: a `\bWORD\b` match misses `ChatGPT`, `gpt4`, `claude3`, `llama3` — the
+	neighbour is a word character, so there is no boundary to find. A vendor name is not a word in a
+	sentence; it is a name glued to whatever is next to it. So the any-case list matches the name
+	ANYWHERE, with no boundary at all, and the exact-case list keeps its boundaries because those two
+	words have a lowercase spelling the model must type inside larger identifiers.
+	"""
+	lowered = text.lower()
+	hits = {w for w in BANNED_NAMES_ANY_CASE if w.lower() in lowered}
 	hits |= {w for w in BANNED_NAMES_EXACT_CASE if re.search(rf"\b{re.escape(w)}\b", text)}
-	hits |= {p for p in BANNED_PRODUCT_PHRASES if p in text}
+	hits |= {p for p in BANNED_PRODUCT_PHRASES if p.lower() in lowered}
 	return sorted(hits)
 
 
@@ -175,6 +215,20 @@ class TestTheMatcherWorks(IntegrationTestCase):
 	def test_the_matcher_does_not_report_an_ordinary_english_word(self):
 		"""`workflow` contains `flow`. The product phrases are phrases for this reason."""
 		self.assertEqual(_scan("Move the record through its workflow."), [])
+
+	def test_the_matcher_sees_a_name_glued_to_its_neighbour(self):
+		"""QA's R2: a `\bWORD\b` match found none of these, because the neighbour is a word
+		character. A vendor name is not a word in a sentence."""
+		for planted, expected in (
+			("Runs on ChatGPT.", "ChatGPT"),
+			("Uses gpt4 callers.", "GPT"),
+			("Tuned for claude3.", "Claude"),
+			("Stored in MySQL.", "MySQL"),
+			("Built with Groq.", "Groq"),
+			("frappe cloud hosting", "Frappe Cloud"),
+		):
+			with self.subTest(planted=planted):
+				self.assertIn(expected, _scan(planted), f"the scan missed {expected!r} in {planted!r}")
 
 
 class TestNoBuiltinNamesThePlatform(IntegrationTestCase):
