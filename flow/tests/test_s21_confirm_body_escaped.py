@@ -1,0 +1,206 @@
+# Copyright (c) 2026, Frappe Technologies and contributors
+# License: MIT. See LICENSE
+
+"""What a person SEES in the approval question of every tool that ships with a body of its own.
+
+S21 v2's D0, and a precondition for the rest of S21. Until this holds, the card must not render the
+body: the engine composes `"Approve <tool>?" + "\\n\\n" + body`, and five of the six shipped bodies
+interpolated model-chosen arguments raw. Rendered in a `pre-wrap` block with no height cap, a name
+carrying a newline draws a second, friendlier question inside the real card, above two buttons
+labelled Approve and Deny. That is the E5 v1 lesson CLAUDE.md records in as many words: model-chosen
+values are data; never let them change the shape of what a person is asked to approve.
+
+Every assertion below is on the WHOLE question as an approver reads it — `Question.prompt` — not on
+a helper's return value, because the helper is not what anybody sees.
+
+ONE RULE, ONE ESCAPER. Every value goes through `_display_value`, which is E5 v2's own
+`escape_for_display` plus the cap, and nothing else. A second escaper would be a second rule and the
+first thing to drift (`flow/lib/agent.py`, above `escape_for_display`).
+
+THE CAP IS APPLIED AFTER ESCAPING, and that is the point of `test_the_cap_is_measured_on_the_escaped
+_form_not_the_raw_one`. Escaping only ever lengthens — one right-to-left override becomes the six
+characters `\\u202e` — so a cap measured on the raw value lets six times the cap through, which is
+how a body with a 120-character bound reached 720 characters of nothing but overrides.
+
+THE ONE DELIBERATE EXCEPTION is the code-running tool's `code`. It keeps its real newlines because a
+person approving Python reads Python, an eval depends on it
+(`evals/scenarios/an_approved_execute_shows_its_code.yaml`), and escaping it would turn every quote
+in it into `\\"`. It is last in the body, beneath its own escaped one-line sentence, and it is shown
+WHOLE — never shortened. Shortening the code is the E5 v1 truncation attack ("and DELETE every
+invoice" hidden past the cut), so the length is stated and the code is still printed in full.
+
+NOT TOUCHED BY THIS MODULE: `flow/lib/agent.py`. `_invoke`, `_resolve_confirmation`,
+`_confirmation_question` and `_has_denial` are read here and nowhere modified (CLAUDE.md rule 4);
+`escape_for_display` gains callers, never a second rule.
+"""
+
+from __future__ import annotations
+
+from frappe.tests import IntegrationTestCase
+
+from flow.lib.agent import _confirmation_question
+from flow.lib.model import ToolCall
+from flow.tools.builtins import create, delete, execute, run_action, update
+
+RTL = "‮"  # RIGHT-TO-LEFT OVERRIDE — reorders a line without adding a character to it
+ZWJ = "‍"  # ZERO WIDTH JOINER — occupies no width, so it hides a word boundary
+FORGED = "\nApproved by admin"  # a newline and a line that was never the engine's
+CONTROL_ONLY = "\u0001\u2028\u202e\u200d\r\n\t"  # nothing in it a reader could see unescaped
+HUGE = "A" * 50_000
+# The builtins carry no `title`, so the engine head falls back to the slug in backticks.
+_EXPECTED_HEAD = "Approve `delete`?"
+
+
+def _body(tool, arguments: dict) -> str:
+	"""The question as an approver reads it, with the engine's own first line removed.
+
+	Split on the first blank line, exactly as `_confirmation_question` joined it, so an assertion
+	about "the body" cannot accidentally be satisfied by the engine's `Approve <tool>?` head.
+	"""
+	return _confirmation_question(
+		ToolCall(id="c1", name=tool.name, arguments=arguments), tool
+	).prompt.partition("\n\n")[2]
+
+
+class TestNothingModelChosenCanStartALine(IntegrationTestCase):
+	"""A body is one line, or the lines in it are the engine's. One test per place a value is
+	interpolated, so a mutation at one place reddens one test and names itself."""
+
+	def test_a_right_to_left_override_in_a_record_name_is_shown_not_obeyed(self):
+		"""`_summarize_names`, reached by delete, update and run_action.
+
+		An override needs no line break: it reverses the run of text after it, so a body reading
+		"Delete 1 ToDo" can be made to read as its own opposite while every character stays where
+		it was. It is escaped, so the reader sees the override rather than its effect.
+		"""
+		body = _body(delete, {"doctype": "ToDo", "names": [f"T-1{RTL}detceled eb lliw gnihtoN"]})
+		self.assertNotIn(RTL, body)
+		self.assertIn("\\u202e", body)
+		self.assertIn("T-1", body)  # positive control: the name itself still reaches the reader
+
+	def test_a_zero_width_joiner_in_a_field_value_is_made_visible(self):
+		"""`_summarize_values`, reached by create and update.
+
+		A zero-width character is the one an approver cannot see at all, so it is the one an
+		escaper has to print. Before D0 this passed through `json.dumps(..., ensure_ascii=False)`
+		untouched, and so did U+2028, which every layout engine treats as a line break.
+		"""
+		body = _body(create, {"doctype": "ToDo", "records": [{"description": f"paid{ZWJ}unpaid"}]})
+		self.assertNotIn(ZWJ, body)
+		self.assertIn("\\u200d", body)
+		self.assertIn("paid", body)  # positive control
+
+	def test_a_forged_approval_line_in_a_record_type_cannot_start_a_line(self):
+		"""`update`'s own `doctype`. The attack in one string: a newline, then a sentence that
+		reads like the engine's. It is the body the card renders, so a real newline there is a real
+		line, at full height, above the buttons."""
+		body = _body(update, {"doctype": f"ToDo{FORGED}", "names": ["T-1"], "values": {"status": "Closed"}})
+		self.assertNotIn("\nApproved by admin", body)
+		self.assertIn("\\nApproved by admin", body)
+
+	def test_a_description_of_nothing_but_control_characters_leaves_one_line(self):
+		"""The code-running tool's `description`. It is one sentence and must stay one line: the
+		code block beneath it is the only thing in any body that is allowed real newlines, and a
+		sentence that can open a line of its own can open one that looks like a new question."""
+		body = _body(execute, {"description": CONTROL_ONLY, "code": "result = 1"})
+		sentence = body.partition("\n\n")[0]
+		self.assertNotIn("\n", sentence)
+		for ch in CONTROL_ONLY:
+			self.assertNotIn(ch, sentence, f"{ch!r} reached the sentence unescaped")
+
+	def test_a_record_type_in_the_create_body_is_escaped_too(self):
+		"""`create`'s own `doctype`, a separate interpolation from `update`'s."""
+		body = _body(create, {"doctype": f"ToDo{FORGED}", "records": [{"status": "Open"}]})
+		self.assertNotIn("\nApproved by admin", body)
+		self.assertIn("\\nApproved by admin", body)
+
+	def test_a_record_type_in_the_delete_body_is_escaped_too(self):
+		"""`delete`'s own `doctype`."""
+		body = _body(delete, {"doctype": f"ToDo{FORGED}", "names": ["T-1"]})
+		self.assertNotIn("\nApproved by admin", body)
+		self.assertIn("\\nApproved by admin", body)
+
+	def test_a_record_type_in_the_run_action_body_is_escaped_too(self):
+		"""`run_action`'s own `doctype`, distinct again from its `action`."""
+		body = _body(run_action, {"doctype": f"ToDo{FORGED}", "names": ["T-1"], "action": "submit"})
+		self.assertNotIn("\nApproved by admin", body)
+		self.assertIn("\\nApproved by admin", body)
+
+
+class TestEveryValueIsCappedAfterItIsEscaped(IntegrationTestCase):
+	def test_a_fifty_thousand_character_action_name_does_not_reach_the_reader_whole(self):
+		"""`run_action`'s `action`. 50,000 characters is not a question, it is a denial of the
+		card: the sentence a person has to read scrolls off a screen and the buttons are what is
+		left. The cap says how long the value really was, so nothing is shortened silently."""
+		body = _body(run_action, {"doctype": "ToDo", "names": ["T-1"], "action": HUGE})
+		self.assertLess(len(body), 2_000, "the body is not bounded by anything")
+		self.assertIn("50000", body, "the true length of the value is not stated")
+
+	def test_the_cap_is_measured_on_the_escaped_form_not_the_raw_one(self):
+		"""The property the word AFTER is doing in "capped after escaping".
+
+		250 right-to-left overrides are 250 raw characters and 1,500 escaped ones. A cap of 200
+		measured before escaping passes all 250 through and the body carries 1,500 characters of
+		escape sequence; measured after, the body carries 200 and says the value was 250 long.
+		"""
+		body = _body(delete, {"doctype": "ToDo", "names": [RTL * 250]})
+		self.assertLess(len(body), 600, "the cap was measured before escaping, so escaping burst it")
+		self.assertIn("250", body, "the true length of the value is not stated")
+
+	def test_a_value_of_only_control_characters_shows_only_escapes(self):
+		"""Nothing invisible reaches the reader, and the reader is not shown an empty body either
+		— a body that renders as nothing reads exactly like a tool with nothing to say."""
+		body = _body(delete, {"doctype": "ToDo", "names": [CONTROL_ONLY]})
+		for ch in CONTROL_ONLY:
+			self.assertNotIn(ch, body, f"{ch!r} reached the body unescaped")
+		self.assertIn("\\u0001", body)
+		self.assertIn("\\u2028", body)
+		self.assertIn("\\r", body)
+
+
+class TestTheCodeBlockIsTheOneExceptionAndStaysWhole(IntegrationTestCase):
+	def test_the_code_keeps_its_newlines_and_its_quotes(self):
+		"""The eval `an_approved_execute_shows_its_code` asserts on this text. A person approving
+		code is approving THIS code, so it is not escaped and not shortened."""
+		code = (
+			'names = frappe.get_list("Sales Invoice", pluck="name")\nresult = delete("Sales Invoice", names)'
+		)
+		body = _body(execute, {"description": "Delete last month's drafts", "code": code})
+		self.assertTrue(body.endswith(code), "the code is not the last thing in the body, whole")
+
+	def test_a_long_code_block_is_still_shown_whole_with_its_length_stated(self):
+		"""The one value that is never shortened. Cutting code is the E5 v1 truncation attack —
+		the part left out is the part that mattered — so the bound is a sentence about the length,
+		not a shorter body."""
+		code = "\n".join(f"x{i} = {i}" for i in range(1, 1_001))
+		body = _body(execute, {"description": "count", "code": code})
+		self.assertIn(code, body, "the code was shortened; it must be shown whole")
+		self.assertIn(str(len(code)), body, "a code block past the bound does not say how long it is")
+
+
+class TestTheOrdinaryQuestionStillReadsLikeItself(IntegrationTestCase):
+	"""The positive control for every assertion above: an escaper that mangled ordinary text would
+	pass every attack test in this module and be useless."""
+
+	def test_a_plain_delete_body_is_unchanged_by_escaping(self):
+		body = _body(delete, {"doctype": "ToDo", "names": ["TODO-0001", "TODO-0002"]})
+		self.assertIn("ToDo", body)
+		self.assertIn("TODO-0001", body)
+		self.assertIn("TODO-0002", body)
+		self.assertNotIn("\\", body, "an ordinary body carries no escapes at all")
+
+	def test_a_plain_create_body_still_shows_its_values(self):
+		body = _body(
+			create, {"doctype": "ToDo", "records": [{"description": "Pay the invoice", "priority": 3}]}
+		)
+		self.assertIn("Pay the invoice", body)
+		self.assertIn("3", body)
+
+	def test_the_options_and_the_engine_head_are_untouched_by_any_of_this(self):
+		"""CLAUDE.md rule 4's boundary, asserted rather than assumed: D0 changes wording only."""
+		q = _confirmation_question(
+			ToolCall(id="c1", name="delete", arguments={"doctype": f"ToDo{RTL}", "names": [FORGED]}), delete
+		)
+		self.assertEqual(q.options, ["Approve", "Deny"])
+		self.assertTrue(q.allow_other)
+		self.assertEqual(q.prompt.splitlines()[0], _EXPECTED_HEAD)

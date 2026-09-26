@@ -14,22 +14,82 @@ from flow.utils.safe_exec import safe_exec
 
 MAX_READ_LIMIT = 200
 LAYOUT_FIELDTYPES = frozenset({"Section Break", "Column Break", "Tab Break", "HTML", "Heading"})
+# The cap on one model-chosen value in an approval question, measured on the ESCAPED form. See
+# `_for_display`: escaping only ever lengthens, so a cap measured before it is not a cap.
 _CONFIRM_STR_LIMIT = 120
 _ERROR_LIMIT = 300
 _LIFECYCLE_BY_DOCSTATUS = {0: "submit", 1: "cancel", 2: "amend"}
 
 
+def _for_display(value: Any, limit: int = _CONFIRM_STR_LIMIT) -> str:
+	"""One model-chosen value, ready for a person to read in an approval question.
+
+	The single helper every confirmation body in this module puts its values through. There is one
+	escaping rule in this codebase and this is not a second copy of it: `escape_for_display` is
+	`_escaped` under another name, and the module that defines it says in as many words that a
+	second escaper elsewhere would be a second rule and the first thing to drift.
+
+	Two properties, and the order between them is the point.
+
+	ESCAPED, so nothing in the value can change the shape of the question. A newline would start a
+	line of its own and could write a second, friendlier question under the real one; a
+	right-to-left override would reorder the sentence around it without adding a character; a
+	zero-width joiner is invisible by definition. All of them are printed as escapes instead.
+
+	THEN CAPPED — after escaping, never before. Escaping only lengthens: one override becomes the
+	six characters of an escape sequence, so a cap of 120 measured on the raw value admits 720
+	characters of escape into the body. Measuring the cap on what a person will actually read is
+	what makes it a cap. The true length is stated whenever anything is left out, because a
+	question holding part of a value reads exactly like one holding all of it.
+	"""
+	from flow.lib.agent import escape_for_display
+
+	text = value if isinstance(value, str) else str(value)
+	shown: list[str] = []
+	used = 0
+	for ch in text:
+		escaped = escape_for_display(ch)
+		if used + len(escaped) > limit:
+			return "".join(shown) + _("… ({0} characters in all)").format(len(text))
+		shown.append(escaped)
+		used += len(escaped)
+	return "".join(shown)
+
+
 def _summarize_values(values: dict) -> str:
-	"""Truncate long values for confirm prompts — keeps the display scannable."""
-	display = {}
-	for k, v in (values or {}).items():
-		if isinstance(v, str) and len(v) > _CONFIRM_STR_LIMIT:
-			display[k] = v[:_CONFIRM_STR_LIMIT] + f"… ({len(v)} chars)"
-		elif isinstance(v, list) and len(v) > 6:
-			display[k] = [*v[:6], f"… +{len(v) - 6} more"]
-		else:
-			display[k] = v
-	return json.dumps(display, indent=2, default=str, ensure_ascii=False)
+	"""The field values a write will apply, as a person reads them before approving them.
+
+	JSON-shaped, as it has always been, but the shape is built here rather than by `json.dumps`
+	over model text. Every key and every value goes through `_for_display` and is then quoted, so
+	the escaping and the cap are applied exactly once, by one rule. Feeding already-escaped text
+	back through `json.dumps` would escape each backslash a second time and a Windows path would
+	reach the reader with four of them.
+
+	Every value is shown quoted, including numbers — the same rule `_quoted_argument` follows in
+	the engine, and for the same reason: a reader can see where a value starts and ends.
+	"""
+	rows = [f'  "{_for_display(k)}": {_display_json(v)}' for k, v in (values or {}).items()]
+	return "{\n" + ",\n".join(rows) + "\n}" if rows else "{}"
+
+
+def _display_json(value: Any, depth: int = 0) -> str:
+	"""One value inside `_summarize_values`, JSON-shaped and escaped by the one rule.
+
+	Lists and child-table rows keep their structure so a person can still see what is being set on
+	what — capped at six entries each, as before, with the number left out stated. Depth is bounded
+	so a value the model nested cannot make the question arbitrarily deep.
+	"""
+	if depth < 3 and isinstance(value, list):
+		items = [_display_json(v, depth + 1) for v in value[:6]]
+		if len(value) > 6:
+			items.append(f'"… +{len(value) - 6} more"')
+		return "[" + ", ".join(items) + "]"
+	if depth < 3 and isinstance(value, dict):
+		rows = [f'"{_for_display(k)}": {_display_json(v, depth + 1)}' for k, v in list(value.items())[:6]]
+		if len(value) > 6:
+			rows.append(f'"…": "+{len(value) - 6} more"')
+		return "{" + ", ".join(rows) + "}"
+	return f'"{_for_display(value)}"'
 
 
 @tool
@@ -302,12 +362,40 @@ def bind_update_memory(agent: str | None, *, unattended: bool = False) -> Tool:
 
 update_memory = bind_update_memory(None)
 
+# How long a block of code has to be before the question says how long it is. Well above anything a
+# person reads at a glance and well below a body that is really a denial of the card.
+_CONFIRM_CODE_NOTE_LIMIT = 2000
+
+
+def _execute_confirm_prompt(args: dict[str, Any]) -> str:
+	"""The body of the approval question for a run of code: one sentence, then the code itself.
+
+	The sentence is a model-chosen value like any other and is escaped and capped through
+	`_for_display`, which also flattens it — it has to stay ONE line, because the code block
+	beneath it is the only thing in any body allowed real newlines, and a sentence that can open a
+	line of its own can open one that reads like a second question.
+
+	THE CODE IS THE ONE DELIBERATE EXCEPTION IN THIS MODULE. It is not escaped: a person approving
+	Python reads Python, and escaping would turn every quote in it into two characters. It is last,
+	beneath the sentence, which is the shape that makes the residual readable — a forged line
+	inside a block introduced as the code that will run is still inside that block.
+
+	It is also never shortened. Cutting it is the truncation attack E5 v1 shipped and the review
+	caught: the part left out is the part that mattered, and "and delete every invoice" lives past
+	the cut. So a long block is bounded by a SENTENCE about its length, and then shown whole.
+	"""
+	sentence = _for_display(args.get("description")) if args.get("description") else _("Run code")
+	code = args.get("code") or ""
+	if len(code) > _CONFIRM_CODE_NOTE_LIMIT:
+		sentence += " " + _("The code below is {0} characters long, and all of it is shown.").format(
+			len(code)
+		)
+	return f"{sentence}:\n\n{code}"
+
 
 @tool(
 	requires_confirmation=True,
-	confirm_prompt=lambda args: (
-		f"{args.get('description') or _('Run Python code')}:\n\n{args.get('code', '')}"
-	),
+	confirm_prompt=_execute_confirm_prompt,
 )
 def execute(code: str, description: str) -> Any:
 	"""Run Python in a permission-respecting sandbox for computation, emails, or multi-record work.
@@ -355,8 +443,14 @@ def _error_text(e: Exception) -> str:
 
 
 def _summarize_names(names: list[str] | None, limit: int = 6) -> str:
+	"""The records a write names, as a person reads them before approving.
+
+	Each name is a model-chosen value, so each goes through `_for_display` and is then quoted. The
+	quotes are not decoration: without them a name ending in a comma is indistinguishable from two
+	names, and the list is the only thing in a delete's question that says WHICH records go.
+	"""
 	names = names or []
-	shown = ", ".join(str(n) for n in names[:limit])
+	shown = ", ".join(f'"{_for_display(n)}"' for n in names[:limit])
 	if len(names) > limit:
 		shown += f" … +{len(names) - limit} more"
 	return shown or "—"
@@ -444,7 +538,7 @@ def _apply_action(doctype: str, name: str, action: str, args: dict[str, Any]) ->
 	confirm_prompt=lambda args: (
 		_("Create {0} {1} record(s):\n\n{2}").format(
 			len(args.get("records") or []),
-			args.get("doctype", "?"),
+			_for_display(args.get("doctype", "?")),
 			_summarize_values((args.get("records") or [{}])[0]),
 		)
 	),
@@ -476,7 +570,7 @@ def create(doctype: str, records: list[dict[str, Any]]) -> dict[str, Any]:
 	confirm_prompt=lambda args: (
 		_("Update {0} {1} ({2}):\n\n{3}").format(
 			len(args.get("names") or []),
-			args.get("doctype", "?"),
+			_for_display(args.get("doctype", "?")),
 			_summarize_names(args.get("names")),
 			_summarize_values(args.get("values")),
 		)
@@ -508,7 +602,7 @@ def update(doctype: str, names: list[str], values: dict[str, Any]) -> dict[str, 
 	confirm_prompt=lambda args: (
 		_("Delete {0} {1}: {2}").format(
 			len(args.get("names") or []),
-			args.get("doctype", "?"),
+			_for_display(args.get("doctype", "?")),
 			_summarize_names(args.get("names")),
 		)
 	),
@@ -536,9 +630,9 @@ def delete(doctype: str, names: list[str]) -> dict[str, Any]:
 	requires_confirmation=True,
 	confirm_prompt=lambda args: (
 		_("Run '{0}' on {1} {2}: {3}").format(
-			args.get("action"),
+			_for_display(args.get("action")),
 			len(args.get("names") or []),
-			args.get("doctype", "?"),
+			_for_display(args.get("doctype", "?")),
 			_summarize_names(args.get("names")),
 		)
 	),
