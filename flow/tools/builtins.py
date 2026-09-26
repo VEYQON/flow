@@ -94,10 +94,10 @@ def _display_json(value: Any, depth: int = 0) -> str:
 
 @tool
 def find_doctypes(search: str | None = None, module: str | None = None, limit: int = 40) -> list[dict]:
-	"""Find exact DocType names before describe/read — never guess names.
+	"""Find exact record-type names before describe/read — never guess names.
 
 	Search by keyword (substring of the name) and/or filter by module. Returns a list
-	of {name, module} you can read. Child tables are excluded; single DocTypes are included.
+	of {name, module} you can read. Child tables are excluded; single record types are included.
 	"""
 	limit = min(max(int(limit), 1), MAX_READ_LIMIT)
 	filters: dict[str, Any] = {"istable": 0}
@@ -111,7 +111,7 @@ def find_doctypes(search: str | None = None, module: str | None = None, limit: i
 
 @tool
 def describe(doctype: str, name: str | None = None) -> dict[str, Any]:
-	"""Inspect a DocType's fields and your permissions. Pass `name` to also get a record's available actions."""
+	"""Inspect a record type's fields and your permissions. Pass `name` to also get a record's available actions."""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 
@@ -148,7 +148,7 @@ def read(
 	limit: int = 20,
 	order_by: str | None = None,
 ) -> list[dict]:
-	"""Read records from a DocType, honouring the user's permissions.
+	"""Read records of one record type, honouring the user's permissions.
 
 	`filters` is a dict like {"status": "Open"} or {"qty": [">", 5]}. `fields` defaults
 	to the record name. Returns a list of matching records (capped at 200).
