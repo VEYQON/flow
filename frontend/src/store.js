@@ -408,7 +408,9 @@ function handleEvent(event, msg) {
 			if (event.status === "Paused") {
 				msg.questions = prepareQuestions(event.questions);
 				msg.runName = runName.value;
-				requestScroll(true);
+				// Deliberately NOT requestScroll(true): the bottom of the list is the Approve
+				// button. The confirmation card scrolls its own top into view when it mounts, so
+				// the first line of the question is what lands on screen.
 			}
 			refreshHistory();
 			break;

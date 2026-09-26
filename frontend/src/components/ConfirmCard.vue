@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, nextTick } from "vue";
+import { ref, computed, nextTick, onMounted } from "vue";
 import { Button, FeatherIcon } from "@/lib/ui";
 import ArgsView from "./ArgsView.vue";
 import { confirmTitle, hasArgs, parseArgs, blockKeysFor } from "@/lib/toolMeta";
@@ -12,19 +12,43 @@ const props = defineProps({
 const emit = defineEmits(["answer"]);
 
 const otherEl = ref(null);
+const rootEl = ref(null);
+
+// The engine composes the question as one head line, a blank line, then the body the tool wrote.
+// Split it back apart exactly as it was joined, so the body is restored byte for byte, blank lines
+// included.
+const paragraphs = computed(() => props.question.prompt.split("\n\n"));
+const engineHead = computed(() => (paragraphs.value[0] ?? "").trim());
+const engineBody = computed(() => paragraphs.value.slice(1).join("\n\n").trim());
 
 // Tool confirmation: name the specific action; free-text ask: show the prompt.
 const confirm = computed(() =>
 	props.tool ? confirmTitle(props.tool.name, props.tool.arguments) : null
 );
+// Only an approval question's head is the engine's own sentence. Every question the engine raises
+// carries exactly these two options in this order — the same signal the server uses to recognise
+// one — and a tool is allowed to return a Question of its own, whose first paragraph would be the
+// tool's words rather than the engine's. No tool does that today; this keeps it from mattering if
+// one ever does.
+const isApprovalQuestion = computed(() => {
+	const o = props.question.options;
+	return Array.isArray(o) && o.length === 2 && o[0] === "Approve" && o[1] === "Deny";
+});
 const title = computed(() =>
-	confirm.value ? confirm.value.title : props.question.prompt.split("\n\n")[0].trim()
+	engineBody.value && (!confirm.value || isApprovalQuestion.value)
+		? engineHead.value
+		: confirm.value?.title ?? engineHead.value
 );
 const danger = computed(() => Boolean(confirm.value?.danger));
-const body = computed(() =>
-	props.tool ? "" : props.question.prompt.split("\n\n").slice(1).join("\n\n").trim()
+// The question the engine asked, whole, as text. It used to be blanked whenever there was a tool —
+// which is always, on this path — so an approver read a label and a table of raw argument values and
+// never the sentence the tool's author wrote. The fallback covers the one-paragraph question and the
+// gated call with no arguments at all: both used to draw a card with nothing in it but two buttons.
+const body = computed(
+	() => engineBody.value || (confirm.value ? props.question.prompt.trim() : "")
 );
-// execute's description becomes the title, so drop it from the args shown below.
+// execute's description reaches the reader through the body now, not the title, so it is still right
+// to drop it from the table below — for that reason rather than the old one.
 const displayArgs = computed(() => {
 	if (props.tool?.name !== "execute") return props.tool?.arguments;
 	const { description, ...rest } = parseArgs(props.tool.arguments);
@@ -41,6 +65,16 @@ function optLabel(opt) {
 	if (opt === "Deny") return __("Deny");
 	return opt;
 }
+
+// A pause used to scroll the message list to its bottom. With the body capped at 220px that left
+// the whole card on screen; with the cap gone (see the stylesheet) the bottom of the list is the
+// button row, and a question taller than the panel would sit above the viewport — the approver would
+// be shown Approve and Deny and not the text they answer for. So the card puts its own top on
+// screen instead, and Approve cannot be reached without passing the question.
+onMounted(() => {
+	if (props.question._answer !== undefined) return;
+	nextTick(() => rootEl.value?.scrollIntoView({ block: "start", behavior: "smooth" }));
+});
 
 function pick(option) {
 	emit("answer", option);
@@ -61,6 +95,7 @@ function sendOther() {
 
 <template>
 	<div
+		ref="rootEl"
 		class="rounded-lg border border-outline-gray-2 bg-surface-white p-2.5"
 		:class="{ 'opacity-70': answered }"
 	>
@@ -75,10 +110,15 @@ function sendOther() {
 			</div>
 		</div>
 
+		<pre v-if="body" class="flow-confirm-body">{{ body }}</pre>
 		<div v-if="showArgs" class="mt-2.5">
+			<div
+				class="mb-1.5 text-[11px] font-semibold uppercase leading-none tracking-wide text-ink-gray-4"
+			>
+				{{ __("Details") }}
+			</div>
 			<ArgsView :arguments="displayArgs" :block-keys="blockKeys" />
 		</div>
-		<pre v-else-if="body" class="flow-confirm-body">{{ body }}</pre>
 
 		<div
 			v-if="answered"
@@ -141,8 +181,10 @@ function sendOther() {
 .flow-confirm-body {
 	margin: 8px 0 0;
 	padding: 8px 10px;
-	max-height: 220px;
-	overflow: auto;
+	/* No height cap and no "Show more": a surface showing part of the text being authorised reads
+	   exactly like one showing all of it, and the part left out is the part somebody needed. A long
+	   question makes a taller card and the list scrolls; `word-break` below is what stops one long
+	   unbroken value widening it instead. */
 	background: var(--surface-gray-1);
 	border: 1px solid var(--outline-gray-1);
 	border-radius: 6px;
