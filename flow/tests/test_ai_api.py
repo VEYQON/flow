@@ -158,6 +158,33 @@ class TestStartRun(IntegrationTestCase):
 		self.assertEqual(payload["questions"][0]["options"], ["Approve", "Deny"])
 		self.assertEqual(payload["questions"][0]["key"], "c1")
 
+	def test_a_paused_run_sends_the_engine_s_question_body_to_the_client(self):
+		"""REGRESSION GUARD for the escaping work, NOT a proof that the card shows it.
+
+		This test passes with or without the client change: S21 touches `ConfirmCard.vue`,
+		`store.js` and one stylesheet rule, and none of them is on this path. Calling it a proof of
+		S21 would be the exact failure the spec exists to avoid — a test whose only red-making
+		mutation is outside the change it is credited to.
+
+		What it IS for: the card now renders this string, so a later change to the engine that
+		stopped sending the body, or sent only its head, would silently empty the card again with
+		every other test still green. The body of a gated code call is the tool's own sentence
+		followed by the code itself, and both have to arrive.
+		"""
+		with patch.object(Model, "chat", return_value=_confirm_call()):
+			payload = start_run("count the open records", agent=self.agent.name)
+
+		prompt = payload["questions"][0]["prompt"]
+		head, blank, body = prompt.partition("\n\n")
+		self.assertTrue(head.startswith("Approve "), head)
+		self.assertEqual(blank, "\n\n", "the head and the body are no longer separated by a blank line")
+		self.assertIn("result = 1", body, "the code being authorised did not reach the client")
+		# The spec proposed blanking the `confirm_prompt` branch as this test's red-making mutation.
+		# I ran it: the assertion above stayed GREEN, because the fallback dumps the same arguments
+		# and `result = 1` is in the dump too. So the assertion that makes the mutation visible is
+		# this one — the body is the tool's own SENTENCE, not the argument shape.
+		self.assertNotIn('"code"', body, "the client got the argument dump instead of the tool's sentence")
+
 	def test_start_run_rejects_empty_input(self):
 		with self.assertRaisesRegex(frappe.ValidationError, "Input"):
 			start_run("")
