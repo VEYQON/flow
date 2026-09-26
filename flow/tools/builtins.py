@@ -50,10 +50,16 @@ def _for_display(value: Any, limit: int = _CONFIRM_STR_LIMIT) -> str:
 	for ch in text:
 		escaped = escape_for_display(ch)
 		if used + len(escaped) > limit:
-			return "".join(shown) + _("… ({0} characters in all)").format(len(text))
+			# The count goes OUTSIDE the closing quote. Inside it, a value whose own text read
+			# `short… (9999 characters in all)` was byte-identical to a genuinely elided 9,999
+			# character value, so a reader could not tell 33 characters from 9,999 — the exact
+			# failure this helper exists to prevent. `escape_for_display` maps `"` to `\"`, so an
+			# UNESCAPED quote is a character no value can produce: it is the boundary, and anything
+			# after it is the engine's.
+			return '"{0}" {1}'.format("".join(shown), _("… ({0} characters in all)").format(len(text)))
 		shown.append(escaped)
 		used += len(escaped)
-	return "".join(shown)
+	return '"{0}"'.format("".join(shown))
 
 
 def _summarize_values(values: dict) -> str:
@@ -68,7 +74,7 @@ def _summarize_values(values: dict) -> str:
 	Every value is shown quoted, including numbers — the same rule `_quoted_argument` follows in
 	the engine, and for the same reason: a reader can see where a value starts and ends.
 	"""
-	rows = [f'  "{_for_display(k)}": {_display_json(v)}' for k, v in (values or {}).items()]
+	rows = [f"  {_for_display(k)}: {_display_json(v)}" for k, v in (values or {}).items()]
 	return "{\n" + ",\n".join(rows) + "\n}" if rows else "{}"
 
 
@@ -85,11 +91,11 @@ def _display_json(value: Any, depth: int = 0) -> str:
 			items.append(f'"… +{len(value) - 6} more"')
 		return "[" + ", ".join(items) + "]"
 	if depth < 3 and isinstance(value, dict):
-		rows = [f'"{_for_display(k)}": {_display_json(v, depth + 1)}' for k, v in list(value.items())[:6]]
+		rows = [f"{_for_display(k)}: {_display_json(v, depth + 1)}" for k, v in list(value.items())[:6]]
 		if len(value) > 6:
 			rows.append(f'"…": "+{len(value) - 6} more"')
 		return "{" + ", ".join(rows) + "}"
-	return f'"{_for_display(value)}"'
+	return _for_display(value)
 
 
 @tool
@@ -362,10 +368,6 @@ def bind_update_memory(agent: str | None, *, unattended: bool = False) -> Tool:
 
 update_memory = bind_update_memory(None)
 
-# How long a block of code has to be before the question says how long it is. Well above anything a
-# person reads at a glance and well below a body that is really a denial of the card.
-_CONFIRM_CODE_NOTE_LIMIT = 2000
-
 
 def _execute_confirm_prompt(args: dict[str, Any]) -> str:
 	"""The body of the approval question for a run of code: one sentence, then the code itself.
@@ -377,20 +379,24 @@ def _execute_confirm_prompt(args: dict[str, Any]) -> str:
 
 	THE CODE IS THE ONE DELIBERATE EXCEPTION IN THIS MODULE. It is not escaped: a person approving
 	Python reads Python, and escaping would turn every quote in it into two characters. It is last,
-	beneath the sentence, which is the shape that makes the residual readable — a forged line
-	inside a block introduced as the code that will run is still inside that block.
+	beneath an ENGINE-WRITTEN line naming it as the code that will run and saying how long it is.
+	That line is the whole point of the shape: the sentence above it is the model's, so a block
+	introduced only by the model's own sentence is a block the model framed. A forged line inside a
+	block the ENGINE introduced as code is still inside that block.
 
 	It is also never shortened. Cutting it is the truncation attack E5 v1 shipped and the review
 	caught: the part left out is the part that mattered, and "and delete every invoice" lives past
-	the cut. So a long block is bounded by a SENTENCE about its length, and then shown whole.
+	the cut. So the block is bounded by a SENTENCE about its length — always, not past a threshold,
+	because the short-code case is the common one — and then shown whole.
 	"""
-	sentence = _for_display(args.get("description")) if args.get("description") else _("Run code")
+	sentence = _for_display(args.get("description")) if args.get("description") else _("Run Python code")
 	code = args.get("code") or ""
-	if len(code) > _CONFIRM_CODE_NOTE_LIMIT:
-		sentence += " " + _("The code below is {0} characters long, and all of it is shown.").format(
-			len(code)
-		)
-	return f"{sentence}:\n\n{code}"
+	# The line between the two is the ENGINE's, always, and it states the length whether the block is
+	# long or short. A threshold left the common case — a few lines of code — with nothing above it
+	# but the model's own sentence, and the justification for leaving the code raw is precisely that
+	# the block is introduced AS code by someone other than the model.
+	introduction = _("The code that will run, in full ({0} characters):").format(len(code))
+	return f"{sentence}\n\n{introduction}\n\n{code}"
 
 
 @tool(
@@ -450,7 +456,7 @@ def _summarize_names(names: list[str] | None, limit: int = 6) -> str:
 	names, and the list is the only thing in a delete's question that says WHICH records go.
 	"""
 	names = names or []
-	shown = ", ".join(f'"{_for_display(n)}"' for n in names[:limit])
+	shown = ", ".join(_for_display(n) for n in names[:limit])
 	if len(names) > limit:
 		shown += f" … +{len(names) - limit} more"
 	return shown or "—"

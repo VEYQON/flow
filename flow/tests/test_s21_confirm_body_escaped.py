@@ -158,6 +158,61 @@ class TestEveryValueIsCappedAfterItIsEscaped(IntegrationTestCase):
 		self.assertIn("\\r", body)
 
 
+class TestTheElisionMarkerCannotBeForged(IntegrationTestCase):
+	"""The security review's M2, and it was a real defect in the first version of this helper.
+
+	The marker saying a value was shortened used to be appended INSIDE the quotes, so a value whose
+	own text was `short… (9999 characters in all)` reached the reader byte-identical to a genuinely
+	elided 9,999-character value. A reader could not tell a 33-character value from a 9,999-character
+	one — which is the exact property the helper's docstring claims to establish.
+
+	The fix relies on the one character escaping guarantees a value cannot produce: `_escaped` maps
+	`"` to `\"`, so an UNESCAPED quote is engine-owned. The marker goes after the closing quote, and
+	the quote is the boundary.
+	"""
+
+	FORGED_MARKER = "short… (9999 characters in all)"
+
+	def test_a_value_that_looks_elided_is_not_read_as_elided(self):
+		body = _body(delete, {"doctype": "ToDo", "names": [self.FORGED_MARKER]})
+		self.assertIn(self.FORGED_MARKER, body)  # it is shown, whole — nothing is hidden
+		self.assertNotIn('" ', body, "the forged marker is outside a quote, so it reads as the engine's")
+
+	def test_a_genuinely_elided_value_puts_its_count_outside_the_quote(self):
+		body = _body(delete, {"doctype": "ToDo", "names": ["A" * 500]})
+		self.assertIn('" ', body, "a real elision marker is not separated from the value by a quote")
+		self.assertIn("500", body)
+
+	def test_the_two_are_therefore_distinguishable(self):
+		"""The assertion that makes the pair a proof rather than two observations."""
+		forged = _body(delete, {"doctype": "ToDo", "names": [self.FORGED_MARKER]})
+		real = _body(delete, {"doctype": "ToDo", "names": ["A" * 500]})
+		self.assertNotEqual('" ' in forged, '" ' in real)
+
+
+class TestTheCodeBlockIsIntroducedByTheEngineNotByTheModel(IntegrationTestCase):
+	"""The security review's M1. The helper's docstring justified leaving the code raw by saying a
+	forged line inside *a block introduced as the code that will run* is still inside that block —
+	but the only thing introducing the block was `description`, which the model writes. So the
+	justification was not implemented. An engine-owned line now sits between the two, and the length
+	is stated ALWAYS rather than only past a threshold: the threshold was what left short code, the
+	common case, unlabelled."""
+
+	def test_an_engine_owned_line_sits_between_the_sentence_and_the_code(self):
+		body = _body(execute, {"description": "Verification notice — read before approving", "code": "x = 1"})
+		self.assertIn("The code that will run", body)
+		self.assertLess(
+			body.index("Verification notice"),
+			body.index("The code that will run"),
+			"the engine's line must come after the model's sentence and before the code",
+		)
+		self.assertLess(body.index("The code that will run"), body.index("x = 1"))
+
+	def test_the_length_is_stated_even_for_short_code(self):
+		body = _body(execute, {"description": "count", "code": "x = 1"})
+		self.assertIn("5", body, "a five-character code block does not say it is five characters")
+
+
 class TestTheCodeBlockIsTheOneExceptionAndStaysWhole(IntegrationTestCase):
 	def test_the_code_keeps_its_newlines_and_its_quotes(self):
 		"""The eval `an_approved_execute_shows_its_code` asserts on this text. A person approving

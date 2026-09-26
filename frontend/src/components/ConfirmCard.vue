@@ -34,18 +34,26 @@ const isApprovalQuestion = computed(() => {
 	const o = props.question.options;
 	return Array.isArray(o) && o.length === 2 && o[0] === "Approve" && o[1] === "Deny";
 });
+// Whether the card's headline is the ENGINE's own first line. When it is not — a tool returned a
+// question of its own, or there is no body to put under a headline — the body has to be the WHOLE
+// prompt, or paragraph 0 would be shown nowhere at all.
+const titleIsEngineHead = computed(
+	() => Boolean(engineBody.value) && (!confirm.value || isApprovalQuestion.value)
+);
 const title = computed(() =>
-	engineBody.value && (!confirm.value || isApprovalQuestion.value)
-		? engineHead.value
-		: confirm.value?.title ?? engineHead.value
+	titleIsEngineHead.value ? engineHead.value : confirm.value?.title ?? engineHead.value
 );
 const danger = computed(() => Boolean(confirm.value?.danger));
 // The question the engine asked, whole, as text. It used to be blanked whenever there was a tool —
 // which is always, on this path — so an approver read a label and a table of raw argument values and
 // never the sentence the tool's author wrote. The fallback covers the one-paragraph question and the
 // gated call with no arguments at all: both used to draw a card with nothing in it but two buttons.
-const body = computed(
-	() => engineBody.value || (confirm.value ? props.question.prompt.trim() : "")
+const body = computed(() =>
+	titleIsEngineHead.value
+		? engineBody.value
+		: confirm.value || engineBody.value
+		? props.question.prompt.trim()
+		: ""
 );
 // execute's description reaches the reader through the body now, not the title, so it is still right
 // to drop it from the table below — for that reason rather than the old one.

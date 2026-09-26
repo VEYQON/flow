@@ -119,7 +119,13 @@ class TestAQuestionWithNoToolPartStillHasSomethingToRead(IntegrationTestCase):
 		"""The empty-card case, and the one the sibling web apps shipped: a prompt with no blank
 		line in it, or a gated call with no arguments at all, drew a card containing a label and two
 		buttons and nothing else. The fallback is what closes it."""
-		self.assertIn('engineBody.value || (confirm.value ? props.question.prompt.trim() : "")', _text(CARD))
+		card = _text(CARD)
+		self.assertIn("titleIsEngineHead", card)
+		# The stronger property the security review asked for (its L3): when the headline is NOT the
+		# engine's own first line, the body is the WHOLE prompt, so paragraph 0 is never dropped.
+		body = card[card.index("const body = computed(") : card.index("// execute's description")]
+		self.assertIn("titleIsEngineHead.value", body)
+		self.assertIn("props.question.prompt.trim()", body)
 
 
 class TestApproveAndDenyNeverTakeFocus(IntegrationTestCase):
