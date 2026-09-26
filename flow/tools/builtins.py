@@ -56,7 +56,12 @@ def _for_display(value: Any, limit: int = _CONFIRM_STR_LIMIT) -> str:
 			# failure this helper exists to prevent. `escape_for_display` maps `"` to `\"`, so an
 			# UNESCAPED quote is a character no value can produce: it is the boundary, and anything
 			# after it is the engine's.
-			return '"{0}" {1}'.format("".join(shown), _("… ({0} characters in all)").format(len(text)))
+			# Flattened at use site. This literal is a translatable msgid, and a `Translation` row can
+			# carry a newline; the count is what tells a reader something was left out, so it must not
+			# be able to open a line of its own. `_render_confirm_template` flattens an
+			# administrator's sentence for exactly this reason.
+			count = " ".join(_("… ({0} characters in all)").format(len(text)).split())
+			return '"{0}" {1}'.format("".join(shown), count)
 		shown.append(escaped)
 		used += len(escaped)
 	return '"{0}"'.format("".join(shown))
@@ -88,13 +93,28 @@ def _display_json(value: Any, depth: int = 0) -> str:
 	if depth < 3 and isinstance(value, list):
 		items = [_display_json(v, depth + 1) for v in value[:6]]
 		if len(value) > 6:
-			items.append(f'"… +{len(value) - 6} more"')
+			# UNQUOTED, like `_for_display`'s own count and for the same reason: quoted, a value
+			# reading `… +7 more` in a three-element list was byte-identical to a ten-element list
+			# with seven hidden. An unescaped quote is the one boundary a value cannot forge, so
+			# every count in this module sits outside one.
+			items.append(f"… +{len(value) - 6} more")
 		return "[" + ", ".join(items) + "]"
 	if depth < 3 and isinstance(value, dict):
 		rows = [f"{_for_display(k)}: {_display_json(v, depth + 1)}" for k, v in list(value.items())[:6]]
 		if len(value) > 6:
-			rows.append(f'"…": "+{len(value) - 6} more"')
+			rows.append(f"… +{len(value) - 6} more")
 		return "{" + ", ".join(rows) + "}"
+	# A type that cannot carry an escape is shown as ITSELF, not as text. Quoting everything made a
+	# cleared field indistinguishable from a model writing the four letters "None", and a quantity of
+	# 3 indistinguishable from the character "3" — different writes, and the approval surface has to
+	# tell them apart. The quoting argument is about text, which is the only thing that can hide a
+	# control character inside it.
+	if value is None:
+		return "null"
+	if isinstance(value, bool):
+		return "true" if value else "false"
+	if isinstance(value, int | float):
+		return json.dumps(value)
 	return _for_display(value)
 
 
@@ -390,12 +410,21 @@ def _execute_confirm_prompt(args: dict[str, Any]) -> str:
 	because the short-code case is the common one — and then shown whole.
 	"""
 	sentence = _for_display(args.get("description")) if args.get("description") else _("Run Python code")
-	code = args.get("code") or ""
+	# Coerced before it is measured. `confirm_prompt` runs before the schema validates anything, so a
+	# model that sends a number here used to make the QUESTION raise — and a question that cannot be
+	# composed is a question nobody is asked, which is a worse failure than an ugly one. Nothing
+	# executed either way, but the turn died where it should have paused.
+	code = args.get("code")
+	code = code if isinstance(code, str) else ("" if code is None else str(code))
+	if not code:
+		# No block, so no sentence promising one.
+		return sentence
 	# The line between the two is the ENGINE's, always, and it states the length whether the block is
 	# long or short. A threshold left the common case — a few lines of code — with nothing above it
 	# but the model's own sentence, and the justification for leaving the code raw is precisely that
-	# the block is introduced AS code by someone other than the model.
-	introduction = _("The code that will run, in full ({0} characters):").format(len(code))
+	# the block is introduced AS code by someone other than the model. Flattened at use site because
+	# that is now load-bearing: a translation of this msgid must not be able to open a line.
+	introduction = " ".join(_("The code that will run, in full ({0} characters):").format(len(code)).split())
 	return f"{sentence}\n\n{introduction}\n\n{code}"
 
 
@@ -635,7 +664,7 @@ def delete(doctype: str, names: list[str]) -> dict[str, Any]:
 @tool(
 	requires_confirmation=True,
 	confirm_prompt=lambda args: (
-		_("Run '{0}' on {1} {2}: {3}").format(
+		_("Run {0} on {1} {2}: {3}").format(
 			_for_display(args.get("action")),
 			len(args.get("names") or []),
 			_for_display(args.get("doctype", "?")),

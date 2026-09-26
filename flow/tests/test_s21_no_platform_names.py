@@ -40,14 +40,18 @@ from frappe.tests import IntegrationTestCase
 from flow.assistant.assistant import ASSISTANT_INSTRUCTIONS
 from flow.tools.builtins import BUILTIN_TOOLS
 
-# The names, listed rather than derived, so the list is reviewable. Case-SENSITIVE and on a word
-# boundary; see the module docstring for why the case carries the meaning.
-BANNED_NAMES = (
-	"Frappe",
-	"DocType",
-	"DocTypes",
+# Two lists, because the case only carries meaning for two of the words. QA broke the first version
+# of this module by adding "on DeepSeek-backed mariadb storage" to a shipped tool description: the
+# vendor list was short, and the case-sensitivity defended for `frappe`/`doctype` had been applied to
+# every name, so a lowercase `mariadb` walked straight through.
+#
+# CASE-INSENSITIVE, because no spelling of any of these is an identifier the model has to type.
+BANNED_NAMES_ANY_CASE = (
 	"ERPNext",
 	"MariaDB",
+	"Postgres",
+	"PostgreSQL",
+	"Redis",
 	"OpenAI",
 	"Anthropic",
 	"Claude",
@@ -56,6 +60,24 @@ BANNED_NAMES = (
 	"Llama",
 	"Mistral",
 	"Ollama",
+	"DeepSeek",
+	"Qwen",
+	"Grok",
+	"Sonnet",
+	"Opus",
+	"Haiku",
+	"Copilot",
+	"Bedrock",
+	"Azure",
+	"AWS",
+)
+# CASE-SENSITIVE, and ONLY these: the lowercase spelling of each is an identifier the model must emit
+# (`frappe` the sandbox namespace, `doctype` a parameter name), so it is PINNED below instead of
+# banned. This is the whole and only extent of the case argument.
+BANNED_NAMES_EXACT_CASE = (
+	"Frappe",
+	"DocType",
+	"DocTypes",
 )
 # The product's own record-type names. Banned as PROSE for the same reason: "create a Flow Agent row"
 # tells the model the product's name. Matched as a phrase, because the bare word "Flow" also appears
@@ -89,16 +111,17 @@ STORED_OPTION_PHRASE = "Text/File/URL/DocType"
 # The exact surfaces that carry a pinned identifier today. A new one is a failure, not an exception.
 PINNED_SURFACES: dict[str, tuple[str, ...]] = {
 	"frappe": ("execute",),
-	# `execute` is not here: its description reaches the model with `find_doctypes` in it, and the
-	# word-boundary match does not fire inside a slug — which is the correct answer, since the slug is
-	# the thing the model types.
+	# `execute` is absent from THIS row, not the one above: its description reaches the model with
+	# `find_doctypes` in it, and the leading-boundary match below does not fire inside a slug — which
+	# is the right answer, since the slug is the thing the model types.
 	"doctype": ("describe", "read", "create", "update", "delete", "run_action"),
 }
 
 
 def _scan(text: str) -> list[str]:
-	"""Every banned name and product phrase in `text`. Case-sensitive, word-bounded."""
-	hits = {w for w in BANNED_NAMES if re.search(rf"\b{re.escape(w)}\b", text)}
+	"""Every banned name and product phrase in `text`, word-bounded at both ends."""
+	hits = {w for w in BANNED_NAMES_ANY_CASE if re.search(rf"\b{re.escape(w)}\b", text, re.IGNORECASE)}
+	hits |= {w for w in BANNED_NAMES_EXACT_CASE if re.search(rf"\b{re.escape(w)}\b", text)}
 	hits |= {p for p in BANNED_PRODUCT_PHRASES if p in text}
 	return sorted(hits)
 
@@ -132,7 +155,7 @@ class TestTheMatcherWorks(IntegrationTestCase):
 	proves nothing until the same search in the same form is shown to hit."""
 
 	def test_the_matcher_finds_every_banned_name_planted_in_a_sentence(self):
-		for word in BANNED_NAMES + BANNED_PRODUCT_PHRASES:
+		for word in BANNED_NAMES_ANY_CASE + BANNED_NAMES_EXACT_CASE + BANNED_PRODUCT_PHRASES:
 			with self.subTest(word=word):
 				self.assertIn(word, _scan(f"Use the {word} interface to list records."))
 
@@ -182,6 +205,29 @@ class TestNoBuiltinNamesThePlatform(IntegrationTestCase):
 		for tool in BUILTIN_TOOLS:
 			with self.subTest(tool=tool.name):
 				self.assertEqual(_scan(_confirm_body(tool)), [])
+
+
+class TestTheBoundToolsNameNoPlatformEither(IntegrationTestCase):
+	"""`BUILTIN_TOOLS` holds the UNBOUND `search_knowledge`, whose description is rebuilt from the
+	agent's knowledge bases when it is bound — so the form the model actually receives was never
+	scanned. The security review named this; it is checked here.
+
+	It also records a PRE-EXISTING exposure this run does not fix: record text becomes part of a tool
+	DESCRIPTION, i.e. of the schema the model is sent. That is a prompt-injection surface and it wants
+	its own spec; what this test can do is stop a PLATFORM NAME arriving through it.
+	"""
+
+	def test_the_bound_knowledge_tool_names_no_platform(self):
+		from flow.tools.builtins import bind_search_knowledge
+
+		self.assertEqual(_scan(_model_facing(bind_search_knowledge([]))), [])
+
+	def test_the_matcher_would_see_one_if_it_were_there(self):
+		"""The positive control, in the identical form."""
+		from flow.tools.builtins import bind_search_knowledge
+
+		planted = _model_facing(bind_search_knowledge([])).replace("passages", "DocType passages", 1)
+		self.assertEqual(_scan(planted), ["DocType"])
 
 
 class TestTheShippedInstructionsNameNoPlatform(IntegrationTestCase):

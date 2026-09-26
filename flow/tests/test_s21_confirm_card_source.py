@@ -44,6 +44,16 @@ def _text(path: pathlib.Path) -> str:
 	return path.read_text(encoding="utf-8")
 
 
+def _template(card: str) -> str:
+	"""The `<template>` block alone. A cap or a wrapper added in the markup is invisible to an
+	assertion that only reads the stylesheet — QA proved exactly that."""
+	return card[card.index("<template>") : card.index("</template>")]
+
+
+def _style(card: str) -> str:
+	return card[card.index("<style scoped>") : card.index("</style>")]
+
+
 class TestTheFilesAreWhereThisModuleThinksTheyAre(IntegrationTestCase):
 	"""The control for every assertion below. `assertNotIn` on a file that does not exist would be
 	a test that passes by reading nothing — the exact shape of a false green."""
@@ -87,13 +97,22 @@ class TestNeitherSuppressorIsPresent(IntegrationTestCase):
 
 class TestTheBodyIsShownWholeAsText(IntegrationTestCase):
 	def test_there_is_no_height_cap_on_the_body(self):
-		"""Inside the `.flow-confirm-body` rule only — a cap anywhere else in the stylesheet is
-		somebody else's business, and asserting on the whole file would fail for an unrelated rule."""
+		"""The FIRST version of this test read the `.flow-confirm-body` rule and nothing else, and QA
+		broke it in one move: wrap the `<pre>` in `<div style="max-height: 220px; overflow: auto">`
+		and the cap is back with the rule still clean. So the assertion is now on the whole
+		component — the stylesheet AND the markup — because a cap is a cap wherever it is written."""
 		card = _text(CARD)
 		start = card.index(".flow-confirm-body {")
 		rule = card[start : card.index("}", start)]
 		self.assertNotIn("max-height", rule)
 		self.assertNotIn("overflow", rule)
+		self.assertNotIn("max-height", _style(card), "a height cap moved to another rule")
+		self.assertNotIn("overflow", _style(card), "an internal scroll moved to another rule")
+		self.assertNotIn("max-height", _template(card), "a height cap moved into the markup")
+		self.assertNotIn("overflow", _template(card), "an internal scroll moved into the markup")
+		self.assertNotIn(
+			"style=", _template(card), "an inline style can carry a cap no stylesheet assertion sees"
+		)
 
 	def test_no_show_more_affordance_is_introduced_on_the_body(self):
 		"""The same defect wearing a button. `ClampText` and `CodeBlock` are how a value in the
@@ -121,9 +140,16 @@ class TestAQuestionWithNoToolPartStillHasSomethingToRead(IntegrationTestCase):
 		buttons and nothing else. The fallback is what closes it."""
 		card = _text(CARD)
 		self.assertIn("titleIsEngineHead", card)
+		body = card[card.index("const body = computed(") : card.index("// execute's description")]
+		# QA broke the first version of this by replacing the whole computed with
+		# `titleIsEngineHead.value ? "" : props.question.prompt.trim()` — which blanks the body on
+		# EXACTLY the live approval path, the defect S21 exists to fix — while keeping both substrings
+		# this test asked for. So the engine body itself has to be named, and the empty-string branch
+		# has to be absent.
+		self.assertIn("engineBody.value", body, "the body no longer renders the engine's own body")
+		self.assertNotIn('? ""', body, "the body has a branch that renders nothing")
 		# The stronger property the security review asked for (its L3): when the headline is NOT the
 		# engine's own first line, the body is the WHOLE prompt, so paragraph 0 is never dropped.
-		body = card[card.index("const body = computed(") : card.index("// execute's description")]
 		self.assertIn("titleIsEngineHead.value", body)
 		self.assertIn("props.question.prompt.trim()", body)
 

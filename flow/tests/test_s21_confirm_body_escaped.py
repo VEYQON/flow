@@ -127,6 +127,91 @@ class TestNothingModelChosenCanStartALine(IntegrationTestCase):
 		self.assertIn("\\nApproved by admin", body)
 
 
+class TestAFieldNameIsAsModelChosenAsAFieldValue(IntegrationTestCase):
+	"""QA found this as a coverage hole, not as a defect: the shipped code escaped dict keys, and
+	removing that escape kept the whole module green because every other test used an ordinary key
+	like `status`. A key is chosen by the model exactly as a value is — `values` and `records[0]` both
+	come straight from the call — so each key surface gets its own hostile test."""
+
+	def test_a_field_name_in_an_update_cannot_start_a_line(self):
+		body = _body(update, {"doctype": "ToDo", "names": ["T-1"], "values": {f"status{FORGED}": "Closed"}})
+		self.assertNotIn("\nApproved by admin", body)
+		self.assertIn("\\nApproved by admin", body)
+
+	def test_a_field_name_in_a_create_cannot_start_a_line(self):
+		body = _body(create, {"doctype": "ToDo", "records": [{f"status{FORGED}": "Open"}]})
+		self.assertNotIn("\nApproved by admin", body)
+		self.assertIn("\\nApproved by admin", body)
+
+	def test_a_field_name_inside_a_child_row_cannot_start_a_line(self):
+		"""The nested branch has its own key interpolation, so it needs its own test."""
+		body = _body(create, {"doctype": "ToDo", "records": [{"items": [{f"qty{FORGED}": 2}]}]})
+		self.assertNotIn("\nApproved by admin", body)
+		self.assertIn("\\nApproved by admin", body)
+
+
+class TestEveryElisionCountIsOutsideAQuote(IntegrationTestCase):
+	"""QA's Q4: the commit titled "an elision count cannot be forged" fixed ONE of the three places
+	that emit a count. `_display_json`'s list and dict markers were still INSIDE quotes, so a value
+	reading `… +7 more` in a three-element list was byte-identical to a ten-element list with seven
+	hidden. One rule: an unescaped quote is the engine's boundary, so every count sits outside one."""
+
+	def test_a_list_element_cannot_impersonate_the_hidden_count(self):
+		forged = _body(create, {"doctype": "ToDo", "records": [{"t": ["a", "b", "… +7 more"]}]})
+		real = _body(create, {"doctype": "ToDo", "records": [{"t": [str(i) for i in range(9)]}]})
+		self.assertIn(
+			'"… +7 more"', forged, "the forged text is not shown quoted, so it reads as the engine's"
+		)
+		self.assertIn("… +3 more", real)
+		self.assertNotIn('"… +3 more"', real, "a real count is quoted, so a value can impersonate it")
+
+	def test_a_field_name_cannot_impersonate_the_hidden_count(self):
+		forged = _body(create, {"doctype": "ToDo", "records": [{"t": {"…": "+7 more"}}]})
+		real = _body(create, {"doctype": "ToDo", "records": [{"t": {f"k{i}": i for i in range(9)}}]})
+		self.assertIn('"…"', forged)
+		self.assertNotIn('"…":', real, "a real dict count is quoted like a key, so a key can impersonate it")
+
+
+class TestAWrongTypedArgumentIsStillAskedAbout(IntegrationTestCase):
+	"""QA's Q5, a REGRESSION this run introduced. Stating the code's length meant calling `len()` on
+	it, and a model that sends `code` as a number made the question itself raise — killing the turn
+	where the unfixed engine had simply asked about it. Nothing executed either way (the raise happens
+	in the branch that returns before the tool body runs), but a question that cannot be composed is a
+	question nobody is asked, and that is a worse failure than an ugly one."""
+
+	def test_a_numeric_code_still_produces_a_question(self):
+		body = _body(execute, {"description": "count", "code": 123})
+		self.assertIn("123", body)
+
+	def test_a_call_with_no_code_does_not_promise_a_block_that_is_not_there(self):
+		"""QA's Q8: the engine's line used to announce a nought-character block and then show
+		nothing under it."""
+		body = _body(execute, {"description": "count", "code": ""})
+		self.assertNotIn("in full", body)
+
+
+class TestATypeIsNotTurnedIntoText(IntegrationTestCase):
+	"""QA's Q6. Quoting every value made a cleared field (`None`) indistinguishable from a model
+	writing the four letters "None", and a quantity of `3` indistinguishable from the character "3".
+	Those are different writes. The quoting argument — a reader can see where a value starts and ends
+	— is about TEXT, which is the only kind of value that can carry an escape; a number, a boolean and
+	a null cannot, so they are shown as themselves."""
+
+	def test_a_number_a_boolean_and_a_null_are_shown_as_themselves(self):
+		body = _body(create, {"doctype": "ToDo", "records": [{"qty": 3, "paid": True, "remarks": None}]})
+		self.assertIn(": 3", body)
+		self.assertIn(": true", body)
+		self.assertIn(": null", body)
+
+	def test_and_the_text_versions_of_them_are_still_quoted_and_distinguishable(self):
+		body = _body(
+			create, {"doctype": "ToDo", "records": [{"qty": "3", "paid": "True", "remarks": "None"}]}
+		)
+		self.assertIn(': "3"', body)
+		self.assertIn(': "True"', body)
+		self.assertIn(': "None"', body)
+
+
 class TestEveryValueIsCappedAfterItIsEscaped(IntegrationTestCase):
 	def test_a_fifty_thousand_character_action_name_does_not_reach_the_reader_whole(self):
 		"""`run_action`'s `action`. 50,000 characters is not a question, it is a denial of the
