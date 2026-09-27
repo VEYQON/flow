@@ -1,5 +1,6 @@
 // Tool name/args → plain-English labels, context, and value-shape helpers.
 import { __ } from "@/lib/translate";
+import { displayText, displayScalar } from "@/lib/display";
 
 export function parseArgs(args) {
 	if (!args) return {};
@@ -24,10 +25,18 @@ export function rawArgs(args) {
 }
 
 // snake_case / a name → "Snake case".
+//
+// The argument LABELS on the approval card come through here, and they are as model-chosen as the
+// values beside them: they are the keys of the JSON object the model emitted for its own tool call.
+// A key can therefore carry a bidi override, or be 50 000 characters long, so the humanized name
+// goes through the one display rule — which returns an ordinary key unchanged, so no label a person
+// reads today looks any different.
 export function humanize(name) {
-	return String(name || "")
-		.replace(/_/g, " ")
-		.replace(/^./, (c) => c.toUpperCase());
+	return displayText(
+		String(name || "")
+			.replace(/_/g, " ")
+			.replace(/^./, (c) => c.toUpperCase())
+	);
 }
 
 // Present-tense label per builtin; custom tools fall back to a humanized name.
@@ -90,11 +99,13 @@ export function toolError(result) {
 
 export const isScalar = (v) => v === null || typeof v !== "object";
 
+// Every scalar argument value on the approval card becomes text HERE, and nowhere else: the
+// two-column cell, the tuple inside a filter condition, and every chip in a list all call this one
+// function. So this is where the escaping belongs — one call, covering four render sites, rather than
+// four call sites that can drift apart. `displayScalar` keeps this function's own type handling
+// unchanged and adds the rule for the one type that can hide a control character inside it.
 export function formatScalar(v) {
-	if (v === null || v === undefined || v === "") return "—";
-	if (typeof v === "boolean") return v ? __("Yes") : __("No");
-	if (typeof v === "object") return "—"; // empty {} / [] — non-empty renders elsewhere
-	return String(v);
+	return displayScalar(v);
 }
 
 // Text that must render as a full-width code block rather than inline: multi-line
@@ -172,9 +183,15 @@ export function toolContext(args) {
 const pick = (one, many, n, doctype) => (n === 1 ? __(one, [doctype]) : __(many, [n, doctype]));
 
 // What exactly is being approved, derived from the call's own arguments.
+// The headline sits ABOVE `pre.flow-confirm-body`, so S21's D0 escaping — which the engine applies
+// when it composes the question — never reached it. Every value substituted into it is model-chosen:
+// the doctype, the action, and `execute`'s own `description`. They are escaped one by one, at the
+// point of substitution, rather than by escaping the composed line: the line itself is a translated
+// literal that carries quotes of its own (`Run "{0}" on {1}`), and escaping it whole would put a
+// backslash in front of those.
 export function confirmTitle(name, args) {
 	const a = parseArgs(args);
-	const doctype = typeof a.doctype === "string" ? a.doctype : "";
+	const doctype = typeof a.doctype === "string" ? displayText(a.doctype) : "";
 	const count = (v) => (Array.isArray(v) && v.length ? v.length : 1);
 	let title = null;
 	if (name === "create" && doctype)
@@ -190,6 +207,9 @@ export function confirmTitle(name, args) {
 		]);
 	else if (name === "execute")
 		title =
-			(typeof a.description === "string" && a.description.trim()) || __("Run Python code");
+			(typeof a.description === "string" &&
+				a.description.trim() &&
+				displayText(a.description.trim())) ||
+			__("Run Python code");
 	return { title: title || toolLabel(name), danger: name === "delete" };
 }

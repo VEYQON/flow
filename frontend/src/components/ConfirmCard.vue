@@ -4,6 +4,7 @@ import { Button, FeatherIcon } from "@/lib/ui";
 import ArgsView from "./ArgsView.vue";
 import { confirmTitle, hasArgs, parseArgs, blockKeysFor } from "@/lib/toolMeta";
 import { __ } from "@/lib/translate";
+import { displayText } from "@/lib/display";
 
 const props = defineProps({
 	question: { type: Object, required: true },
@@ -63,15 +64,20 @@ const displayArgs = computed(() => {
 	return rest;
 });
 const showArgs = computed(() => Boolean(props.tool) && hasArgs(displayArgs.value));
-const blockKeys = computed(() => blockKeysFor(props.tool?.name));
+// The tool's declaration, and the only thing on this card that renders raw. `blockKeysFor` reads the
+// static `CODE_ARG_KEYS` table and nothing else.
+const codeKeys = computed(() => blockKeysFor(props.tool?.name));
 const answered = computed(() => props.question._answer !== undefined);
 
 // Options are stable tokens ("Approve"/"Deny"); translate only for display.
-// LLM-authored options pass through as-is.
+// The two tokens the engine's own approval pair uses are translated for display. Any OTHER option is
+// a string the card did not write — a tool may return a Question with options of its own — so it is
+// displayed through the one rule. Only the LABEL is; `pick(opt)` still emits the token byte for byte,
+// because what executes must never depend on how it was drawn.
 function optLabel(opt) {
 	if (opt === "Approve") return __("Approve");
 	if (opt === "Deny") return __("Deny");
-	return opt;
+	return displayText(String(opt));
 }
 
 // A pause used to scroll the message list to its bottom. With the body capped at 220px that left
@@ -125,7 +131,7 @@ function sendOther() {
 			>
 				{{ __("Details") }}
 			</div>
-			<ArgsView :arguments="displayArgs" :block-keys="blockKeys" />
+			<ArgsView :arguments="displayArgs" :code-keys="codeKeys" />
 		</div>
 
 		<div
