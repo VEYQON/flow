@@ -279,17 +279,32 @@ def _served_mismatch(served: str | None, asked_for: str | None) -> dict[str, int
 	addition. A count fits, sums, and answers the only question a consumer needs to ask of it.
 
 	WHY THE PROVIDER PREFIX COMES OFF FIRST, and it is the difference between a counter and noise.
-	`asked_for` is `Model.model_id`, and the `Flow Model` doctype VALIDATES that it is in
-	`provider/model` form — it refuses anything else. The client library strips that prefix before the
-	request leaves, so the identifier on the reply is the bare model name and never equals what was
-	asked for. The first version of this function compared the two whole strings and therefore counted
-	a mismatch on **100% of calls**: every turn unpriceable, and a stored count that was nothing but a
-	duplicate of the model-call count. A reviewer caught it by calling the library rather than by
-	reading the function, and none of the fixtures could see it because every one was an invented bare
-	name with no prefix on it.
+	`asked_for` is `Model.model_id`, which the `Flow Model` doctype validates into `provider/model`
+	form. The client library strips that prefix before the request leaves, so the identifier on the
+	reply is the bare model name and never equals what was asked for. The first version of this
+	function compared the two whole strings and therefore counted a mismatch on **100% of calls**:
+	every turn unpriceable, and a stored count that was nothing but a duplicate of the model-call
+	count. A reviewer caught it by calling the library rather than by reading the function, and none
+	of the fixtures could see it because every one was an invented bare name with no prefix on it.
 
-	The prefix is routing syntax — which adapter places the call — and not identity. Taking it off
-	compares exactly the model part and nothing else.
+	(That validation is the doctype's, not this class's: a `Model` constructed directly with
+	`model_id=` — the code-only Agent path — never passes through it, so a bare name with no slash
+	reaches here. `rsplit` returns the whole string in that case and the comparison is still right.
+	An earlier draft of this docstring claimed the shape was guaranteed; it is not.)
+
+	WHAT THIS DELIBERATELY DOES NOT SEE, stated because the docstring below motivates the counter
+	with exactly this case. A configured fallback changes the PROVIDER, and comparing only the model
+	part discards it: a call written as `openai/gpt-4o` and answered from Azure or OpenRouter, at a
+	different rate, records nothing here. For pricing the adapter IS part of the identity, so calling
+	the prefix "mere routing syntax" would be wrong. The reason it is dropped anyway is that the
+	prefix on the REQUEST and the name on the REPLY are not the same kind of thing, so comparing them
+	can only ever fire always or never. The provider that actually served is available — the client
+	library puts it on the response's private `_hidden_params` under `custom_llm_provider` — and
+	reading it would close this: compare it against `asked_for.split("/", 1)[0]` and count a mismatch
+	independently of the model name. It is not done here because it couples the engine to a private
+	attribute of a third-party library, which is a change that deserves its own spec rather than a
+	line smuggled into a bug fix. **OPEN, and narrowed on purpose: this counter answers "a different
+	model", not yet "a different provider".**
 
 	WHY THE REST OF THE COMPARISON IS EXACT, deliberately. Past the prefix nothing is normalised: a
 	"helpful" version stripping a trailing date or lowercasing would treat two genuinely different
@@ -309,10 +324,15 @@ def _served_mismatch(served: str | None, asked_for: str | None) -> dict[str, int
 	if not served or not asked_for:
 		return {}
 	# `rsplit` and not `split`: a model part may itself hold slashes (`openrouter/meta-llama/llama-3`),
-	# and what the library sends on is everything the provider adapter did not consume. Comparing
-	# against BOTH forms means a provider that echoes the prefix back is not counted as a mismatch
-	# either — the question is which model answered, and neither spelling changes that answer.
-	if served in (asked_for, asked_for.rsplit("/", 1)[-1]):
+	# and what the library sends on is everything the provider adapter did not consume. The `rstrip`
+	# handles the degenerate config the validator happens to permit — a trailing slash leaves the last
+	# segment EMPTY, an empty segment matches nothing, and such a model counted on every single call:
+	# the always-fires bug again, surviving in a corner of its own fix. `or asked_for` is the floor
+	# for a value that is nothing but slashes.
+	bare = asked_for.rstrip("/").rsplit("/", 1)[-1] or asked_for
+	# Both spellings, so a provider that echoes the prefix back is not counted either — the question
+	# is which model answered, and neither spelling changes that answer.
+	if served in (asked_for, bare):
 		return {}
 	return {"served_model_mismatch": 1}
 

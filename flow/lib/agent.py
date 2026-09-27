@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import numbers
 import re
 import unicodedata
 from collections.abc import Generator, Iterable
@@ -1397,15 +1398,24 @@ def _accumulate_usage(total: dict[str, int], delta: dict[str, int]) -> None:
 	for key, value in delta.items():
 		if isinstance(value, bool):
 			continue
-		if isinstance(value, int):
-			amount: int | float = value
-		elif isinstance(value, float):
+		if isinstance(value, numbers.Number) and not isinstance(value, complex):
+			# NOT `numbers.Real`, and the difference is the whole point of this branch: `Decimal` is
+			# registered against `numbers.Number` and DELIBERATELY NOT against `Real`, so a
+			# `Real` test sends it to the `int()` fall-through and floors it to zero on every call —
+			# the very defect the float branch was added to fix, one type over, and `Decimal` is what
+			# the framework's Currency reads hand back and the obvious type for a cost. `complex` is
+			# excluded because it is a `Number` that `math.isfinite` will not even accept.
 			if not math.isfinite(value):
 				continue
-			amount = value
+			amount: Any = value
 		else:
 			try:
 				amount = int(value)
-			except (TypeError, ValueError, OverflowError):
+			except Exception:
+				# Deliberately every exception, not a list of the ones someone thought of. The list
+				# was `(TypeError, ValueError)`, which did not include the `OverflowError` that
+				# `int(float("inf"))` raises, and then `(TypeError, ValueError, OverflowError)`,
+				# which did not include whatever a foreign object's `__int__` raises. A count is
+				# never worth a turn: the work is done and the person is owed the answer.
 				continue
 		total[key] = total.get(key, 0) + amount

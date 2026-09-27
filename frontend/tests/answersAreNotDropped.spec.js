@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { answersPayload } from "@/lib/answers";
 
 // THE ANSWER A PERSON CLICKED MUST REACH THE SERVER.
@@ -59,6 +61,27 @@ describe("an approval keyed by an inherited name is not silently dropped", () =>
 
 		expect(Object.keys(sent).sort()).toEqual([...keys].sort());
 		for (const key of keys) expect(sent[key]).toBe("Approve");
+	});
+
+	// THE WIRING, and it is a source grep on purpose — the one thing left that cannot be called.
+	//
+	// Moving the three lines into `@/lib/answers` made the FUNCTION testable and left the CALL SITE
+	// with no assertion at all, which a reviewer proved by re-running the original mutation against
+	// the new arrangement: `answers.js` untouched and correct, `store.js` inlining a plain object
+	// beside it, 196 of 196 green, and an approval clicked on a `__proto__` key transmitted as `{}`
+	// again. The old grep at least refused `const answers = {};`. Deleting it without replacing it
+	// made `store.js` LESS pinned than before the fix.
+	//
+	// A grep proves no behaviour and this one does not pretend to. It proves the only proposition
+	// left over: that the module a person's decision actually travels through is the one the four
+	// tests above are about.
+	it("store.js sends the payload this module builds, and not one of its own", () => {
+		const src = readFileSync(resolve(process.cwd(), "frontend/src/store.js"), "utf8");
+
+		expect(src).toContain("resume(answersPayload(msg.questions), msg);");
+		// The shapes a re-inlining takes. Neither may appear anywhere in the file.
+		expect(src).not.toContain("const answers = {};");
+		expect(src).not.toContain("const payload = {};");
 	});
 
 	it("the ordinary payload is unchanged, which is what stops the fix being a new bug", () => {

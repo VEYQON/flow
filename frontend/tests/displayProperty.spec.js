@@ -73,6 +73,17 @@ function readBack(shown) {
 //     spec rather than a patch.
 //   - **Runs of ordinary spaces.** The space is exempt from escaping on purpose, and the two-column
 //     cell is not `pre-wrap`, so HTML collapses `a  b` to `a b`. It can pad, not forge a word.
+//   - **Characters that render as a VISIBLE-WIDTH blank**, which is a class and not the one example
+//     this list used to give. A reviewer swept every code point for a name declaring it blank and
+//     found twelve outside the escape set: U+2422 BLANK SYMBOL, U+2800 BRAILLE PATTERN BLANK,
+//     U+303F IDEOGRAPHIC HALF FILL SPACE, U+A8F9 DEVANAGARI GAP FILLER, U+10AF6, U+1144E, U+11945,
+//     U+11C44, U+11C45, U+11F48 (gap/space fillers), and U+13441/U+13442 EGYPTIAN HIEROGLYPH FULL
+//     and HALF BLANK — the last two being `Lo`, the same shape as the Hangul-filler finding. They
+//     occupy width, so they pad rather than collapse, which is why they sit with the space run and
+//     not with the invisibles. They are NOT harmless: a trailing U+2800 on a record name is
+//     invisible to a reader and, unlike a trailing ASCII space, HTML does not collapse it. Left
+//     open rather than closed quietly, because widening the rule to "renders blank" needs a
+//     definition Unicode does not supply and this file should not invent.
 //
 // The injectivity test below is therefore about what the ESCAPING distinguishes, not about everything
 // a reader could confuse — which is a narrower claim than the one it used to make, and a true one.
@@ -209,9 +220,19 @@ describe("THE INVARIANT: what the card shows is what will run, character for cha
 		// Not one raw line break of any of the five kinds reaches the DOM, so no value can draw a
 		// line of its own inside the box.
 		expect(ANY_LINE_BREAK.test(shown)).toBe(false);
-		// Nothing invisible reaches it either: every C* and Z* code point but the ordinary space is
-		// gone from the rendered text, which is what makes "two values that read alike" impossible.
-		expect(/[\p{C}\p{Z}]/u.test(shown.replace(/ /g, ""))).toBe(false);
+		// Nothing invisible reaches it either: every C* and Z* code point AND every code point the
+		// renderer paints as nothing, the ordinary space excepted, is gone from the rendered text —
+		// which is what makes "two values that read alike" impossible.
+		//
+		// THE THIRD TERM WAS MISSING HERE AFTER THE RULE GAINED IT, and a reviewer measured what
+		// that cost: with the default-ignorable term deleted from `display.js`, this assertion
+		// passed for all nine of the new rows, because its own regex could not see the very class
+		// the rows were added for. Only the round trip and the injectivity test went red. An
+		// assertion about "nothing invisible" has to use the same definition of invisible as the
+		// rule it is checking, or it is checking a different rule.
+		expect(/[\p{C}\p{Z}\p{Default_Ignorable_Code_Point}]/u.test(shown.replace(/ /g, ""))).toBe(
+			false
+		);
 		// And the ordinary text around the attack is still legible — an escaper that mangled
 		// everything would satisfy both assertions above.
 		expect(shown).toContain("T-1");

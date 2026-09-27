@@ -19,6 +19,7 @@ through. Nothing captured that they had differed, so the figure could be labelle
 authoritative source the record has and still be a figure for a different thing.
 """
 
+from decimal import Decimal
 from types import SimpleNamespace
 
 from frappe.tests import UnitTestCase
@@ -89,6 +90,40 @@ class TestUsageIsAddedNotAssigned(UnitTestCase):
 
 		self.assertIsInstance(total["prompt_tokens"], int)
 		self.assertEqual(total["prompt_tokens"], 10)
+
+	def test_a_decimal_is_a_fraction_too(self):
+		"""The same defect one type over, and it is the type a money count actually arrives as.
+
+		The first repair branched on `int`, then `float`, and let everything else fall through to
+		`int()` — so `Decimal("0.004")` was floored to 0 on every call exactly as the float had been,
+		while the docstring above said "A FRACTION IS KEPT AS A FRACTION". `Decimal` is what the
+		framework's Currency reads hand back and the obvious type for the "cost" key that same
+		docstring invites, so this is the path the feature would have been built on."""
+		total = {}
+		for _ in range(3):
+			_accumulate_usage(total, {"cost": Decimal("0.004")})
+
+		self.assertEqual(total["cost"], Decimal("0.012"))
+
+	def test_a_number_that_refuses_to_become_one_does_not_end_the_turn_either(self):
+		"""`except (TypeError, ValueError, OverflowError)` was still a list of the exceptions someone
+		thought of — the same shape as the `OverflowError` hole it had just replaced. An object whose
+		`__int__` raises anything else killed the turn. A count is never worth a turn."""
+
+		class Awkward:
+			def __int__(self):
+				raise ZeroDivisionError("boom")
+
+		total = {"prompt_tokens": 1}
+		_accumulate_usage(total, {"prompt_tokens": 2, "weird": Awkward()})
+
+		self.assertEqual(total, {"prompt_tokens": 3})
+
+	def test_a_non_finite_decimal_is_skipped_like_a_non_finite_float(self):
+		total = {"prompt_tokens": 1}
+		_accumulate_usage(total, {"a": Decimal("NaN"), "b": Decimal("Infinity")})
+
+		self.assertEqual(total, {"prompt_tokens": 1})
 
 	def test_a_non_finite_number_does_not_end_the_turn(self):
 		"""`json.loads('{"prompt_tokens": Infinity}')` succeeds — the standard library accepts that
@@ -197,6 +232,12 @@ class TestTheReplySaysWhatAnsweredIt(UnitTestCase):
 	def test_only_the_last_segment_is_the_model_and_a_route_of_its_own_still_counts(self):
 		"""A prefix is stripped; a genuinely different name behind one is not excused by it."""
 		self.assertEqual(_normalize(_reply("gpt-4o"), "openai/gpt-4o-mini").usage["served_model_mismatch"], 1)
+
+	def test_a_trailing_slash_does_not_make_every_call_a_mismatch(self):
+		"""The degenerate config, which the validator permits: `MODEL_ID_PATTERN` allows a trailing
+		slash, `rsplit` then yields the empty string, and such a model counted on every single call —
+		the same always-fires failure the prefix bug had, surviving in a corner of it."""
+		self.assertNotIn("served_model_mismatch", _normalize(_reply("gpt4"), "openai/gpt4/").usage)
 
 	def test_a_dated_build_behind_a_prefix_is_still_a_different_thing(self):
 		"""The two halves together, which is the case this actually has to get right in production:
