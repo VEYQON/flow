@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import unicodedata
 from collections.abc import Generator, Iterable
@@ -1069,6 +1070,51 @@ def _assistant_message(response: ChatResponse) -> dict[str, Any]:
 	return message
 
 
+# Unicode's own `Default_Ignorable_Code_Point` property: "a conformant renderer paints nothing
+# here". `unicodedata` does not expose it, so it is written out — 17 ranges, 4174 code points,
+# derived from the same property the panel's `/\p{Default_Ignorable_Code_Point}/u` matches and
+# cross-checked against it, because the two escapers are one rule ported and drifting is the whole
+# risk (`frontend/src/lib/display.js`, `frontend/tests/displayProperty.spec.js`).
+#
+# WHY IT IS HERE AT ALL, since the rule beside it already takes every C* and Z* category: **267 of
+# these are in neither.** Four are category `Lo` — LETTERS — so no rule about controls, formats,
+# separators or combining marks could ever have reached them, and they are invisible, which is the
+# entire attack. A reviewer found this by measuring the property against the rule; reading the rule
+# would not have shown it.
+_DEFAULT_IGNORABLE_RANGES = (
+	(0x00AD, 0x00AD),
+	(0x034F, 0x034F),
+	(0x061C, 0x061C),
+	(0x115F, 0x1160),
+	(0x17B4, 0x17B5),
+	(0x180B, 0x180F),
+	(0x200B, 0x200F),
+	(0x202A, 0x202E),
+	(0x2060, 0x206F),
+	(0x3164, 0x3164),
+	(0xFE00, 0xFE0F),
+	(0xFEFF, 0xFEFF),
+	(0xFFA0, 0xFFA0),
+	(0xFFF0, 0xFFF8),
+	(0x1BCA0, 0x1BCA3),
+	(0x1D173, 0x1D17A),
+	(0xE0000, 0xE0FFF),
+)
+
+
+def _paints_nothing(ch: str) -> bool:
+	"""True for a code point a conformant renderer draws as nothing, whatever category it is filed
+	under. Seventeen ranges is short enough that a scan is cheaper than building a set per call and
+	clearer than a bisect; the list is sorted and the scan stops early."""
+	cp = ord(ch)
+	for low, high in _DEFAULT_IGNORABLE_RANGES:
+		if cp < low:
+			return False
+		if cp <= high:
+			return True
+	return False
+
+
 def _escaped(text: str) -> str:
 	"""Text made safe to read: every character that could move the cursor is shown, never obeyed.
 
@@ -1099,7 +1145,7 @@ def _escaped(text: str) -> str:
 			out.append("\\r")
 		elif ch == "\t":
 			out.append("\\t")
-		elif ch != " " and unicodedata.category(ch)[0] in "CZ":
+		elif ch != " " and (unicodedata.category(ch)[0] in "CZ" or _paints_nothing(ch)):
 			out.append(f"\\u{ord(ch):04x}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08x}")
 		else:
 			out.append(ch)
@@ -1330,14 +1376,36 @@ def _accumulate_usage(total: dict[str, int], delta: dict[str, int]) -> None:
 	happened three times. A flag is not a quantity; anything that wants to say "this happened" says it
 	as the integer 1 and is then countable on purpose.
 
+	A FRACTION IS KEPT AS A FRACTION. This used to coerce with `int()`, which floored a per-call cost
+	of 0.004 to ZERO on every call and totalled nothing, with no log — and the docstring above offers
+	"a cost in micros" as exactly the sort of key it now sums, so the invitation and the trap were in
+	the same paragraph. Truncation applied per call, so the error grew with the number of calls,
+	which is the direction this function is supposed to be fixing. Integers still add as integers;
+	only a value that arrives fractional stays fractional.
+
+	NOTHING NON-FINITE GETS IN. `json.loads('{"prompt_tokens": Infinity}')` succeeds — the standard
+	library accepts that non-standard literal — so `inf` and `nan` can arrive from a malformed or
+	hostile upstream body. `int(float("inf"))` raises `OverflowError`, which the previous
+	`except (TypeError, ValueError)` did not catch, so a turn that had already done its work died
+	over its own meter. A count is skipped instead: the person is owed the answer whatever the meter
+	says, and a total holding `nan` is worse than a total missing a key, because `nan` propagates
+	silently through every sum downstream while a missing key is visible.
+
 	Everything else that will coerce to an integer still does, exactly as before, and anything that
 	will not is skipped rather than crashing the turn over a number.
 	"""
 	for key, value in delta.items():
 		if isinstance(value, bool):
 			continue
-		try:
-			amount = int(value)
-		except (TypeError, ValueError):
-			continue
+		if isinstance(value, int):
+			amount: int | float = value
+		elif isinstance(value, float):
+			if not math.isfinite(value):
+				continue
+			amount = value
+		else:
+			try:
+				amount = int(value)
+			except (TypeError, ValueError, OverflowError):
+				continue
 		total[key] = total.get(key, 0) + amount

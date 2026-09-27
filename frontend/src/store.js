@@ -1,6 +1,7 @@
 import { ref, computed } from "vue";
 import * as api from "@/api/client";
 import { startRun, resumeRun } from "@/api/stream";
+import { answersPayload } from "@/lib/answers";
 import { normalizeToolName } from "@/lib/toolMeta";
 import { readPanelState } from "@/lib/panelState";
 import { __ } from "@/lib/translate";
@@ -379,18 +380,13 @@ function answerQuestion(msg, question, answer) {
 
 	if (msg.questions.some((q) => q._answer === undefined)) return;
 
-	// `Object.create(null)`, and it is load-bearing rather than tidy. `q.key` is a tool-call id that
-	// arrives from the model's own reply — and on the resume path `prepareQuestions` spreads whole rows
-	// out of a stored JSON blob without validating one field of them. On a plain object,
-	// `answers["__proto__"] = "Approve"` invokes the prototype setter, which ignores a string: NO own
-	// property is created, so `JSON.stringify` sends `{}` and **an approval a person clicked is sent as
-	// though they never answered**. That is the same inherited-key defect the display side had, on the
-	// surface that carries the DECISION instead of the picture of it, where it is worse: there the card
-	// failed loudly, here it fails silently and in the direction of doing nothing. A null-prototype
-	// object has no setter to invoke, and `JSON.stringify` treats it identically otherwise.
-	const answers = Object.create(null);
-	msg.questions.forEach((q) => (answers[q.key] = q._answer));
-	resume(answers, msg);
+	// `@/lib/answers` and not three lines here, because three lines here could not be tested: this
+	// module cannot be imported by a test, so the only assertion available was a grep of its source
+	// text — and a reviewer left the safe line in place, added a plain object beside it, sent that
+	// one, and the whole suite stayed green with the defect fully restored. The rule the function
+	// carries (a key that arrives from the model is DATA, and a plain object answers for eight names
+	// it was never given) is the same one `lib/toolMeta.js` applies to the display side.
+	resume(answersPayload(msg.questions), msg);
 }
 
 function handleEvent(event, msg) {

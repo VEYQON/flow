@@ -26,7 +26,22 @@ import { __ } from "@/lib/translate";
 // The engine's docstring records how it got here: the rule began as the categories that looked
 // dangerous, Cc and Cf, and that list missed U+2028 and U+2029, which every layout engine treats as
 // line breaks. A whitelist means a later revision of Unicode cannot quietly add a new way through.
-const CONTROL_OR_SEPARATOR = /[\p{C}\p{Z}]/u;
+//
+// `\p{Default_Ignorable_Code_Point}` is the third term and it was MISSING, which a reviewer caught
+// by measuring rather than by reading: 267 code points carry that property and are in neither C*
+// nor Z*, so every one of them came through raw AND UNQUOTED — without even the quote that is
+// supposed to be the signal that something was escaped. The property means precisely what this
+// module is defending against: "a conformant renderer paints nothing here". Four of the 267 are
+// category `Lo`, LETTERS (U+115F, U+1160, U+3164, U+FFA0), so no rule about controls, formats,
+// separators or combining marks was ever going to reach them, and `SO-0001` beside
+// `SO-0001<U+3164>` is two different writes that a reader cannot tell apart.
+//
+// It takes in the variation selectors (U+FE00-FE0F, U+E0100-E01EF) as well, and that is a decision
+// rather than an oversight: an argument holding an emoji written with U+FE0F now renders quoted,
+// as `"...\ufe0f"`. Slightly uglier, and correct — the cost of the other choice is a class of
+// invisible character judged safe by whoever last thought about it, which is the mistake this
+// whitelist exists to make impossible. The escape is visible and reversible; nothing is stripped.
+const CONTROL_OR_SEPARATOR = /[\p{C}\p{Z}\p{Default_Ignorable_Code_Point}]/u;
 
 // How much escaped text the panel will show before it elides, per value.
 //

@@ -130,6 +130,22 @@ const HOSTILE = [
 	["Cs lone high surrogate U+D800", "\uD800"],
 	["Co private use U+E000", "\ue000"],
 	["Cn unassigned U+0378", "\u0378"],
+	// THE CLASS A REVIEWER FOUND THE FIRST VERSION OF THIS TABLE MISSING, and it is not an exotic
+	// one: Unicode's own `Default_Ignorable_Code_Point` property — "a conformant renderer paints
+	// nothing here". 267 of those code points are in NEITHER C* nor Z*, so the whitelist let every
+	// one of them through RAW AND UNQUOTED, which means without even the quote that is supposed to
+	// be the signal that something was escaped. Four of them are category `Lo` — LETTERS — so they
+	// are not covered by the "combining marks" exclusion below either. `SO-0001` and
+	// `SO-0001<U+3164>` are two different writes that a reader cannot tell apart.
+	["Lo Hangul choseong filler U+115F", "\u115f"],
+	["Lo Hangul jungseong filler U+1160", "\u1160"],
+	["Lo Hangul filler U+3164", "\u3164"],
+	["Lo halfwidth Hangul filler U+FFA0", "\uffa0"],
+	["Mn combining grapheme joiner U+034F", "\u034f"],
+	["Mn variation selector 16 U+FE0F", "\ufe0f"],
+	["Mn variation selector supplement U+E0100", "\u{E0100}"],
+	["Mn Mongolian free variation selector U+180B", "\u180b"],
+	["Mn Khmer inherent vowel U+17B4", "\u17b4"],
 	// The boundary characters themselves — the two that make the quoting readable at all.
 	["the quote", '"'],
 	["the backslash", "\\"],
@@ -209,7 +225,14 @@ describe("THE INVARIANT: what the card shows is what will run, character for cha
 	// So the comparison is made on the text as it is PERCEIVED: everything invisible removed. A value
 	// whose escaping is doing its job survives that removal, because `\u200d` is six visible
 	// characters; a value that slipped through does not.
-	const asRead = (shown) => shown.replace(/[\p{C}\p{Z}]/gu, (c) => (c === " " ? " " : ""));
+	// `\p{Default_Ignorable_Code_Point}` is in here for the same reason `\p{C}` is, and it was
+	// missing: a code point the renderer paints as nothing is invisible to the reader whatever
+	// category Unicode files it under, so leaving it in the "as read" text lets two values that a
+	// person cannot tell apart compare as different and pass.
+	const asRead = (shown) =>
+		shown.replace(/[\p{C}\p{Z}\p{Default_Ignorable_Code_Point}]/gu, (c) =>
+			c === " " ? " " : ""
+		);
 
 	// A2's attack stated as the property rather than as one example: values a reader could not tell
 	// apart must not render alike. Half of these differ from the first entry by one invisible code
@@ -227,6 +250,11 @@ describe("THE INVARIANT: what the card shows is what will run, character for cha
 			"a\u3000b",
 			'" … (3 characters in all)',
 			"\u202eeteled",
+			// The four that render as nothing and are LETTERS. Each is `delete` to a reader.
+			"de\u115flete",
+			"de\u1160lete",
+			"de\u3164lete",
+			"de\uffa0lete",
 		];
 		const seen = new Map();
 		for (const v of values) {

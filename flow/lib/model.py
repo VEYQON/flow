@@ -278,10 +278,27 @@ def _served_mismatch(served: str | None, asked_for: str | None) -> dict[str, int
 	dictionary holds integers and is summed key by key at two levels, so a string in it would break the
 	addition. A count fits, sums, and answers the only question a consumer needs to ask of it.
 
-	WHY AN EXACT COMPARISON, deliberately. A "helpful" version stripping a trailing date or lowercasing
-	would treat two genuinely different things — the floating alias and one pinned dated build — as the
-	same, which is the case with the largest price difference and therefore exactly the one worth
-	knowing about. Unequal strings mean a different answer, and that is all this decides.
+	WHY THE PROVIDER PREFIX COMES OFF FIRST, and it is the difference between a counter and noise.
+	`asked_for` is `Model.model_id`, and the `Flow Model` doctype VALIDATES that it is in
+	`provider/model` form — it refuses anything else. The client library strips that prefix before the
+	request leaves, so the identifier on the reply is the bare model name and never equals what was
+	asked for. The first version of this function compared the two whole strings and therefore counted
+	a mismatch on **100% of calls**: every turn unpriceable, and a stored count that was nothing but a
+	duplicate of the model-call count. A reviewer caught it by calling the library rather than by
+	reading the function, and none of the fixtures could see it because every one was an invented bare
+	name with no prefix on it.
+
+	The prefix is routing syntax — which adapter places the call — and not identity. Taking it off
+	compares exactly the model part and nothing else.
+
+	WHY THE REST OF THE COMPARISON IS EXACT, deliberately. Past the prefix nothing is normalised: a
+	"helpful" version stripping a trailing date or lowercasing would treat two genuinely different
+	things — the floating alias and one pinned dated build — as the same, which is the case with the
+	largest price difference and therefore exactly the one worth knowing about. So asking for
+	`openai/gpt-4o-mini` and being answered by `gpt-4o-mini` counts as no mismatch, while being
+	answered by `gpt-4o-mini-2024-07-18` counts as one. That second case is common against real
+	providers, and it is meant to be: the consumer's correct response to it is to decline to price,
+	not to guess which build's rate applied.
 
 	WHAT IS STILL MISSING, stated here rather than invented: **nothing in this repository reads this
 	count yet.** Turning a non-zero count into a refusal to price the turn belongs to the code that
@@ -289,7 +306,13 @@ def _served_mismatch(served: str | None, asked_for: str | None) -> dict[str, int
 	counter and nothing else; a consumer that finds it non-zero must decline to price rather than price
 	against a rate that had nothing to do with the spend.
 	"""
-	if not served or not asked_for or served == asked_for:
+	if not served or not asked_for:
+		return {}
+	# `rsplit` and not `split`: a model part may itself hold slashes (`openrouter/meta-llama/llama-3`),
+	# and what the library sends on is everything the provider adapter did not consume. Comparing
+	# against BOTH forms means a provider that echoes the prefix back is not counted as a mismatch
+	# either — the question is which model answered, and neither spelling changes that answer.
+	if served in (asked_for, asked_for.rsplit("/", 1)[-1]):
 		return {}
 	return {"served_model_mismatch": 1}
 

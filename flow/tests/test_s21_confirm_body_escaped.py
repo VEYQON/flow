@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from frappe.tests import IntegrationTestCase
 
-from flow.lib.agent import _confirmation_question
+from flow.lib.agent import _confirmation_question, _escaped
 from flow.lib.model import ToolCall
 from flow.tools.builtins import create, delete, execute, run_action, update
 
@@ -365,3 +365,58 @@ class TestTheOrdinaryQuestionStillReadsLikeItself(IntegrationTestCase):
 		self.assertEqual(q.options, ["Approve", "Deny"])
 		self.assertTrue(q.allow_other)
 		self.assertEqual(q.prompt.splitlines()[0], _EXPECTED_HEAD)
+
+
+class TestACharacterThatPaintsNothingIsEscapedWhateverItsCategory(IntegrationTestCase):
+	"""The class the C*/Z* rule could never reach, found by a reviewer measuring instead of reading.
+
+	The rule was "everything in a C* or Z* category". Unicode has a property that says exactly what
+	this escaper is defending against — `Default_Ignorable_Code_Point`, "a conformant renderer paints
+	nothing here" — and **267 of those code points are in neither C* nor Z***, so every one arrived
+	in the approval question RAW. Four of them are category `Lo`: LETTERS. No rule about controls,
+	formats, separators or even combining marks was ever going to catch a letter.
+
+	What that buys an attacker is the whole of A2 over again, on the sentence a person approves:
+	`SO-0001` and `SO-0001ㅤ` are two different writes that render identically, and the second
+	one carries no signal at all — not even the quote, because a value the rule finds nothing wrong
+	with is shown as itself.
+
+	Python has no such property in `unicodedata`, so the table is written out. It is derived from the
+	same Unicode property the panel's regex uses and is checked against the panel's rule in
+	`frontend/tests/displayProperty.spec.js`, because the two escapers are a port of one rule and the
+	whole point is that they do not drift.
+	"""
+
+	# Not combining marks, not formats, not separators. Letters that paint nothing.
+	INVISIBLE_LETTERS = ("ᅟ", "ᅠ", "ㅤ", "ﾠ")
+
+	def test_an_invisible_letter_is_escaped(self):
+		for ch in self.INVISIBLE_LETTERS:
+			with self.subTest(ch=hex(ord(ch))):
+				self.assertEqual(_escaped(ch), "\\u%04x" % ord(ch))
+
+	def test_two_values_a_reader_cannot_tell_apart_do_not_escape_alike(self):
+		"""The property, not the example: the escaping is what makes the difference visible."""
+		for ch in self.INVISIBLE_LETTERS:
+			with self.subTest(ch=hex(ord(ch))):
+				self.assertNotEqual(_escaped("SO-0001"), _escaped("SO-0001" + ch))
+
+	def test_the_rest_of_the_property_goes_the_same_way(self):
+		"""The members that are combining marks rather than letters — including the variation
+		selectors, which is a deliberate cost: an emoji written with U+FE0F now shows quoted."""
+		for cp in (0x034F, 0x17B4, 0x180B, 0xFE0F, 0xE0100):
+			with self.subTest(cp=hex(cp)):
+				shown = _escaped(chr(cp))
+				self.assertNotEqual(shown, chr(cp))
+				# `\\u` below the BMP and `\\U` above it, which is the escaper's own rule and is
+				# why U+E0100 is in this list: an astral member proves the branch a 16-bit scan
+				# would have split in half.
+				self.assertTrue(shown.startswith(("\\u", "\\U")), shown)
+
+	def test_ordinary_text_is_still_returned_untouched(self):
+		"""The control. A rule that escaped everything would pass every assertion above."""
+		self.assertEqual(
+			_escaped("Sales Order SO-0001 — 3 items, Rs 4,500"), "Sales Order SO-0001 — 3 items, Rs 4,500"
+		)
+		self.assertEqual(_escaped("日本語のテキスト"), "日本語のテキスト")
+		self.assertEqual(_escaped("עברית"), "עברית")

@@ -67,6 +67,40 @@ class TestUsageIsAddedNotAssigned(UnitTestCase):
 
 		self.assertEqual(total, {"prompt_tokens": 5})
 
+	def test_a_fractional_count_is_summed_and_not_floored_to_zero(self):
+		"""A reviewer's finding, and the docstring invited it: this function's own comment offers
+		"a cost in micros" as the kind of key it now sums, and `int()` floored anything smaller than
+		one to ZERO on every call. A cost emitted in dollars rather than micros totalled 0 with no
+		log, and `1.9` three times came to 3 rather than 5.7 — truncation applied per call, so the
+		error grew with the number of calls, which is the direction the docstring says it guards
+		against."""
+		total = {}
+		for _ in range(3):
+			_accumulate_usage(total, {"provider_cost_usd": 0.004, "reasoning_tokens": 1.9})
+
+		self.assertAlmostEqual(total["provider_cost_usd"], 0.012)
+		self.assertAlmostEqual(total["reasoning_tokens"], 5.7)
+
+	def test_an_integer_count_stays_an_integer(self):
+		"""The other side of it. Accepting floats must not turn every token count into one."""
+		total = {}
+		_accumulate_usage(total, {"prompt_tokens": 5})
+		_accumulate_usage(total, {"prompt_tokens": 5})
+
+		self.assertIsInstance(total["prompt_tokens"], int)
+		self.assertEqual(total["prompt_tokens"], 10)
+
+	def test_a_non_finite_number_does_not_end_the_turn(self):
+		"""`json.loads('{"prompt_tokens": Infinity}')` succeeds — the standard library accepts that
+		non-standard literal — so `inf` can reach here from a malformed or hostile upstream body.
+		`int(float('inf'))` raises `OverflowError`, which the old `except (TypeError, ValueError)`
+		did not catch, so the turn died over a number. Skipping is right and crashing is not: the
+		work was done and the person is owed the answer, whatever the meter says."""
+		total = {"prompt_tokens": 1}
+		_accumulate_usage(total, {"prompt_tokens": float("inf"), "completion_tokens": float("nan")})
+
+		self.assertEqual(total, {"prompt_tokens": 1})
+
 	def test_two_calls_in_one_turn_total_the_extra_count(self):
 		"""C4's own test, and the one that matters: the loop, not the helper. A turn with a tool call
 		makes two calls, which is every turn this is sold on."""
@@ -138,6 +172,53 @@ class TestTheReplySaysWhatAnsweredIt(UnitTestCase):
 		self.assertNotIn("served_model_mismatch", _normalize(_reply(None), "asked").usage)
 		self.assertNotIn("served_model_mismatch", _normalize(_reply(""), "asked").usage)
 		self.assertNotIn("served_model_mismatch", _normalize(_reply("served"), None).usage)
+
+	def test_the_provider_prefix_is_not_a_different_model(self):
+		"""THE DEFECT A REVIEWER FOUND, and it made the counter fire on 100% of calls.
+
+		`asked_for` is `Model.model_id`, and `Flow Model` VALIDATES that it is in `provider/model`
+		form — `flow_model.py` refuses anything else in as many words. The client library strips that
+		prefix before the request goes out, so the identifier that comes back on the reply is the
+		bare model name and NEVER equals what was asked for. Every call mismatched, every turn
+		became unpriceable, and the stored count was just a duplicate of the model-call count.
+
+		The prefix is ROUTING SYNTAX, not identity: it says which library adapter places the call,
+		not which model answers. Stripping it is therefore not the "helpful comparison" the next test
+		refuses — the thing being compared is still exactly the model part, unlowercased and
+		undated."""
+		self.assertNotIn(
+			"served_model_mismatch", _normalize(_reply("gpt-4o-mini"), "openai/gpt-4o-mini").usage
+		)
+		self.assertNotIn(
+			"served_model_mismatch",
+			_normalize(_reply("claude-sonnet-4-6"), "anthropic/claude-sonnet-4-6").usage,
+		)
+
+	def test_only_the_last_segment_is_the_model_and_a_route_of_its_own_still_counts(self):
+		"""A prefix is stripped; a genuinely different name behind one is not excused by it."""
+		self.assertEqual(_normalize(_reply("gpt-4o"), "openai/gpt-4o-mini").usage["served_model_mismatch"], 1)
+
+	def test_a_dated_build_behind_a_prefix_is_still_a_different_thing(self):
+		"""The two halves together, which is the case this actually has to get right in production:
+		the prefix goes, the date does not. Asking for a floating alias and being answered by one
+		pinned build is the case with the largest price difference, and it is the whole reason the
+		counter exists."""
+		self.assertEqual(
+			_normalize(_reply("gpt-4o-mini-2024-07-18"), "openai/gpt-4o-mini").usage["served_model_mismatch"],
+			1,
+		)
+
+	def test_the_streamed_path_strips_the_prefix_too(self):
+		"""Half the calls in production go the other way, and the first version of this counter was
+		wrong on both."""
+		stream = _consume_stream([_chunk("gpt-4o-mini", content="hi")], "openai/gpt-4o-mini")
+		try:
+			while True:
+				next(stream)
+		except StopIteration as done:
+			response = done.value
+
+		self.assertNotIn("served_model_mismatch", response.usage)
 
 	def test_the_comparison_is_exact_and_a_dated_build_is_a_different_thing(self):
 		"""Deliberately NOT a helpful comparison. Treating a floating alias and one pinned dated build
