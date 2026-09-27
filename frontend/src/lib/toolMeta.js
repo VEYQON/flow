@@ -40,20 +40,36 @@ export function humanize(name) {
 }
 
 // Present-tense label per builtin; custom tools fall back to a humanized name.
-const LABELS = {
-	find_doctypes: "Finding relevant DocTypes",
-	describe: "Reading DocType Meta",
-	read: "Reading DocType Records",
-	search_knowledge: "Searching Knowledge",
-	execute: "Executing",
-	create: "Creating Records",
-	update: "Updating Records",
-	delete: "Deleting Records",
-	run_action: "Running Document Actions",
-};
+//
+// A MAP, not an object, and that is the point rather than a preference. The tool NAME is as
+// model-chosen as the arguments beside it — it is a field of the tool call the model emitted, and
+// nothing between the model and this lookup restricts it to a tool that exists. A plain object
+// literal inherits from `Object.prototype`, so eight names the model can pick (`constructor`,
+// `toString`, `valueOf`, `__proto__`, `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`,
+// `toLocaleString`) resolve to a member of that prototype instead of missing — truthy, so the
+// escaping branch below is never reached and the card's headline reads
+// `function Object() { [native code] }` instead of the name of the thing about to run.
+//
+// A `Map` has no inherited keys, so a miss is a miss for every string. The rule, the same one the
+// arguments follow: a model-chosen key is DATA, and data is looked up in a structure that holds only
+// what was put in it.
+const LABELS = new Map(
+	Object.entries({
+		find_doctypes: "Finding relevant DocTypes",
+		describe: "Reading DocType Meta",
+		read: "Reading DocType Records",
+		search_knowledge: "Searching Knowledge",
+		execute: "Executing",
+		create: "Creating Records",
+		update: "Updating Records",
+		delete: "Deleting Records",
+		run_action: "Running Document Actions",
+	})
+);
 
 export function toolLabel(name) {
-	return LABELS[name] ? __(LABELS[name]) : humanize(name);
+	const label = LABELS.get(String(name));
+	return label ? __(label) : humanize(name);
 }
 
 // Strip leaked model special tokens (e.g. "describe<|channel|>commentary") so
@@ -167,8 +183,19 @@ export function recordLabelKey(records) {
 
 // Args to always render as a code block regardless of content, keyed by tool name.
 // execute's "code" is Python source even when short/single-line.
-const CODE_ARG_KEYS = { execute: new Set(["code"]) };
-export const blockKeysFor = (name) => CODE_ARG_KEYS[name] || new Set();
+//
+// A `Map` for the reason `LABELS` is one, and here the consequence was worse than a wrong label. As a
+// plain object, `CODE_ARG_KEYS["__proto__"]` returned `Object.prototype` — truthy, so it was returned
+// in place of the empty Set — and the one thing every caller then does is `codeKeys.has(key)`.
+// `Object.prototype.has` does not exist, so that call threw `codeKeys.has is not a function` inside a
+// computed DURING RENDER (`ArgValue.vue:23`), on the card as well as in the activity log. Not a
+// degraded card: no card, and therefore an approval nobody can answer — reachable by a model that
+// simply names its tool `__proto__`. The guarded read is what keeps the one exemption on this surface
+// something a tool DECLARES rather than something a name can inherit.
+const CODE_ARG_KEYS = new Map([["execute", new Set(["code"])]]);
+// A FRESH Set on a miss, exactly as before: a shared one would be an empty Set held by every tool at
+// once, and a caller that ever added to it would hand one tool's declaration to all of them.
+export const blockKeysFor = (name) => CODE_ARG_KEYS.get(String(name)) || new Set();
 
 // Muted suffix that distinguishes a step (which doctype / search / action).
 export function toolContext(args) {
