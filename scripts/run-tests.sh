@@ -41,6 +41,19 @@ else
 fi
 RC=$?
 
+# The panel's own suite. `GATE=GREEN` said nothing about frontend/ until this ran (run 13).
+# Skipped, loudly, when node_modules is absent - a silent skip is how a suite stops running.
+JS_RC=0
+if [ -d "$HOME/code/veyqon-flow/node_modules/vitest" ]; then
+  ( cd "$HOME/code/veyqon-flow" && yarn --silent test ) > "$LOG.js" 2>&1
+  JS_RC=$?
+  echo "JS_TESTS=$(grep -oE 'Tests +[0-9]+ passed' "$LOG.js" | grep -oE '[0-9]+' | tail -1) JS_EXIT=$JS_RC JS_LOG=$LOG.js"
+  [ "$JS_RC" -ne 0 ] && tail -30 "$LOG.js"
+else
+  echo "JS_TESTS=SKIPPED reason=no-node_modules (run: cd ~/code/veyqon-flow && yarn install --frozen-lockfile)"
+  JS_RC=1
+fi
+
 RAN=$(grep -Eo '^Ran [0-9]+ tests?' "$LOG" | awk '{s+=$2} END{print s+0}')
 FAILED_LINES=$(grep -Ec '^FAILED \(|^ (ERROR|FAIL) ' "$LOG")
 
@@ -52,6 +65,7 @@ REASON=""
 [ "$RC" -ne 0 ] && REASON="${REASON}exit-$RC,"
 [ "$RAN" -eq 0 ] && REASON="${REASON}zero-tests-ran,"
 [ "$FAILED_LINES" -gt 0 ] && REASON="${REASON}failures-in-output,"
+[ "$JS_RC" -ne 0 ] && REASON="${REASON}js-suite-failed,"
 if [ -n "${MIN_TESTS:-}" ] && [ "$RAN" -lt "$MIN_TESTS" ]; then
   REASON="${REASON}fewer-than-MIN_TESTS($RAN<$MIN_TESTS),"
 fi
