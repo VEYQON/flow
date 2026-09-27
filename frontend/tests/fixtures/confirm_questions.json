@@ -5,6 +5,7 @@
 			"Approve",
 			"Deny"
 		],
+		"allow_other": true,
 		"tool": {
 			"name": "delete",
 			"arguments": {
@@ -21,6 +22,7 @@
 			"Approve",
 			"Deny"
 		],
+		"allow_other": true,
 		"tool": {
 			"name": "create",
 			"arguments": {
@@ -39,6 +41,7 @@
 			"Approve",
 			"Deny"
 		],
+		"allow_other": true,
 		"tool": {
 			"name": "run_action",
 			"arguments": {
@@ -56,6 +59,7 @@
 			"Approve",
 			"Deny"
 		],
+		"allow_other": true,
 		"tool": {
 			"name": "execute",
 			"arguments": {

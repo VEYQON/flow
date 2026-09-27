@@ -99,6 +99,12 @@ def build() -> dict[str, dict]:
 		out[key] = {
 			"prompt": question.prompt,
 			"options": list(question.options),
+			# Captured because the panel BRANCHES on it: `ConfirmCard` hides the free-text affordance
+			# on `allow_other !== false`, and two of the render tests assert that affordance exists.
+			# While this field was not in the fixture, an engine that stopped allowing free text would
+			# have left this guard green and those two tests proving something production no longer
+			# shows. Every field the card reads off a Question belongs here for the same reason.
+			"allow_other": question.allow_other,
 			"tool": {"name": tool.name, "arguments": case["arguments"]},
 		}
 	return out
@@ -145,3 +151,9 @@ class TestTheFixtureIsWhatTheEngineProducesToday(IntegrationTestCase):
 		self.assertIn("<script>", stored["create_markup_value"]["tool"]["arguments"]["records"][0]["description"])
 		self.assertEqual(len(stored["run_action_huge_value"]["tool"]["arguments"]["action"]), 50_000)
 		self.assertIn("\n", stored["execute_long_code"]["prompt"])
+		# And the field the panel branches on is really captured, with the value the engine sets, for
+		# every case — not merely present in one of them.
+		for key in sorted(stored):
+			with self.subTest(case=key):
+				self.assertIn("allow_other", stored[key])
+				self.assertIs(stored[key]["allow_other"], True)
