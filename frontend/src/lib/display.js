@@ -107,8 +107,10 @@ export function quoteForDisplay(value, limit = DISPLAY_LIMIT) {
  * before this module existed; a hostile value is visibly marked as one, by a character it cannot
  * produce.
  *
- * It is also idempotent on text the ENGINE already escaped, which is what lets the same helper be
- * applied to a headline whose first paragraph came from `_escaped` without escaping it twice.
+ * It is NOT idempotent, and the comment that used to claim it was has been removed as false: this
+ * escaper maps `\\` to `\\\\`, so text that already came out of the engine's `_escaped` is escaped a
+ * second time and quoted. Never apply it to engine-escaped text — the question's own sentence arrives
+ * at the panel already escaped, and it is rendered as it arrived, by nobody's second rule.
  */
 export function displayText(value, limit = DISPLAY_LIMIT) {
 	const text = String(value);

@@ -175,7 +175,10 @@ export function toolContext(args) {
 	const a = parseArgs(args);
 	for (const key of ["doctype", "search", "action"]) {
 		const v = a[key];
-		if (typeof v === "string" && v) return key === "action" ? humanize(v) : v;
+		// `humanize` already displays through the one rule; a doctype and a search reach the DOM as
+		// themselves, so they go through it here. The step header is the line a reader scans to see
+		// WHICH doctype a call touches, and an override there reorders it while adding no character.
+		if (typeof v === "string" && v) return key === "action" ? humanize(v) : displayText(v);
 	}
 	return null;
 }

@@ -18,7 +18,12 @@ const rootEl = ref(null);
 // The engine composes the question as one head line, a blank line, then the body the tool wrote.
 // Split it back apart exactly as it was joined, so the body is restored byte for byte, blank lines
 // included.
-const paragraphs = computed(() => props.question.prompt.split("\n\n"));
+// `String(… ?? "")` because this is now reached on EVERY card, including one whose stored question
+// row has no `prompt`: `store.js` spreads a stored row verbatim when a paused run is resumed and
+// validates nothing, and a TypeError thrown inside a computed here costs the approver the card —
+// an approval that can no longer be answered. A missing question is an empty one, not a crash.
+const promptText = computed(() => String(props.question.prompt ?? ""));
+const paragraphs = computed(() => promptText.value.split("\n\n"));
 const engineHead = computed(() => (paragraphs.value[0] ?? "").trim());
 const engineBody = computed(() => paragraphs.value.slice(1).join("\n\n").trim());
 
@@ -53,7 +58,7 @@ const body = computed(() =>
 	titleIsEngineHead.value
 		? engineBody.value
 		: confirm.value || engineBody.value
-		? props.question.prompt.trim()
+		? promptText.value.trim()
 		: ""
 );
 // execute's description reaches the reader through the body now, not the title, so it is still right
