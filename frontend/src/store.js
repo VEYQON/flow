@@ -20,7 +20,12 @@ const recentSessions = ref([]);
 
 // Active agent's tool slug → requires_confirmation; the cache keeps agent switches instant.
 const toolApproval = ref({});
-const toolApprovalCache = {};
+// A Map for the reason `LABELS` and `CODE_ARG_KEYS` are Maps: the key is a name from a record, and a
+// plain object answers for eight names it was never given. An Agent called `constructor` made `cached`
+// the `Object` function — truthy — so the real approval map was never awaited and no tool was
+// recognised as needing confirmation. Agent names are administrator-chosen rather than model-chosen,
+// which is why this is the small one of the three, but it is the same defect and takes the same fix.
+const toolApprovalCache = new Map();
 
 const selectedAgent = ref(null);
 const selectedModel = ref(null);
@@ -104,12 +109,12 @@ function loadToolApproval(agent) {
 		toolApproval.value = {};
 		return Promise.resolve();
 	}
-	const cached = toolApprovalCache[agent];
+	const cached = toolApprovalCache.get(agent);
 	if (cached) toolApproval.value = cached;
 	const refresh = api
 		.getAgentTools(agent)
 		.then((map) => {
-			toolApprovalCache[agent] = map;
+			toolApprovalCache.set(agent, map);
 			if (selectedAgent.value === agent) toolApproval.value = map;
 		})
 		.catch(() => {
@@ -374,7 +379,16 @@ function answerQuestion(msg, question, answer) {
 
 	if (msg.questions.some((q) => q._answer === undefined)) return;
 
-	const answers = {};
+	// `Object.create(null)`, and it is load-bearing rather than tidy. `q.key` is a tool-call id that
+	// arrives from the model's own reply — and on the resume path `prepareQuestions` spreads whole rows
+	// out of a stored JSON blob without validating one field of them. On a plain object,
+	// `answers["__proto__"] = "Approve"` invokes the prototype setter, which ignores a string: NO own
+	// property is created, so `JSON.stringify` sends `{}` and **an approval a person clicked is sent as
+	// though they never answered**. That is the same inherited-key defect the display side had, on the
+	// surface that carries the DECISION instead of the picture of it, where it is worse: there the card
+	// failed loudly, here it fails silently and in the direction of doing nothing. A null-prototype
+	// object has no setter to invoke, and `JSON.stringify` treats it identically otherwise.
+	const answers = Object.create(null);
 	msg.questions.forEach((q) => (answers[q.key] = q._answer));
 	resume(answers, msg);
 }

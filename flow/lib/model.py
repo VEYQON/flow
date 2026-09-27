@@ -107,9 +107,9 @@ class Model:
 		if stream:
 			kwargs["stream"] = True
 			kwargs["stream_options"] = {"include_usage": True}
-			return _consume_stream(litellm.completion(**kwargs))
+			return _consume_stream(litellm.completion(**kwargs), self.model_id)
 
-		return _normalize(litellm.completion(**kwargs))
+		return _normalize(litellm.completion(**kwargs), self.model_id)
 
 
 def resolve_provider_credentials(model_id: str) -> dict[str, Any]:
@@ -135,16 +135,20 @@ def resolve_provider_credentials(model_id: str) -> dict[str, Any]:
 	}
 
 
-def _consume_stream(chunks: Any) -> Generator[str | ToolCallBegin, None, ChatResponse]:
+def _consume_stream(
+	chunks: Any, asked_for: str | None = None
+) -> Generator[str | ToolCallBegin, None, ChatResponse]:
 	"""Yield text deltas (and a ToolCallBegin the moment each tool call's name is known) from a
 	litellm stream; return the assembled ChatResponse at the end."""
 	content_parts: list[str] = []
+	served: str | None = None
 	tool_calls_acc: dict[int, dict[str, str]] = {}
 	announced: set[int] = set()
 	usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 	finish_reason: str | None = None
 
 	for chunk in chunks:
+		served = served or getattr(chunk, "model", None)
 		choices = getattr(chunk, "choices", None) or []
 		if choices:
 			choice = choices[0]
@@ -171,6 +175,8 @@ def _consume_stream(chunks: Any) -> Generator[str | ToolCallBegin, None, ChatRes
 				"completion_tokens": _attr(usage_obj, "completion_tokens", 0) or 0,
 				"total_tokens": _attr(usage_obj, "total_tokens", 0) or 0,
 			}
+
+	usage.update(_served_mismatch(served, asked_for))
 
 	return ChatResponse(
 		content="".join(content_parts) or None,
@@ -232,7 +238,7 @@ def _build_tool_call(call_id: str, name: str, raw_args: str) -> ToolCall:
 	return ToolCall(id=call_id, name=name, arguments=arguments)
 
 
-def _normalize(response: Any) -> ChatResponse:
+def _normalize(response: Any, asked_for: str | None = None) -> ChatResponse:
 	choice = response.choices[0]
 	message = choice.message
 
@@ -249,6 +255,7 @@ def _normalize(response: Any) -> ChatResponse:
 		"completion_tokens": _attr(usage_obj, "completion_tokens", 0) or 0,
 		"total_tokens": _attr(usage_obj, "total_tokens", 0) or 0,
 	}
+	usage.update(_served_mismatch(getattr(response, "model", None), asked_for))
 
 	return ChatResponse(
 		content=getattr(message, "content", None),
@@ -256,6 +263,35 @@ def _normalize(response: Any) -> ChatResponse:
 		finish_reason=getattr(choice, "finish_reason", None),
 		usage=usage,
 	)
+
+
+def _served_mismatch(served: str | None, asked_for: str | None) -> dict[str, int]:
+	"""`{"served_model_mismatch": 1}` when the call was answered by something other than what was asked
+	for, and `{}` when it was not or when we cannot tell.
+
+	WHY A COUNT AND NOT A NAME. The reply carries the identifier of whatever actually answered, and that
+	need not be what was requested: the request keyword dictionary is built as `{..., **self.params}`
+	and those params are administrator-settable, so a configured fallback can send a call somewhere else
+	entirely. Cost is then worked out against the rate for the thing we asked for while the money was
+	spent on the thing that answered — and the record would label that figure with the most authoritative
+	source it has. What stops that is knowing it happened. The name itself cannot ride along: the counts
+	dictionary holds integers and is summed key by key at two levels, so a string in it would break the
+	addition. A count fits, sums, and answers the only question a consumer needs to ask of it.
+
+	WHY AN EXACT COMPARISON, deliberately. A "helpful" version stripping a trailing date or lowercasing
+	would treat two genuinely different things — the floating alias and one pinned dated build — as the
+	same, which is the case with the largest price difference and therefore exactly the one worth
+	knowing about. Unequal strings mean a different answer, and that is all this decides.
+
+	WHAT IS STILL MISSING, stated here rather than invented: **nothing in this repository reads this
+	count yet.** Turning a non-zero count into a refusal to price the turn belongs to the code that
+	prices it, and that code lives in another repository and does not exist. This function builds the
+	counter and nothing else; a consumer that finds it non-zero must decline to price rather than price
+	against a rate that had nothing to do with the spend.
+	"""
+	if not served or not asked_for or served == asked_for:
+		return {}
+	return {"served_model_mismatch": 1}
 
 
 def _attr(obj: Any, key: str, default: Any = None) -> Any:

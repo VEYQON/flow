@@ -1,0 +1,185 @@
+# Copyright (c) 2026, Frappe Technologies and contributors
+# License: MIT. See LICENSE
+"""What a turn's counts add up to, and whether the reply was answered by what was asked for.
+
+Two defects, one of them live and one of them a hole where a number should be.
+
+C4 — `_accumulate_usage` summed three hard-coded names and dropped every other count a call
+reported. A turn with a tool call makes more than one call, so any further count — a cost, a
+cached-input count, a count of calls answered by something else — survived from the first call of
+the turn and from none of the others. The natural repair is worse than the bug: "sum what we know,
+create what we do not" is written `if key in total: continue`, and that guard skips a key precisely
+once it has something to add to. Assignment wearing the shape of addition, understating by more the
+more work is done.
+
+H2 — cost is worked out against the rate for the thing that was ASKED FOR, while the money was spent
+on whatever actually answered. Those differ whenever an administrator-set fallback fires, and the
+request keyword dictionary is built so that anything the client library accepts flows straight
+through. Nothing captured that they had differed, so the figure could be labelled with the most
+authoritative source the record has and still be a figure for a different thing.
+"""
+
+from types import SimpleNamespace
+
+from frappe.tests import UnitTestCase
+
+from flow.lib.agent import Agent, _accumulate_usage
+from flow.lib.model import ChatResponse, ToolCall, _consume_stream, _normalize
+from flow.lib.tool import tool
+from flow.tests.test_ai_agent import FakeModel, _final
+
+
+class TestUsageIsAddedNotAssigned(UnitTestCase):
+	def test_a_key_the_function_has_never_heard_of_is_summed_not_kept_from_the_first_call(self):
+		"""The whole of C4, at the unit that decides it."""
+		total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+		for _ in range(3):
+			_accumulate_usage(total, {"prompt_tokens": 10, "provider_cost_usd_micros": 4321})
+
+		self.assertEqual(total["prompt_tokens"], 30)
+		# Three calls at 4321 is 12963. Under the old rule it was 4321 — the first call's figure,
+		# wearing the label of the whole turn.
+		self.assertEqual(total["provider_cost_usd_micros"], 12963)
+
+	def test_a_key_absent_from_the_first_call_still_totals(self):
+		"""The other direction: a count some calls carry and others do not."""
+		total = {"prompt_tokens": 0}
+		_accumulate_usage(total, {"prompt_tokens": 1})
+		_accumulate_usage(total, {"prompt_tokens": 1, "served_model_mismatch": 1})
+		_accumulate_usage(total, {"prompt_tokens": 1, "served_model_mismatch": 1})
+
+		self.assertEqual(total["served_model_mismatch"], 2)
+		self.assertEqual(total["prompt_tokens"], 3)
+
+	def test_a_flag_sent_as_true_is_refused_rather_than_counted(self):
+		"""`isinstance(True, int)` is True, so a flag would sum to 1, then 2, then 3 and be read as a
+		count of something that happened three times. A flag is not a quantity."""
+		total = {}
+		_accumulate_usage(total, {"cache_hit": True, "other": False, "real_count": 1})
+
+		self.assertNotIn("cache_hit", total)
+		self.assertNotIn("other", total)
+		self.assertEqual(total["real_count"], 1)
+
+	def test_a_value_that_is_not_a_number_at_all_is_skipped_rather_than_ending_the_turn(self):
+		total = {"prompt_tokens": 0}
+		_accumulate_usage(total, {"prompt_tokens": 5, "model_name": "something", "missing": None})
+
+		self.assertEqual(total, {"prompt_tokens": 5})
+
+	def test_two_calls_in_one_turn_total_the_extra_count(self):
+		"""C4's own test, and the one that matters: the loop, not the helper. A turn with a tool call
+		makes two calls, which is every turn this is sold on."""
+
+		@tool
+		def ping() -> str:
+			"""Ping."""
+			return "pong"
+
+		model = FakeModel(
+			[
+				ChatResponse(
+					content=None,
+					tool_calls=[ToolCall(id="c1", name="ping", arguments={})],
+					usage={"prompt_tokens": 5, "total_tokens": 7, "provider_cost_usd_micros": 4321},
+				),
+				_final(
+					"done",
+					usage={"prompt_tokens": 3, "total_tokens": 4, "provider_cost_usd_micros": 4321},
+				),
+			]
+		)
+
+		result = Agent(model=model, tools=[ping]).run("hi")
+
+		self.assertEqual(result.usage["prompt_tokens"], 8)
+		self.assertEqual(result.usage["total_tokens"], 11)
+		# 8642, not 4321. This is the assertion the review names, and a single-call test stays green
+		# through the defect it catches.
+		self.assertEqual(result.usage["provider_cost_usd_micros"], 8642)
+
+
+def _reply(model_name, usage=None):
+	usage = usage or {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+	message = SimpleNamespace(content="hi", tool_calls=None)
+	choice = SimpleNamespace(message=message, finish_reason="stop")
+	reply = SimpleNamespace(choices=[choice], usage=SimpleNamespace(**usage))
+	if model_name is not None:
+		reply.model = model_name
+	return reply
+
+
+def _chunk(model_name=None, content=None, usage=None):
+	delta = SimpleNamespace(content=content, tool_calls=None)
+	choice = SimpleNamespace(delta=delta, finish_reason=None)
+	chunk = SimpleNamespace(choices=[choice], usage=SimpleNamespace(**usage) if usage else None)
+	if model_name is not None:
+		chunk.model = model_name
+	return chunk
+
+
+class TestTheReplySaysWhatAnsweredIt(UnitTestCase):
+	def test_a_reply_from_something_else_is_counted(self):
+		response = _normalize(_reply("other-thing"), "the-one-asked-for")
+
+		self.assertEqual(response.usage["served_model_mismatch"], 1)
+
+	def test_a_reply_from_what_was_asked_for_adds_nothing(self):
+		"""Absence is the ordinary case, and it has to stay absent rather than become a zero: a key
+		that is always present teaches a consumer nothing, and the accumulator creates keys on first
+		sight, so nothing needs one seeded."""
+		response = _normalize(_reply("the-one-asked-for"), "the-one-asked-for")
+
+		self.assertNotIn("served_model_mismatch", response.usage)
+
+	def test_a_reply_that_does_not_say_is_not_counted_as_a_mismatch(self):
+		"""Not knowing is not the same as knowing it differed, and only the second is a reason to
+		refuse to price. A reply carrying no identifier at all must not be read as one."""
+		self.assertNotIn("served_model_mismatch", _normalize(_reply(None), "asked").usage)
+		self.assertNotIn("served_model_mismatch", _normalize(_reply(""), "asked").usage)
+		self.assertNotIn("served_model_mismatch", _normalize(_reply("served"), None).usage)
+
+	def test_the_comparison_is_exact_and_a_dated_build_is_a_different_thing(self):
+		"""Deliberately NOT a helpful comparison. Treating a floating alias and one pinned dated build
+		as the same name is the case with the largest price difference between them, and therefore
+		exactly the one worth being told about."""
+		response = _normalize(_reply("a-name-2026-08-06"), "a-name")
+
+		self.assertEqual(response.usage["served_model_mismatch"], 1)
+
+	def test_a_streamed_reply_is_counted_the_same_way(self):
+		"""The streamed path assembles its own counts, so it needs its own assertion or half the calls
+		in production are unmeasured."""
+		stream = _consume_stream(
+			[
+				_chunk("other-thing", content="hi"),
+				_chunk("other-thing", usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}),
+			],
+			"the-one-asked-for",
+		)
+		try:
+			while True:
+				next(stream)
+		except StopIteration as done:
+			response = done.value
+
+		self.assertEqual(response.usage["served_model_mismatch"], 1)
+		self.assertEqual(response.usage["total_tokens"], 2)
+
+	def test_a_streamed_reply_from_what_was_asked_for_adds_nothing(self):
+		stream = _consume_stream([_chunk("asked", content="hi")], "asked")
+		try:
+			while True:
+				next(stream)
+		except StopIteration as done:
+			response = done.value
+
+		self.assertNotIn("served_model_mismatch", response.usage)
+
+	def test_the_count_reaches_the_turn_total_through_the_accumulator(self):
+		"""The two halves joined: the counter only means anything if it survives being summed."""
+		total = {}
+		_accumulate_usage(total, _normalize(_reply("other"), "asked").usage)
+		_accumulate_usage(total, _normalize(_reply("other"), "asked").usage)
+
+		self.assertEqual(total["served_model_mismatch"], 2)

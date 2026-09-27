@@ -51,7 +51,33 @@ function readBack(shown) {
 	});
 }
 
-// EVERY HOSTILE CLASS, as the code point that carries it. Written as escape sequences rather than as
+// WHAT THIS TABLE COVERS, AND WHAT NO CHARACTER-LEVEL ESCAPE CAN — stated because a reviewer showed
+// the first draft of this file claimed "every hostile class" and that claim was false:
+//
+//   COVERED HERE: every class an escape can address, which is exactly the C* and Z* categories — a
+//   character that is invisible, or that is a line break, or that steers the bidi algorithm as a
+//   FORMAT code. Those are the ones the panel can render as something visible without lying about
+//   what runs.
+//
+//   NOT COVERED, AND DELIBERATELY NOT:
+//   - **Strong right-to-left letters** (categories R and AL — any Hebrew or Arabic letter). These
+//     reorder the neutrals and digits around them under the bidi algorithm with NO format character
+//     present, so the whitelist cannot see them and must not: escaping Hebrew letters would make the
+//     card unusable for anyone writing Hebrew. The answer is isolation in CSS, not escaping — confine
+//     each value to its own bidi context so a run cannot reorder the label or the operator beside it —
+//     and it is not asserted here because jsdom has no bidi algorithm to assert against. Recorded as
+//     OPEN, BROWSER.
+//   - **Combining marks** (Mn) and **confusables** (Cyrillic а for Latin a, NFC vs NFD). Two values a
+//     reader cannot tell apart, by characters that are entirely legitimate. Escaping them is wrong for
+//     the same reason. Nothing here closes this; it needs a confusable-skeleton comparison, which is a
+//     spec rather than a patch.
+//   - **Runs of ordinary spaces.** The space is exempt from escaping on purpose, and the two-column
+//     cell is not `pre-wrap`, so HTML collapses `a  b` to `a b`. It can pad, not forge a word.
+//
+// The injectivity test below is therefore about what the ESCAPING distinguishes, not about everything
+// a reader could confuse — which is a narrower claim than the one it used to make, and a true one.
+
+// EVERY HOSTILE CLASS AN ESCAPE CAN ADDRESS, as the code point that carries it. Written as escape sequences rather than as
 // the characters themselves so that this table is readable in a diff and in a terminal — the whole
 // point of several of these is that they are invisible where they are pasted. The class is named so
 // a failure says which KIND of attack got through, not just which byte.
@@ -145,8 +171,18 @@ describe("THE INVARIANT: what the card shows is what will run, character for cha
 		const value = wrap(ch);
 		const wrapper = cardFor(JSON.stringify({ target: value }));
 		await settle();
-		// The whole property, in one line.
-		expect(readBack(shownValue(wrapper))).toBe(value);
+		const shown = shownValue(wrapper);
+		// THE HALF A ROUND TRIP ALONE DOES NOT PROVE, and it was missing until a reviewer deleted the
+		// escaper and watched all 37 of these stay green. `readBack` is a left inverse of the real rule
+		// AND of the identity function: with no escaping at all, `displayText` returns the raw value,
+		// `readBack` finds no quote to strip and no `\x` sequence to expand, and hands it straight back.
+		// So on its own the round trip says only that displaying LOSES nothing — never that it escaped
+		// anything. What makes it the invariant is requiring the escape to have happened, and every
+		// value in this table is one the rule changes, so every one must arrive QUOTED.
+		expect(shown).not.toBe(value);
+		expect(shown.startsWith('"')).toBe(true);
+		// ...and then that the quoting is exactly reversible, which is the rest of the property.
+		expect(readBack(shown)).toBe(value);
 	});
 
 	it.each(HOSTILE)("%s draws no line and hides nothing in the card", async (_name, ch) => {

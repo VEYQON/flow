@@ -1312,5 +1312,32 @@ def _serialize_tool_result(result: Any) -> str:
 
 
 def _accumulate_usage(total: dict[str, int], delta: dict[str, int]) -> None:
-	for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-		total[key] += int(delta.get(key, 0) or 0)
+	"""Add one model call's counts onto the running total for the turn.
+
+	ADDS, and adds EVERY key, including ones this function has never heard of. It used to sum exactly
+	three hard-coded names, so any further count a call reported — a cached-input count, a cost in
+	micros, a count of calls served by something other than what was asked for — was dropped for every
+	call in the turn. That matters because of how the obvious repair goes wrong: "sum what we know,
+	create what we do not" is naturally written `if key in total: continue`, and that guard skips a key
+	precisely once it has a value to add to. The first call of a turn sets it, every later call is
+	skipped, and the result is assignment wearing the shape of addition — a number understated by more
+	the more work is done, which is the opposite of the direction an error should take. So there is no
+	key list here at all, and the rule is the same one `_merge_usage` already applies when it folds a
+	turn's total onto the record's.
+
+	`bool` is rejected outright. `isinstance(True, int)` is True in Python, so a flag emitted as `True`
+	rather than `1` would sum to 1, then 2, then 3, and be read downstream as a count of something that
+	happened three times. A flag is not a quantity; anything that wants to say "this happened" says it
+	as the integer 1 and is then countable on purpose.
+
+	Everything else that will coerce to an integer still does, exactly as before, and anything that
+	will not is skipped rather than crashing the turn over a number.
+	"""
+	for key, value in delta.items():
+		if isinstance(value, bool):
+			continue
+		try:
+			amount = int(value)
+		except (TypeError, ValueError):
+			continue
+		total[key] = total.get(key, 0) + amount
