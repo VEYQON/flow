@@ -183,3 +183,71 @@ class TestTheReplySaysWhatAnsweredIt(UnitTestCase):
 		_accumulate_usage(total, _normalize(_reply("other"), "asked").usage)
 
 		self.assertEqual(total["served_model_mismatch"], 2)
+
+
+# The counts the engine emits, and the whole of what it may emit. A module constant rather than a
+# class attribute so that a reader looking for "what does a turn record" finds it without a class.
+EMITTED = frozenset({"prompt_tokens", "completion_tokens", "total_tokens"})
+
+
+class TestNoCountIsCapturedThatNothingCanUse(UnitTestCase):
+	"""H4, decided: the engine does NOT capture a cached-input count, and that is a decision.
+
+	Pricing one needs a cached rate to price it AGAINST, and the rate table is a doctype in another
+	repository whose seven fields do not include one. Capturing the number here would therefore put a
+	count in the record that nothing can turn into money — and the review's own instruction is that
+	capturing a number and not using it is the one option not available, because the moment it exists
+	someone reads it as evidence the estimate accounts for caching when the estimate does not.
+
+	Dropping it also keeps the shipped caveat true. The caveat says an estimate cannot see cached
+	input; that sentence stops being honest the day this side starts seeing it, and the caveat is not
+	in this repository to amend.
+
+	SO THIS IS NOT A TEST OF NOTHING. `_accumulate_usage` now sums EVERY key it is handed, which is
+	what makes the drop fragile in a way it was not before: one line added to `_normalize` and a
+	cached count flows all the way to the stored record with no further edit and no review. This pins
+	the shape of what the engine emits so that line cannot land quietly. It fails RED when a cached
+	count is captured — proved by mutation, not assumed.
+
+	The exact platform-side change that would let this decision be reversed, recorded so that reversing
+	it is a known piece of work rather than a discovery: add `cached_input_per_1k` (Currency) to
+	`Veyqon Model Rate`'s `field_order`; price `(prompt_tokens - cached_prompt_tokens)` at the full
+	input rate plus `cached_prompt_tokens` at the cached rate; and resolve a rate row that has no
+	cached rate to `unpriceable` / `no-cached-rate` whenever the cached count is non-zero, rather than
+	silently pricing it at full rate. Until all three exist, capturing the count is premature.
+	"""
+
+	def test_the_engine_emits_no_count_it_cannot_price(self):
+		usage = _normalize(_reply("asked"), "asked").usage
+
+		self.assertEqual(set(usage), EMITTED)
+
+	def test_the_streamed_path_emits_the_same_set(self):
+		"""Two code paths build this dictionary and only one of them is the one people read."""
+		stream = _consume_stream(
+			[
+				_chunk("asked", content="hi"),
+				_chunk("asked", usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}),
+			],
+			"asked",
+		)
+		try:
+			while True:
+				next(stream)
+		except StopIteration as done:
+			response = done.value
+
+		self.assertEqual(set(response.usage), EMITTED)
+
+	def test_the_only_key_that_may_join_them_is_the_mismatch_counter(self):
+		"""The one addition this run made, named here so the set above is a whitelist and not a
+		freeze: anything else appearing is a count someone added without deciding who prices it."""
+		usage = _normalize(_reply("other"), "asked").usage
+
+		self.assertEqual(set(usage), EMITTED | {"served_model_mismatch"})
+
+	def test_a_cached_count_is_specifically_the_one_not_captured(self):
+		"""Named rather than implied, so a failure says WHICH decision was reversed."""
+		for key in ("cached_prompt_tokens", "cache_read_input_tokens", "cached_tokens"):
+			with self.subTest(key=key):
+				self.assertNotIn(key, _normalize(_reply("asked"), "asked").usage)
