@@ -34,3 +34,17 @@ export async function settle() {
 export function approval(prompt, tool = null) {
 	return { question: { prompt, options: ["Approve", "Deny"] }, tool };
 }
+
+// Every field the ENGINE puts on a Question, carried in as the engine set it — and deliberately by
+// spread, so a field added to the Question later arrives here without anyone remembering to add it.
+//
+// Run 13's MEDIUM 8: the specs built `{ prompt, options }` by hand and dropped the rest, and the card
+// BRANCHES on one of the fields they dropped — `allow_other !== false` is what draws the free-text
+// affordance. Two tests prove that affordance exists; built from two fields, both stayed green through
+// an engine that stopped allowing free text, proving something production no longer shows. The fixture
+// guard (`flow/tests/test_s21_card_fixture_is_current.py`) now captures `allow_other` for every case,
+// so with the spread in place an engine-side flip reddens the tests instead of hiding inside them.
+export function engineQuestion(f) {
+	const { tool, ...question } = f;
+	return question;
+}

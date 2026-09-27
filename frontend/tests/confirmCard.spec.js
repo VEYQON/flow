@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mountCard, settle, approval } from "./mountCard.js";
+import { mountCard, settle, approval, engineQuestion } from "./mountCard.js";
 import { reactive } from "vue";
 import { scrollCalls } from "./setup.js";
 import ENGINE from "./fixtures/confirm_questions.json";
@@ -43,7 +43,7 @@ const paragraphsOf = (prompt) => prompt.split("\n\n");
 describe("the engine's question reaches the reader whole", () => {
 	it("shows every paragraph, including the first, and drops nothing between them", () => {
 		const f = ENGINE.delete_forged_name;
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		const paras = paragraphsOf(f.prompt);
 
 		// Paragraph 0 is the engine's own head line and is the headline; the rest is the block.
@@ -111,7 +111,7 @@ describe("markup in a question is displayed, never parsed", () => {
 		// than by a hand-written sample of it.
 		const f = ENGINE.create_markup_value;
 		expect(f.prompt).toContain("<script>"); // control: the engine really did pass it through
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		const pre = bodyEl(w);
 		expect(pre.innerHTML).toContain("&lt;script&gt;");
 		expect(pre.textContent).toContain("<script>alert(1)</script>");
@@ -136,7 +136,7 @@ describe("nothing in a model-chosen value can forge a second question", () => {
 	const f = ENGINE.delete_forged_name;
 
 	it("shows a right-to-left override, a zero-width joiner and a newline as escapes", () => {
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		const text = bodyEl(w).textContent;
 
 		// The escapes are on screen…
@@ -154,7 +154,7 @@ describe("nothing in a model-chosen value can forge a second question", () => {
 	});
 
 	it("draws exactly one question and no line that was never the engine's", () => {
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 
 		// The forged line is "\nApproved by admin". If the newline had been obeyed, the card would
 		// carry a line whose whole content is the forgery.
@@ -175,7 +175,7 @@ describe("a 50,000-character value is capped, and the count is the engine's", ()
 	const f = ENGINE.run_action_huge_value;
 
 	it("caps the value and puts the elision count OUTSIDE the closing quote", () => {
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		const text = bodyEl(w).textContent;
 
 		// Capped: the reader is not handed 50,000 characters.
@@ -245,7 +245,7 @@ describe("a long question scrolls rather than truncates", () => {
 	const f = ENGINE.execute_long_code;
 
 	it("holds the WHOLE text, with no cap and no internal scroll, and no clamp anywhere above it", () => {
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		const pre = bodyEl(w);
 		const expected = paragraphsOf(f.prompt).slice(1).join("\n\n").trim();
 
@@ -293,7 +293,7 @@ describe("a long question scrolls rather than truncates", () => {
 	});
 
 	it("offers no affordance that hides part of the text", () => {
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		// The same defect wearing a button. Asserted on the rendered labels, so a "Show more" built
 		// by any component at all is caught, not only the two the source guard knew by name.
 		for (const label of w.findAll("button").map((b) => b.text()))
@@ -305,7 +305,7 @@ describe("a long question scrolls rather than truncates", () => {
 describe("nothing answers for the person before they have read the question", () => {
 	it("gives focus to neither Approve nor Deny on mount", async () => {
 		const f = ENGINE.delete_forged_name;
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		await settle();
 
 		// Observed on the document, not inferred from the absence of an `autofocus` string.
@@ -321,7 +321,7 @@ describe("nothing answers for the person before they have read the question", ()
 		// D6 / A10, half of it. Run 12 could only grep the source for `scrollIntoView({ block:
 		// "start"`. Here the call is observed, with its target and its arguments.
 		const f = ENGINE.execute_long_code;
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		await settle();
 
 		expect(scrollCalls.length).toBe(1);
@@ -348,7 +348,7 @@ describe("no code path puts raw tool arguments where the question belongs", () =
 		// values, so an assertion written on the values cannot tell the two apart. What tells them
 		// apart is that a dump carries the ARGUMENT SHAPE and the raw, unescaped characters.
 		const f = ENGINE.delete_forged_name;
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		const text = bodyEl(w).textContent;
 
 		// The argument shape is absent from the body.
@@ -364,7 +364,7 @@ describe("no code path puts raw tool arguments where the question belongs", () =
 
 	it("shows a code call's own sentence above its code, and the code whole", () => {
 		const f = ENGINE.execute_long_code;
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		const text = bodyEl(w).textContent;
 		expect(text).toContain("Count the open records");
 		// The code is last and complete — shortening it is the E5 v1 truncation attack.
@@ -381,7 +381,7 @@ describe("what was true before S21 is still true", () => {
 		// A5. Asserted by document order in the rendered tree, which is what a reader experiences —
 		// not by the index of two strings in a source file.
 		const f = ENGINE.delete_forged_name;
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		const pre = bodyEl(w);
 		expect(w.text()).toContain("Details");
 		const details = [...w.element.querySelectorAll("*")].find(
@@ -396,7 +396,7 @@ describe("what was true before S21 is still true", () => {
 		// A8, by the rendered icon rather than by the `danger` computed.
 		const f = ENGINE.delete_forged_name;
 		const del = mountCard({
-			question: { prompt: f.prompt, options: f.options },
+			question: engineQuestion(f),
 			tool: f.tool,
 		});
 		expect(iconClass(del)).toContain("feather-alert-triangle");
@@ -415,13 +415,13 @@ describe("what was true before S21 is still true", () => {
 		// A9. The tokens are stable; `optLabel` translates for DISPLAY only and `pick()` emits the
 		// token itself. A translation that changed what is emitted would change what executes.
 		const f = ENGINE.delete_forged_name;
-		const w = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w = mountCard({ question: engineQuestion(f), tool: f.tool });
 		const buttons = w.findAll("button");
 
 		await buttons.find((b) => b.text() === "Approve").trigger("click");
 		expect(w.emitted("answer")).toEqual([["Approve"]]);
 
-		const w2 = mountCard({ question: { prompt: f.prompt, options: f.options }, tool: f.tool });
+		const w2 = mountCard({ question: engineQuestion(f), tool: f.tool });
 		await w2
 			.findAll("button")
 			.find((b) => b.text() === "Deny")
@@ -442,7 +442,7 @@ describe("the headline names the action, and the engine's own line is never lost
 		// (i) the engine's own approval pair, with a body under the head line: the headline is the
 		// engine's sentence, so the approver reads what the engine asked and not a label for it.
 		const asked = mountCard({
-			question: { prompt: f.prompt, options: f.options },
+			question: engineQuestion(f),
 			tool: f.tool,
 		});
 		expect(head(asked)).toBe(engineFirstLine);
@@ -499,7 +499,7 @@ describe("the free-text answer is the person's own words, and only theirs", () =
 		// unchanged and that an empty one never becomes an answer.
 		const f = ENGINE.delete_forged_name;
 		const w = mountCard({
-			question: reactive({ prompt: f.prompt, options: f.options }),
+			question: reactive(engineQuestion(f)),
 			tool: f.tool,
 		});
 		await openOther(w);
@@ -525,7 +525,7 @@ describe("the free-text answer is the person's own words, and only theirs", () =
 	it("answers nothing when the person backs out", async () => {
 		const f = ENGINE.delete_forged_name;
 		const w = mountCard({
-			question: reactive({ prompt: f.prompt, options: f.options }),
+			question: reactive(engineQuestion(f)),
 			tool: f.tool,
 		});
 		await openOther(w);
