@@ -151,7 +151,24 @@ class TestAQuestionWithNoToolPartStillHasSomethingToRead(IntegrationTestCase):
 		# The stronger property the security review asked for (its L3): when the headline is NOT the
 		# engine's own first line, the body is the WHOLE prompt, so paragraph 0 is never dropped.
 		self.assertIn("titleIsEngineHead.value", body)
-		self.assertIn("props.question.prompt.trim()", body)
+		# The whole prompt, trimmed. Written as the NAME of the guarded value rather than as the
+		# dereference it used to be: run 14's final reviewer found that reading the headline off the
+		# engine's first line made this computed reachable on EVERY card, so a stored question row with
+		# no `prompt` — `store.js` spreads one verbatim when a paused run is resumed, and validates
+		# nothing — threw a TypeError inside a computed during render. Not a degraded card but NO card,
+		# an approval that can no longer be answered. `promptText` is `String(prompt ?? "")` and is the
+		# only thing that touches the stored value.
+		self.assertIn("promptText.value.trim()", body)
+		# And the property that rename has to keep, stated so it cannot be renamed away: the ONE place
+		# the stored value is read is inside a guard, and nothing in the card dereferences it directly.
+		# This is strictly more than the string this test used to look for, which the guard would have
+		# had to delete to satisfy.
+		card_no_comments = re.sub(r"^\s*(//|\*|/\*).*$", "", card, flags=re.M)
+		self.assertIn('String(props.question.prompt ?? "")', card_no_comments)
+		self.assertNotIn("props.question.prompt.", card_no_comments)
+		# Positive control on that detector, in the identical form: it really does fire on the shape it
+		# forbids, so its absence above is a finding and not a dead assertion.
+		self.assertIn("props.question.prompt.", "x = props.question.prompt.trim()")
 
 
 class TestApproveAndDenyNeverTakeFocus(IntegrationTestCase):
