@@ -63,20 +63,23 @@ const CONTROL_OR_SEPARATOR = /[\p{C}\p{Z}\p{Default_Ignorable_Code_Point}]/u;
 // see keeps NO exception, which is where it was before: the rule fails closed.
 const JOINERS = new Set(["\u200c", "\u200d"]);
 
-// Unicode's Virama combining class (canonical combining class 9), and this list is GENERATED, never
-// typed: `flow/tests/test_s24_one_rule_four_copies.py` recomputes it from Python's `unicodedata` on
-// every run and fails if one code point here differs. JavaScript's regular expressions cannot ask
-// for a combining class, which is the only reason the engine reads it from a library and this copy
-// carries a table. The two sibling web apps hand-write SIXTEEN of these; there are sixty-nine.
-// Measured 29 Sep 2026 against UCD 16.0.0.
+// The viramas the exception may fire on, and the list is GENERATED, never typed:
+// `flow/tests/test_s24_one_rule_four_copies.py` recomputes it from Python's `unicodedata` on every
+// run and fails if one code point here differs. JavaScript's regular expressions cannot ask for a
+// canonical combining class, which is the only reason the engine reads it from a library and this
+// copy carries a table.
+//
+// TWELVE, not the sixty-nine Unicode gives for combining class 9, and the narrowing is the whole of
+// an adversarial review's F2. Combining class 9 says how a mark REORDERS; it does not say that its
+// script spells conjuncts with a joiner, and several that carry it do not — Thai U+0E3A PHINTHU,
+// Lao U+0EBA, Tifinagh U+2D7F, Myanmar U+103A ASAT, Brahmi U+1107F NUMBER JOINER. A joiner kept
+// after one of those paints nothing AND forms nothing: two different writes, one set of pixels, and
+// not even a quote to say so. So the exception is confined to U+0900..U+0DFF, the ten
+// Brahmi-derived blocks whose joiner orthography the standard documents — and that is also what
+// makes clause 4 exact rather than a heuristic, because inside that range each 128-point block
+// holds the letters of exactly one script. Measured 29 Sep 2026, UCD 16.0.0.
 const VIRAMAS = new Set([
 	0x094d, 0x09cd, 0x0a4d, 0x0acd, 0x0b4d, 0x0bcd, 0x0c4d, 0x0ccd, 0x0d3b, 0x0d3c, 0x0d4d, 0x0dca,
-	0x0e3a, 0x0eba, 0x0f84, 0x1039, 0x103a, 0x1714, 0x1715, 0x1734, 0x17d2, 0x1a60, 0x1b44, 0x1baa,
-	0x1bab, 0x1bf2, 0x1bf3, 0x2d7f, 0xa806, 0xa82c, 0xa8c4, 0xa953, 0xa9c0, 0xaaf6, 0xabed,
-	0x10a3f, 0x11046, 0x11070, 0x1107f, 0x110b9, 0x11133, 0x11134, 0x111c0, 0x11235, 0x112ea,
-	0x1134d, 0x113ce, 0x113cf, 0x113d0, 0x11442, 0x114c2, 0x115bf, 0x1163f, 0x116b6, 0x1172b,
-	0x11839, 0x1193d, 0x1193e, 0x119e0, 0x11a34, 0x11a47, 0x11a99, 0x11c3f, 0x11d44, 0x11d45,
-	0x11d97, 0x11f41, 0x11f42, 0x1612f,
 ]);
 
 const LETTER = /\p{L}/u;
@@ -113,27 +116,42 @@ export const DISPLAY_LIMIT = 2000;
  * it — the point of escaping is that the reader can tell exactly what the value was.
  */
 export function escapeForDisplay(text) {
-	let out = "";
 	// Split by CODE POINT, as Python does, so a surrogate pair is one character and a lone
 	// surrogate is one character that `\p{Cs}` matches. An ARRAY rather than a `for…of` because the
 	// joiner exception has to look at the character on either side of the one being escaped.
 	const points = Array.from(String(text));
-	for (let index = 0; index < points.length; index++) {
-		const ch = points[index];
-		if (ch === "\\" || ch === '"') out += "\\" + ch;
-		else if (ch === "\n") out += "\\n";
-		else if (ch === "\r") out += "\\r";
-		else if (ch === "\t") out += "\\t";
-		else if (JOINERS.has(ch) && spellsRatherThanHides(points, index)) out += ch;
-		else if (ch !== " " && CONTROL_OR_SEPARATOR.test(ch)) {
-			const cp = ch.codePointAt(0);
-			out +=
-				cp <= 0xffff
-					? "\\u" + cp.toString(16).padStart(4, "0")
-					: "\\U" + cp.toString(16).padStart(8, "0");
-		} else out += ch;
-	}
+	let out = "";
+	for (let index = 0; index < points.length; index++) out += escapeCodePointAt(points, index);
 	return out;
+}
+
+/**
+ * The displayed form of ONE code point of `points`, decided against the WHOLE value.
+ *
+ * THE WHOLE VALUE IS THE POINT, and this function exists because a reviewer found the place that
+ * had forgotten it. `quoteForDisplay` escapes and caps in one pass, and it did so by handing
+ * `escapeForDisplay` one character at a time. A one-character string has no character before or
+ * after it, so clause 1 of `spellsRatherThanHides` refused every joiner unconditionally and the
+ * exception was structurally unreachable there — the escaper was fixed and the card a person reads
+ * was not. The same defect was in `flow/tools/builtins.py`; the engine's answer is
+ * `escape_for_display_at`, and this is its port.
+ *
+ * `points` is the value already split into code points, so a caller in a loop splits once.
+ */
+export function escapeCodePointAt(points, index) {
+	const ch = points[index];
+	if (ch === "\\" || ch === '"') return "\\" + ch;
+	if (ch === "\n") return "\\n";
+	if (ch === "\r") return "\\r";
+	if (ch === "\t") return "\\t";
+	if (JOINERS.has(ch) && spellsRatherThanHides(points, index)) return ch;
+	if (ch !== " " && CONTROL_OR_SEPARATOR.test(ch)) {
+		const cp = ch.codePointAt(0);
+		return cp <= 0xffff
+			? "\\u" + cp.toString(16).padStart(4, "0")
+			: "\\U" + cp.toString(16).padStart(8, "0");
+	}
+	return ch;
 }
 
 // A translated string cannot be allowed to open a line of its own: the desk reads these from
@@ -156,12 +174,15 @@ const oneLine = (text) => String(text).split(/\s+/).filter(Boolean).join(" ");
  */
 export function quoteForDisplay(value, limit = DISPLAY_LIMIT) {
 	const text = String(value);
+	const points = Array.from(text);
 	const shown = [];
 	let used = 0;
-	for (const ch of text) {
-		const escaped = escapeForDisplay(ch);
+	// BY INDEX INTO THE WHOLE VALUE, never a character torn out of it — see `escapeCodePointAt`.
+	// The cut below decides where to STOP; it never decides what a character means.
+	for (let index = 0; index < points.length; index++) {
+		const escaped = escapeCodePointAt(points, index);
 		if (used + escaped.length > limit) {
-			const count = oneLine(__("… ({0} characters in all)", [[...text].length]));
+			const count = oneLine(__("… ({0} characters in all)", [points.length]));
 			return `"${shown.join("")}" ${count}`;
 		}
 		shown.push(escaped);

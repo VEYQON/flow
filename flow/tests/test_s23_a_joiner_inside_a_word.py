@@ -169,24 +169,90 @@ class TestAJoinerWithNothingToJoinIsStillMarked(IntegrationTestCase):
 class TestTwoValuesAReaderCannotTellApartStillEscapeDifferently(IntegrationTestCase):
 	"""T2's whole point: the exception must not dissolve the defence it is an exception to.
 
-	The property the card rests on is that `_escaped` is INJECTIVE — two different values never
-	produce the same displayed text — because that is what makes "what you see is what runs" true.
-	An exception hands characters back unescaped, which is exactly how injectivity gets lost.
+	THE FIRST VERSION OF THIS CLASS COULD NOT GO RED, and a reviewer caught it by mutation. It
+	asserted that two values never produce the same STRING — and `_escaped` never deletes a code
+	point, so string injectivity is unconditional. With `_spells_rather_than_hides` mutated to
+	`return True`, the whole defence removed and every joiner kept raw, all three tests stayed
+	green, including one named `keeps "paid" and "paid<ZWJ>" apart` at the moment those two
+	displayed identically. CLAUDE.md, in as many words: a gate whose failure mode has never been
+	observed is a comment.
+
+	What matters is not that the strings differ. It is that they differ **in characters a renderer
+	paints**. `_painted` below is written HERE, in the test, from the note's own §2 table rather
+	than imported from the code under test — an inverse supplied by the code under test would agree
+	with any escaper, including a broken one.
+
+	AND THE ONE PLACE THAT IS NOT TRUE IS THE EXCEPTION ITSELF, which is why the pairs are in two
+	lists. A conjunct joiner is invisible BY DESIGN: `ශ්ර` and `ශ්‍ර`
+	differ only by it, and what distinguishes them on screen is that a conformant Sinhala renderer
+	draws the second as a touching conjunct and the first as two separate letters. A test cannot see
+	a font. So those pairs are named, one by one, as the DECLARED COST of the exception — and every
+	other pair must still paint differently.
 	"""
 
-	PAIRS = (
-		("\u0dc1\u0dca\u0dbb", "\u0dc1\u0dca\u200d\u0dbb"),  # the exempt joiner is the difference
+	# Characters this test treats as painting nothing, for the purpose of the assertion below.
+	# Written out here deliberately: §2 of `brain/40-architecture/the-invisible-character-rule.md`
+	# is the authority, and `test_s24` checks the note against the engine's own table, so these two
+	# independent statements have to meet in the middle or one of them is wrong.
+	INVISIBLE = "\u200b\u200c\u200d\u200e\u200f\u2060\ufeff\u00ad\u034f\u180e\u115f\u1160\u3164\ufe0f\uffa0"
+
+	# Pairs that must still differ in what a reader can SEE.
+	PAINTED_PAIRS = (
 		("paid", f"paid{ZWJ}"),
 		("SO-0001", "SO-0001\u200d"),
+		("SO-0001", "SO-0001\u3164"),
+		("paid", f"paid{ZWJ}unpaid"),
 		("\u0dc1\u0dca\u200d\u0dbb", "\u0dc1\u0dca\u200d\u200d\u0dbb"),
-		("\u0dc1\u0dca\u200d\u0dbb", "\u0dc1\u0dca\u200c\u0dbb"),  # ZWJ and ZWNJ are not each other
-		("\u0dc1\u0dca\u200d\u0dbb", "\u0dc1\u0dca\\u200d\u0dbb"),  # the word and its own escape
+		# Thai carries a combining class 9 mark and NO joiner orthography, so a joiner after it is
+		# inert: it paints nothing and forms nothing. The reviewer's F2, and the reason the rule is
+		# confined to the ten Brahmi-derived blocks rather than to a combining class.
+		("\u0e01\u0e3a\u0e02", "\u0e01\u0e3a\u200d\u0e02"),
+		("\u0eba\u0e81", "\u0eba\u200d\u0e81"),
+		("\u2d31\u2d7f\u2d30", "\u2d31\u2d7f\u200d\u2d30"),
+		("\u1000\u103a\u1001", "\u1000\u103a\u200d\u1001"),
 	)
 
-	def test_no_two_of_them_escape_alike(self):
-		for left, right in self.PAIRS:
+	# Pairs whose only difference IS the conjunct joiner. Declared cost, named one by one.
+	CONJUNCT_PAIRS = (
+		("\u0dc1\u0dca\u0dbb", "\u0dc1\u0dca\u200d\u0dbb"),
+		("\u0915\u094d\u0937", "\u0915\u094d\u200d\u0937"),
+	)
+
+	def _painted(self, text: str) -> str:
+		return "".join(ch for ch in text if ch not in self.INVISIBLE)
+
+	def test_the_stripper_itself_strips(self):
+		"""The positive control for `_painted`. Without it, a stripper that removed nothing would
+		make every assertion below pass."""
+		self.assertEqual(self._painted(f"a{ZWJ}b"), "ab")
+		self.assertEqual(self._painted("ab"), "ab")
+
+	def test_no_two_of_them_paint_alike(self):
+		"""The assertion the mutated code fails: with the exception widened to everything, `paid`
+		and `paid` + ZWJ both come through raw and paint the same four letters."""
+		for left, right in self.PAINTED_PAIRS:
 			with self.subTest(left=repr(left), right=repr(right)):
-				self.assertNotEqual(left, right)  # positive control: they really are two values
+				self.assertNotEqual(left, right)  # positive control: two values, really
+				self.assertNotEqual(
+					self._painted(_escaped(left)),
+					self._painted(_escaped(right)),
+					"two values a reader cannot tell apart",
+				)
+
+	def test_the_conjunct_pairs_are_the_declared_cost_and_are_kept_short(self):
+		"""These DO paint alike once the joiner is stripped, and that is the exception working: a
+		Sinhala renderer draws the conjunct and the non-conjunct differently, which no test can see.
+		Asserted rather than assumed, so that the cost stays exactly this size — if a later change
+		moves a pair into this list, this test is where it has to be written down."""
+		for left, right in self.CONJUNCT_PAIRS:
+			with self.subTest(left=repr(left)):
+				self.assertEqual(self._painted(_escaped(left)), self._painted(_escaped(right)))
+		self.assertEqual(len(self.CONJUNCT_PAIRS), 2)
+
+	def test_no_two_of_them_escape_alike_either(self):
+		"""The weaker string property, kept because it is still true and still worth pinning."""
+		for left, right in self.PAINTED_PAIRS + self.CONJUNCT_PAIRS:
+			with self.subTest(left=repr(left)):
 				self.assertNotEqual(_escaped(left), _escaped(right))
 
 	def test_a_value_cannot_forge_the_escape_of_another(self):
@@ -195,8 +261,6 @@ class TestTwoValuesAReaderCannotTellApartStillEscapeDifferently(IntegrationTestC
 		self.assertEqual(_escaped("\\u200d"), "\\\\u200d")
 
 	def test_the_exemption_is_injective_over_a_swept_alphabet(self):
-		"""The property rather than the six examples: every arrangement of a small alphabet that
-		contains both joiners, a virama, two letters and a space maps to a distinct display."""
 		alphabet = ("\u0dc1", "\u0dca", ZWJ, ZWNJ, "\u0dbb", " ")
 		seen: dict[str, str] = {}
 		for a in alphabet:
@@ -206,6 +270,95 @@ class TestTwoValuesAReaderCannotTellApartStillEscapeDifferently(IntegrationTestC
 					shown = _escaped(value)
 					self.assertNotIn(shown, seen, f"{value!r} and {seen.get(shown)!r} display alike")
 					seen[shown] = value
+
+
+class TestTheExceptionIsConfinedToScriptsThatSpellWithIt(IntegrationTestCase):
+	"""The reviewer's F2 and F3, as properties rather than examples.
+
+	CLAUSE 2 WAS WRONG AS FIRST WRITTEN. It asked only for canonical combining class 9, which is a
+	statement about how a mark reorders — not about whether its script spells conjuncts with a
+	joiner. Thai U+0E3A PHINTHU, Lao U+0EBA, Tifinagh U+2D7F, Myanmar U+103A ASAT and Brahmi
+	U+1107F NUMBER JOINER all carry it and NONE of them takes a joiner, so the joiner kept after one
+	of them painted nothing and formed nothing: two different writes, one set of pixels, and not
+	even a quote to say so.
+
+	CLAUSE 4 WAS JUSTIFIED BY A MEASUREMENT OF THE WRONG DIRECTION. §3 measured which conjuncts the
+	128-point block test MISSES (false negatives, which are harmless — they escape). Nobody measured
+	the false positives, and there were 27 viramas with a letter of a DIFFERENT script inside their
+	own block: U+2D7F TIFINAGH + U+2D00 GEORGIAN, U+A953 REJANG + U+A960 HANGUL, U+10A3F KHAROSHTHI
+	+ U+10A60 OLD SOUTH ARABIAN, and so on — exactly the cross-script shape clause 4 was invented to
+	refuse.
+
+	Both are closed by the same narrowing: the exception applies only to a virama in U+0900..U+0DFF,
+	the ten Brahmi-derived blocks whose joiner orthography the Unicode Standard actually documents.
+	Measured 29 Sep 2026 on UCD 16.0.0 and asserted below: twelve viramas, zero mixed blocks, zero
+	cross-script false positives.
+	"""
+
+	INDIC_LOW, INDIC_HIGH = 0x0900, 0x0DFF
+
+	def _viramas(self) -> list[int]:
+		return [cp for cp in range(0x110000) if unicodedata.combining(chr(cp)) == 9]
+
+	def _script(self, cp: int) -> str:
+		return unicodedata.name(chr(cp), "").split(" ")[0]
+
+	def test_a_combining_class_nine_mark_outside_the_indic_blocks_licenses_nothing(self):
+		"""The reviewer's own pairs, asserted one by one."""
+		for base, mark, follow, script in (
+			(0x0E01, 0x0E3A, 0x0E02, "Thai"),
+			(0x0E81, 0x0EBA, 0x0E82, "Lao"),
+			(0x2D31, 0x2D7F, 0x2D30, "Tifinagh"),
+			(0x1000, 0x103A, 0x1001, "Myanmar ASAT"),
+			(0x11005, 0x1107F, 0x11006, "Brahmi NUMBER JOINER"),
+			(0x1700, 0x1714, 0x1701, "Tagalog"),
+		):
+			value = chr(base) + chr(mark) + ZWJ + chr(follow)
+			with self.subTest(script=script):
+				self.assertEqual(unicodedata.combining(chr(mark)), 9)  # positive control
+				self.assertIn("\\u200d", _escaped(value))
+
+	def test_no_virama_licenses_a_letter_of_another_script(self):
+		"""The property clause 4 was supposed to have. Every virama, every letter the rule would
+		let it license, across the whole of Unicode — the script of the two must be the same."""
+		letters = [cp for cp in range(0x110000) if unicodedata.category(chr(cp))[0] == "L"]
+		exempted = 0
+		for virama in self._viramas():
+			for letter in letters:
+				if (virama >> 7) != (letter >> 7):
+					continue
+				value = "x" + chr(virama) + ZWJ + chr(letter)
+				if "\\u200d" in _escaped(value):
+					continue
+				exempted += 1
+				self.assertEqual(
+					self._script(virama),
+					self._script(letter),
+					f"U+{virama:04X} licensed U+{letter:04X}",
+				)
+		self.assertGreater(exempted, 100)  # positive control: it really did exempt things
+
+	def test_the_exception_reaches_exactly_twelve_viramas(self):
+		reached = [
+			cp
+			for cp in self._viramas()
+			if "\\u200d" not in _escaped("x" + chr(cp) + ZWJ + chr(cp - 0x30))
+			or self.INDIC_LOW <= cp <= self.INDIC_HIGH
+		]
+		indic = [cp for cp in self._viramas() if self.INDIC_LOW <= cp <= self.INDIC_HIGH]
+		self.assertEqual(len(indic), 12)
+		self.assertEqual(sorted(set(reached)), indic)
+
+	def test_the_ten_blocks_are_each_one_script(self):
+		"""Why clause 4 is exact inside this range and a heuristic outside it."""
+		for block in range(self.INDIC_LOW >> 7, (self.INDIC_HIGH >> 7) + 1):
+			scripts = {
+				self._script(cp)
+				for cp in range(block << 7, (block << 7) + 128)
+				if unicodedata.category(chr(cp))[0] == "L"
+			}
+			with self.subTest(block=hex(block << 7)):
+				self.assertEqual(len(scripts), 1, scripts)
 
 
 class TestTheRuleIsReadFromTheLibraryNotCopiedIntoIt(IntegrationTestCase):
@@ -237,18 +390,25 @@ class TestTheRuleIsReadFromTheLibraryNotCopiedIntoIt(IntegrationTestCase):
 				self.assertEqual(unicodedata.combining(chr(cp)), 9)
 
 	def test_the_library_knows_more_of_them_than_the_front_ends_do(self):
-		"""Not a boast: it is why the list is not copied. A hand-written sixteen leaves every other
-		Indic script escaping its own conjuncts."""
+		"""Not a boast: it is why the list is not copied. A hand-written list is a list somebody has
+		to keep, and the front ends' is already short by fifty-three."""
 		self.assertGreater(
 			sum(1 for cp in range(0x110000) if unicodedata.combining(chr(cp)) == 9),
 			len(self.FRONT_END_VIRAMAS),
 		)
 
-	def test_a_script_outside_the_front_ends_list_gets_its_conjunct_too(self):
-		"""Telugu's virama U+0C4D is in their sixteen; Chakma's U+11133 is not, and the library
-		knows it. Same rule, no new entry."""
-		word = "\U00011103\U00011133\u200d\U00011104"
-		self.assertEqual(unicodedata.combining("\U00011133"), 9)
+	def test_a_virama_outside_the_front_ends_list_gets_its_conjunct_too(self):
+		"""U+0D3C MALAYALAM SIGN CIRCULAR VIRAMA is not among their sixteen and the library knows
+		it. Same rule, no new entry — which is the whole argument for reading the class rather than
+		typing a list.
+
+		It is a MALAYALAM virama rather than the Chakma one this test used before the reviewer's F2:
+		the exception is now confined to U+0900..U+0DFF, so Chakma keeps no exception. That is a
+		narrowing with a measurement behind it, not an oversight — see
+		`TestTheExceptionIsConfinedToScriptsThatSpellWithIt`."""
+		word = "\u0d15\u0d3c\u200d\u0d37"
+		self.assertEqual(unicodedata.combining("\u0d3c"), 9)
+		self.assertNotIn(0x0D3C, self.FRONT_END_VIRAMAS)
 		self.assertEqual(_escaped(word), word)
 
 
@@ -392,3 +552,55 @@ class TestTheFallbackDumpIsADifferentDefectEntirely(IntegrationTestCase):
 		from flow.lib.agent import _render_confirm_template
 
 		self.assertEqual(_render_confirm_template("Write {text}.", {"text": SINHALA}), f'Write "{SINHALA}".')
+
+
+class TestTheCapDoesNotUndoTheException(IntegrationTestCase):
+	"""The reviewer's F1, and it was the worst of the findings.
+
+	`flow/tools/builtins.py` `_for_display` escapes and caps in one pass, and it did so by calling
+	`escape_for_display(ch)` on ONE CHARACTER AT A TIME. A one-character string has no character
+	before or after it, so clause 1 refused every joiner unconditionally and the exception was
+	STRUCTURALLY UNREACHABLE on that path — which is the path the six shipped write builtins use,
+	i.e. where production write confirmations actually come from. `_escaped` was fixed and the card
+	a person sees was not.
+
+	The fix is that the decision is taken over the WHOLE value once, and the cap then walks the
+	per-character escapes that decision produced. `escape_for_display_at` is that decision, exposed
+	under a name the tools module can use, so there is still exactly one rule.
+	"""
+
+	def _for_display(self, value, limit=None):
+		from flow.tools.builtins import _for_display
+
+		return _for_display(value) if limit is None else _for_display(value, limit)
+
+	def test_the_write_builtins_show_a_sinhala_word_as_a_word(self):
+		self.assertEqual(self._for_display(SINHALA), f'"{SINHALA}"')
+
+	def test_a_field_value_in_a_create_body_keeps_its_conjunct(self):
+		"""Through the real caller, not the helper: `_summarize_values` is what the body shows."""
+		from flow.tools.builtins import _summarize_values
+
+		self.assertIn(SINHALA, _summarize_values({"description": SINHALA}))
+
+	def test_a_field_NAME_keeps_its_conjunct_too(self):
+		from flow.tools.builtins import _summarize_values
+
+		self.assertIn(SINHALA, _summarize_values({SINHALA: "x"}))
+
+	def test_a_joiner_that_hides_is_still_marked_on_that_path(self):
+		"""The control. The cap path must not have become permissive."""
+		self.assertEqual(self._for_display(f"paid{ZWJ}unpaid"), '"paid\\u200dunpaid"')
+
+	def test_a_value_cut_off_by_the_cap_still_states_its_true_length(self):
+		"""And the exception must not move the cap: the count is measured on the raw value and the
+		quote still closes before it."""
+		shown = self._for_display(SINHALA, 6)
+		self.assertTrue(shown.startswith('"'), shown)
+		self.assertIn(f"({len(SINHALA)} characters in all)", shown)
+
+	def test_a_joiner_at_the_very_edge_of_the_cap_is_not_exempted_by_accident(self):
+		"""The cut is in the DISPLAY, never in the decision: a conjunct whose joiner falls past the
+		cap must still have been judged against the whole value, not against the prefix."""
+		long_word = "\u0dc1\u0dca\u200d\u0dbb" * 40
+		self.assertNotIn("\\u200d", self._for_display(long_word, 200))

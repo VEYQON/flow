@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { escapeForDisplay, displayText } from "@/lib/display";
+import { escapeForDisplay, quoteForDisplay, displayText, DISPLAY_LIMIT } from "@/lib/display";
 
 // THE PANEL'S HALF OF THE SAME DEFECT.
 //
@@ -15,7 +15,7 @@ import { escapeForDisplay, displayText } from "@/lib/display";
 // (2) a VIRAMA sits immediately before it, (3) a LETTER sits immediately after it, and (4) those
 // two neighbours share a 128-code-point aligned block. Everything else is escaped as before.
 //
-// The specification both copies are measured against is `docs/one-rule-four-copies.md`, and
+// The specification both copies are measured against is `brain/40-architecture/the-invisible-character-rule.md`, and
 // `flow/tests/test_s24_one_rule_four_copies.py` fails if either copy drifts from it.
 
 const ZWJ = "\u200d";
@@ -163,18 +163,109 @@ describe("two values a reader cannot tell apart still display differently", () =
 });
 
 describe("the panel and the engine are one rule", () => {
-	// The same cases the engine's own module asserts, so a divergence fails on BOTH sides rather
-	// than sitting undetected in whichever copy nobody ran.
+	// GENERATED FROM `brain/40-architecture/the-invisible-character-rule.md` §5, not typed. A
+	// reviewer found that this table had been hand-copied and held 8 of the note's 21 vectors, so
+	// thirteen of them were measured against the engine and never against the panel — the exact
+	// drift mechanism this whole change exists to remove, reintroduced inside the drift test.
+	// `flow/tests/test_s24_one_rule_four_copies.py::test_the_panel_runs_every_vector_the_note_holds`
+	// now fails if this list and the note ever differ by one line.
 	it.each([
-		[SINHALA, SINHALA],
-		[TAMIL, TAMIL],
-		[DEVANAGARI, DEVANAGARI],
+		// Sinhala conjunct — kept
+		["\u0dc1\u0dca\u200d\u0dbb\u0dd3", "\u0dc1\u0dca\u200d\u0dbb\u0dd3"],
+		// Tamil conjunct — kept
+		["\u0b95\u0bcd\u200d\u0bb7", "\u0b95\u0bcd\u200d\u0bb7"],
+		// Devanagari conjunct — kept
+		["\u0915\u094d\u200d\u0937", "\u0915\u094d\u200d\u0937"],
+		// ZWNJ asks for the separate form — kept
+		["\u0dc1\u0dca\u200c\u0dbb", "\u0dc1\u0dca\u200c\u0dbb"],
+		// clause 1 — nothing after it
 		["\u0dc1\u0dca\u200d", "\u0dc1\u0dca\\u200d"],
+		// clause 1 — nothing before it
 		["\u200d\u0dbb", "\\u200d\u0dbb"],
+		// clause 3 — a space is not a letter
+		["\u0dc1\u0dca\u200d \u0dbb", "\u0dc1\u0dca\\u200d \u0dbb"],
+		// clause 3 — punctuation
+		["\u0dc1\u0dca\u200d.\u0dbb", "\u0dc1\u0dca\\u200d.\u0dbb"],
+		// clause 3 — a vowel sign of the SAME block
+		["\u0dc1\u0dca\u200d\u0dcf", "\u0dc1\u0dca\\u200d\u0dcf"],
+		// clause 3 — a second virama
+		["\u0dc1\u0dca\u200d\u0dca", "\u0dc1\u0dca\\u200d\u0dca"],
+		// clause 3 — a digit of the same script
+		["\u0dc1\u0dca\u200d\u0de6", "\u0dc1\u0dca\\u200d\u0de6"],
+		// doubled — both halves marked
+		["\u0dc1\u0dca\u200d\u200d\u0dbb", "\u0dc1\u0dca\\u200d\\u200d\u0dbb"],
+		// clause 2 — no virama, however Indic the letters
+		["\u0dc1\u200d\u0dbb", "\u0dc1\\u200d\u0dbb"],
+		// clause 4 — a Devanagari virama cannot license a Latin x
+		["SO-000A\u094d\u200dx", "SO-000A\u094d\\u200dx"],
+		// clause 4 — Sinhala virama, Devanagari letter
+		["\u0dc1\u0dca\u200d\u0937", "\u0dc1\u0dca\\u200d\u0937"],
+		// the original attack, untouched by the exception
 		["paid\u200dunpaid", "paid\\u200dunpaid"],
+		// a bidi override is not a joiner and takes no exemption
 		["gnp\u202eexe", "gnp\\u202eexe"],
+		// the joiner kept, the override STILL marked
+		["\u202e\u0dc1\u0dca\u200d\u0dbb", "\\u202e\u0dc1\u0dca\u200d\u0dbb"],
+		// a virama licenses a joiner and nothing else
+		["\u0dc1\u0dca\u202e\u0dbb", "\u0dc1\u0dca\\u202e\u0dbb"],
+		// the invisible LETTER run 15 closed
+		["SO-0001\u3164", "SO-0001\\u3164"],
+		// Malayalam U+0D3C, a virama the front ends' sixteen omit — kept
+		["\u0d15\u0d3c\u200d\u0d37", "\u0d15\u0d3c\u200d\u0d37"],
+		// Thai has a combining-class-9 mark and no joiner: the plain word
+		["\u0e01\u0e3a\u0e02", "\u0e01\u0e3a\u0e02"],
+		// clause 2 range — Thai takes no joiner, so this one only hides
+		["\u0e01\u0e3a\u200d\u0e02", "\u0e01\u0e3a\\u200d\u0e02"],
+		// clause 2 range — Lao U+0EBA
+		["\u0eba\u200d\u0e81", "\u0eba\\u200d\u0e81"],
+		// clause 2 range — Tifinagh U+2D7F is itself the consonant joiner
+		["\u2d31\u2d7f\u200d\u2d30", "\u2d31\u2d7f\\u200d\u2d30"],
+		// clause 2 range — Myanmar ASAT kills, it does not stack
+		["\u1000\u103a\u200d\u1001", "\u1000\u103a\\u200d\u1001"],
+		// clause 2 range — Brahmi NUMBER JOINER
+		["\u{11005}\u{1107f}\u200d\u{11006}", "\u{11005}\u{1107f}\\u200d\u{11006}"],
+		// clause 2 range — Tibetan is out of range and keeps no exception
+		["\u0f40\u0f84\u200d\u0f41", "\u0f40\u0f84\\u200d\u0f41"],
+		// the control — a rule that escaped everything would pass the rest
 		["Sales Order SO-0001", "Sales Order SO-0001"],
-	])("agrees with flow/tests/test_s23 on %j", (input, expected) => {
+	])("agrees with the note on %j", (input, expected) => {
 		expect(escapeForDisplay(input)).toBe(expected);
+	});
+});
+
+describe("the cap does not undo the exception", () => {
+	// The reviewer's F1, on this side. `quoteForDisplay` escapes and caps in one pass and did so by
+	// calling `escapeForDisplay(ch)` on ONE character at a time — and a one-character string has no
+	// character either side of it, so clause 1 refused every joiner and the exception was
+	// structurally unreachable on the capping path. The escaper was fixed; the card was not.
+	it("quotes a Sinhala word without escaping the joiner inside it", () => {
+		expect(quoteForDisplay(SINHALA)).toBe(`"${SINHALA}"`);
+	});
+
+	it("still marks a hiding joiner on the capping path", () => {
+		expect(quoteForDisplay(`paid${ZWJ}unpaid`)).toBe('"paid\\u200dunpaid"');
+	});
+
+	it("states the true length when the cap cuts a conjunct short", () => {
+		const shown = quoteForDisplay(SINHALA, 6);
+		expect(shown.startsWith('"')).toBe(true);
+		expect(shown).toContain(`(${Array.from(SINHALA).length} characters in all)`);
+	});
+
+	it("judges a joiner against the whole value, never against the prefix the cap kept", () => {
+		const long = "\u0dc1\u0dca\u200d\u0dbb".repeat(40);
+		expect(quoteForDisplay(long, 200)).not.toContain("\\u200d");
+	});
+
+	it("shows a long Sinhala value under the ordinary limit as itself, unquoted", () => {
+		const long = "\u0dc1\u0dca\u200d\u0dbb ".repeat(20).trim();
+		expect(long.length).toBeLessThan(DISPLAY_LIMIT);
+		expect(displayText(long)).toBe(long);
+	});
+
+	it("keeps the conjunct when something ELSE in the value forces the quote", () => {
+		// `displayText` falls through to `quoteForDisplay` as soon as anything needs escaping, and
+		// that fall-through is exactly where the per-character bug lived.
+		expect(displayText(`${SINHALA}\n`)).toBe(`"${SINHALA}\\n"`);
 	});
 });

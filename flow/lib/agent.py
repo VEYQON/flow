@@ -1126,7 +1126,7 @@ def _paints_nothing(ch: str) -> bool:
 # PORTED, NOT INVENTED. Two sibling front ends decided this first and tested it
 # (`joinsRatherThanHides`): "a joiner that FOLLOWS a virama is orthography, not hiding, and is
 # kept." Their version is widened here in one direction and narrowed in two; every difference is
-# written down in `docs/one-rule-four-copies.md` beside the reason for it.
+# written down in `brain/40-architecture/the-invisible-character-rule.md` beside the reason for it.
 _JOINERS = ("\u200c", "\u200d")  # ZERO WIDTH NON-JOINER, ZERO WIDTH JOINER
 
 # Unicode's own Virama combining class. READ FROM THE LIBRARY rather than written out, because the
@@ -1135,6 +1135,33 @@ _JOINERS = ("\u200c", "\u200d")  # ZERO WIDTH NON-JOINER, ZERO WIDTH JOINER
 # cannot drift.
 _VIRAMA_COMBINING_CLASS = 9
 
+# ...AND THE COMBINING CLASS ALONE IS NOT ENOUGH, which an adversarial review measured after the
+# first version of this shipped. Combining class 9 says how a mark REORDERS. It does not say that
+# the mark's script spells conjuncts with a joiner, and several that carry it do not: Thai U+0E3A
+# PHINTHU, Lao U+0EBA, Tifinagh U+2D7F, Myanmar U+103A ASAT (a killer, not a stacker) and Brahmi
+# U+1107F NUMBER JOINER. A joiner kept after one of those paints nothing AND forms nothing — two
+# different writes, one set of pixels, and not even a quote to say so. That is the very attack this
+# escaper exists to stop, readmitted by its own exception.
+#
+# So the exception is confined to the range whose joiner orthography the Unicode Standard actually
+# documents: U+0900..U+0DFF, the ten Brahmi-derived blocks — Devanagari, Bengali, Gurmukhi,
+# Gujarati, Oriya, Tamil, Telugu, Kannada, Malayalam, Sinhala. Twelve viramas, measured 29 Sep 2026
+# on UCD 16.0.0.
+#
+# THIS IS ALSO WHAT MAKES CLAUSE 4 EXACT RATHER THAN A HEURISTIC. The same review measured the
+# direction the first version had not: 27 viramas across Unicode have a letter of a DIFFERENT script
+# inside their own 128-point block (U+2D7F TIFINAGH would have licensed U+2D00 GEORGIAN, U+A953
+# REJANG licensed U+A960 HANGUL, U+10A3F KHAROSHTHI licensed U+10A60 OLD SOUTH ARABIAN), so clause 4
+# admitted precisely the cross-script joiner it was invented to refuse. Inside U+0900..U+0DFF there
+# are ZERO such pairs: each of the ten blocks holds the letters of exactly one script, which is why
+# `cp >> 7` is the script here and only here. `TestTheExceptionIsConfinedToScriptsThatSpellWithIt`
+# asserts both facts over the whole of Unicode rather than over examples.
+#
+# The cost is that a script outside the range keeps no exception and escapes its own conjuncts, as
+# it did before this rule existed. That is an ugly card, never a hidden character: the rule fails
+# CLOSED, and widening it is a decision with a measurement attached, not a one-line change.
+_JOINING_SCRIPT_RANGE = (0x0900, 0x0DFF)
+
 
 def _spells_rather_than_hides(text: str, index: int) -> bool:
 	"""True for a joiner at `index` that is forming a conjunct, rather than sitting invisibly.
@@ -1142,20 +1169,20 @@ def _spells_rather_than_hides(text: str, index: int) -> bool:
 	Four clauses, and each one is the shape of an attack it refuses:
 
 	1. NOT AT EITHER EDGE. A joiner with nothing on one side of it joins nothing; it can only hide.
-	2. A VIRAMA IMMEDIATELY BEFORE. That is what makes it orthography and not decoration.
+	2. A VIRAMA IMMEDIATELY BEFORE, AND IN U+0900..U+0DFF. Combining class 9 is what makes it a
+	   virama; the range is what makes its script one that spells with a joiner at all. See the
+	   comment on `_JOINING_SCRIPT_RANGE` for the five combining-class-9 marks that take no joiner.
 	3. A LETTER IMMEDIATELY AFTER. This disposes of the doubled and the run cases for free: the code
 	   point after the first joiner of `VIRAMA ZWJ ZWJ LETTER` is a joiner, which is not a letter,
 	   and the one after the second has no virama before it.
 	4. THE TWO NEIGHBOURS IN THE SAME 128-CODE-POINT ALIGNED BLOCK. This clause the front ends do
 	   not have, and it closes a hole they still carry: `SO-000A\u094d\u200dx` — a Latin letter, a
 	   Devanagari virama, a joiner, a Latin `x` — satisfies 1 to 3 while the joiner forms a conjunct
-	   with nothing, so it is purely hidden. A virama binds a letter of its OWN script, and the
-	   Indic blocks are laid out by the standard on exactly that 128-point grid. Measured on UCD
-	   16.0.0: of the 69 viramas, 60 have every letter of their script inside the virama's own
-	   block, and for Devanagari 81 of its 90 letters are (the nine outside are the Devanagari
-	   Extended-A candrabindu signs and `DEVANAGARI LETTER AY`). A script the clause cannot see —
-	   Tibetan is the clearest — keeps no exception at all, which is where it was before this
-	   function existed. The rule fails CLOSED.
+	   with nothing, so it is purely hidden. Inside the range clause 2 allows, each 128-point block
+	   holds the letters of exactly one script, so `cp >> 7` IS the script rather than a proxy for
+	   it. The nine Devanagari letters that fall outside their own block (the Extended-A candrabindu
+	   signs and `DEVANAGARI LETTER AY`) simply keep no exception, which is where they were before
+	   this function existed. The rule fails CLOSED.
 
 	Reads `text` and nothing else.
 	"""
@@ -1163,6 +1190,9 @@ def _spells_rather_than_hides(text: str, index: int) -> bool:
 		return False
 	before = text[index - 1]
 	after = text[index + 1]
+	low, high = _JOINING_SCRIPT_RANGE
+	if not low <= ord(before) <= high:
+		return False
 	if unicodedata.combining(before) != _VIRAMA_COMBINING_CLASS:
 		return False
 	if unicodedata.category(after)[0] != "L":
@@ -1195,23 +1225,38 @@ def _escaped(text: str) -> str:
 	exempt, and a joiner anywhere else is escaped exactly as it was: the exception is narrow on
 	purpose, because the defence it is an exception to is what makes what you see what runs.
 	"""
-	out: list[str] = []
-	for index, ch in enumerate(text):
-		if ch in '\\"':
-			out.append("\\" + ch)
-		elif ch == "\n":
-			out.append("\\n")
-		elif ch == "\r":
-			out.append("\\r")
-		elif ch == "\t":
-			out.append("\\t")
-		elif ch in _JOINERS and _spells_rather_than_hides(text, index):
-			out.append(ch)
-		elif ch != " " and (unicodedata.category(ch)[0] in "CZ" or _paints_nothing(ch)):
-			out.append(f"\\u{ord(ch):04x}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08x}")
-		else:
-			out.append(ch)
-	return "".join(out)
+	return "".join(_escaped_at(text, index) for index in range(len(text)))
+
+
+def _escaped_at(text: str, index: int) -> str:
+	"""The displayed form of ONE character of `text`, decided in the context of the whole value.
+
+	THE WHOLE VALUE IS THE POINT, and this function exists because a reviewer found the place that
+	had forgotten it. `flow/tools/builtins.py` escapes and caps in one pass, and it did so by
+	handing `escape_for_display` one character at a time. A one-character string has no character
+	before or after it, so clause 1 of `_spells_rather_than_hides` refused every joiner
+	unconditionally: the exception was STRUCTURALLY UNREACHABLE on the path the six shipped write
+	builtins use, which is where production write confirmations come from. `_escaped` had been
+	fixed and the card a person actually reads had not.
+
+	So the decision is exposed under a name a capping caller can use (`escape_for_display_at`),
+	taking the index into the whole value rather than a character torn out of it. There is still
+	exactly one rule; the caller chooses where to CUT, never what a character means.
+	"""
+	ch = text[index]
+	if ch in '\\"':
+		return "\\" + ch
+	if ch == "\n":
+		return "\\n"
+	if ch == "\r":
+		return "\\r"
+	if ch == "\t":
+		return "\\t"
+	if ch in _JOINERS and _spells_rather_than_hides(text, index):
+		return ch
+	if ch != " " and (unicodedata.category(ch)[0] in "CZ" or _paints_nothing(ch)):
+		return f"\\u{ord(ch):04x}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08x}"
+	return ch
 
 
 def _quoted_argument(value: Any) -> str | None:
@@ -1313,6 +1358,12 @@ def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
 # first thing to drift. Text shown to a person, and text a person's answer depends on, is escaped
 # here or nowhere.
 escape_for_display = _escaped
+
+# The same rule, one character at a time, for a caller that has to CUT the escaped text somewhere —
+# `flow/tools/builtins.py` escapes and caps in one pass. It takes the index into the whole value
+# because the whole value is what the joiner exception is decided against; a caller that passed a
+# one-character string would silently lose it.
+escape_for_display_at = _escaped_at
 
 
 def _approval_question_keys(asked: list[Any] | None) -> frozenset[str]:

@@ -103,9 +103,35 @@ country most of the people reading these cards live in.
 | # | clause | the shape it refuses |
 |---|---|---|
 | 1 | it is at neither edge of the value | a joiner with nothing on one side joins nothing; it can only hide |
-| 2 | the code point immediately **before** it is a **virama** (canonical combining class 9) | a joiner anywhere else between two letters is the hiding case |
+| 2 | the code point immediately **before** it is a **virama** (canonical combining class 9) **and lies in U+0900–U+0DFF** | a joiner anywhere else between two letters is the hiding case; and a combining-class-9 mark whose script takes no joiner at all, where the joiner paints nothing AND forms nothing |
 | 3 | the code point immediately **after** it is a **letter** (category L\*) | a doubled joiner, a run of them, a joiner before a space, a bracket, a digit, a vowel sign or a second virama |
 | 4 | those two neighbours share a **128-code-point aligned block** (`cp >> 7` equal) | `SO-000A` + DEVANAGARI VIRAMA + ZWJ + `x`: clauses 1–3 all hold and the joiner binds nothing |
+
+**CLAUSE 2's RANGE IS NOT DECORATION, AND CLAUSE 4 DEPENDS ON IT.** The first version of this rule
+asked only for canonical combining class 9. An adversarial review measured what that admits and
+found two separate holes, both now closed by the range:
+
+- **Combining class 9 says how a mark REORDERS, not that its script spells with a joiner.** Thai
+  U+0E3A PHINTHU, Lao U+0EBA, Tifinagh U+2D7F (itself a consonant joiner), Myanmar U+103A ASAT (a
+  killer, not a stacker), Brahmi U+1107F NUMBER JOINER and the Tagalog/Hanunoo marks all carry it
+  and none of them takes a joiner. `กฺข` (U+0E01 U+0E3A U+0E02) and `กฺ‍ข` (the same with U+200D)
+  are two different writes that paint the same pixels — and both came through raw AND UNQUOTED, so
+  the quote did not fire either. That is the attack the escaper exists to stop, readmitted by its
+  own exception.
+- **Clause 4 was justified by a measurement of the wrong direction.** The paragraph below measures
+  which conjuncts the block test MISSES — false negatives, which are harmless because they escape.
+  Nobody had measured the false positives, and **27 viramas across Unicode have a letter of a
+  DIFFERENT script inside their own 128-point block**: U+2D7F TIFINAGH would have licensed U+2D00
+  GEORGIAN, U+A953 REJANG licensed U+A960 HANGUL CHOSEONG, U+ABED MEETEI MAYEK licensed U+AB80
+  CHEROKEE, U+10A3F KHAROSHTHI licensed U+10A60 OLD SOUTH ARABIAN, and so on through Tagalog↔Buhid,
+  Sundanese↔Batak, Tai Tham↔Buginese, Chakma↔Mahajani and a dozen more. Every one is the
+  cross-script shape clause 4 was invented to refuse.
+
+**Inside U+0900–U+0DFF there are ZERO such pairs.** Each of the ten blocks holds the letters of
+exactly one script, so within the range `cp >> 7` **is** the script rather than a proxy for it.
+Measured 29 Sep 2026 on UCD 16.0.0 and asserted over the whole of Unicode — not over examples — by
+`TestTheExceptionIsConfinedToScriptsThatSpellWithIt` in
+`flow/tests/test_s23_a_joiner_inside_a_word.py`.
 
 Clause 3 also disposes of the doubled and run cases for free: the code point after the first joiner
 of `VIRAMA ZWJ ZWJ LETTER` is a joiner, which is not a letter.
@@ -124,31 +150,34 @@ four copies is three too many; and copy #5's argument is sound for emoji — *"a
 prose; it is the exact value about to be written to a record"* — even though it is not sound for a
 conjunct. Not adopting it changes nothing: an emoji joiner was escaped before and is escaped now.
 
-**CLAUSE 4 IS A HEURISTIC, AND HERE IS ITS EXACT REACH.** Measured 29 Sep 2026 on UCD 16.0.0: of
-the **69** viramas, **60** have every letter of their own script inside the virama's own 128-point
-block. The nine that do not are DEVANAGARI (81 of its 90 letters are inside; the nine outside are
+**WHAT THE RANGE COSTS, MEASURED.** Fifty-seven of the 69 viramas now keep no exception at all —
+Tibetan, Myanmar, Khmer, Chakma, Javanese, Saurashtra and the rest escape their own conjuncts
+exactly as they did before this rule existed. That is an ugly card, never a hidden character: **the
+rule fails CLOSED**, and widening it is a decision that has to come with the false-positive
+measurement above. Within the twelve that remain, of the 69 viramas **60**
+have every letter of their own script inside the virama's own 128-point block. The nine that do not are DEVANAGARI (81 of its 90 letters are inside; the nine outside are
 the Devanagari Extended-A candrabindu signs and `DEVANAGARI LETTER AY`), TIBETAN (5 of 50), MYANMAR
-(71 of 120, both viramas), TAI THAM, two MEETEI MAYEK, SOYOMBO and GUNJALA GONDI. **A conjunct the
-clause cannot see keeps no exception at all — it is escaped, exactly as it was before this rule
-existed. The rule fails CLOSED**, and the cost is an ugly card for those scripts, never a hidden
-character.
+(71 of 120, both viramas), TAI THAM, two MEETEI MAYEK, SOYOMBO and GUNJALA GONDI. Of the twelve in range, only DEVANAGARI is imperfect — 81 of its 90 letters are inside its own
+block; the nine outside are the Extended-A candrabindu signs and `DEVANAGARI LETTER AY`, which
+simply keep no exception.
 
-## 4. TABLE TWO — THE VIRAMAS
+## 4. TABLE TWO — THE VIRAMAS THE EXCEPTION MAY FIRE ON
 
-Copy #1 **reads these from the library** — `unicodedata.combining(ch) == 9` — and has no table.
-Copy #2 carries a table only because JavaScript regular expressions cannot ask for a combining
-class; it is generated, and the drift test recomputes it. **Copies #4 and #5 write out SIXTEEN by
-hand**, so they escape the conjuncts of every other Indic script. That is table drift caught in the
-act, and it is why copy #1 has no table at all.
+Copy #1 **reads the combining class from the library** — `unicodedata.combining(ch) == 9` — and
+intersects it with the range of §3; it has no table. Copy #2 carries a table only because JavaScript
+regular expressions cannot ask for a combining class; it is generated, and the drift test recomputes
+it. **Copies #4 and #5 write out SIXTEEN by hand**, which is both too many (they include Tibetan,
+Myanmar and Khmer, whose joiner behaviour they never measured) and too few (they miss U+0D3B and
+U+0D3C, two Malayalam viramas). That is table drift caught in the act, and it is why copy #1 has no
+table at all.
 
 ```viramas
-U+094D U+09CD U+0A4D U+0ACD U+0B4D U+0BCD U+0C4D U+0CCD U+0D3B U+0D3C U+0D4D U+0DCA U+0E3A
-U+0EBA U+0F84 U+1039 U+103A U+1714 U+1715 U+1734 U+17D2 U+1A60 U+1B44 U+1BAA U+1BAB U+1BF2
-U+1BF3 U+2D7F U+A806 U+A82C U+A8C4 U+A953 U+A9C0 U+AAF6 U+ABED U+10A3F U+11046 U+11070
-U+1107F U+110B9 U+11133 U+11134 U+111C0 U+11235 U+112EA U+1134D U+113CE U+113CF U+113D0
-U+11442 U+114C2 U+115BF U+1163F U+116B6 U+1172B U+11839 U+1193D U+1193E U+119E0 U+11A34
-U+11A47 U+11A99 U+11C3F U+11D44 U+11D45 U+11D97 U+11F41 U+11F42 U+1612F
+U+094D U+09CD U+0A4D U+0ACD U+0B4D U+0BCD U+0C4D U+0CCD U+0D3B U+0D3C U+0D4D U+0DCA
 ```
+
+Twelve: Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada, Malayalam (three of
+them) and Sinhala. Unicode gives **69** code points combining class 9 in all; §3 says why the other
+57 are excluded.
 
 ## 5. TABLE THREE — THE VECTORS EVERY COPY MUST AGREE ON
 
@@ -178,10 +207,36 @@ line of this table is wrong, whichever copy it is.**
 '\u202e\u0dc1\u0dca\u200d\u0dbb'	'\\u202e\u0dc1\u0dca\u200d\u0dbb'	the joiner kept, the override STILL marked
 '\u0dc1\u0dca\u202e\u0dbb'	'\u0dc1\u0dca\\u202e\u0dbb'	a virama licenses a joiner and nothing else
 'SO-0001\u3164'	'SO-0001\\u3164'	the invisible LETTER run 15 closed
+'\u0d15\u0d3c\u200d\u0d37'	'\u0d15\u0d3c\u200d\u0d37'	Malayalam U+0D3C, a virama the front ends' sixteen omit — kept
+'\u0e01\u0e3a\u0e02'	'\u0e01\u0e3a\u0e02'	Thai has a combining-class-9 mark and no joiner: the plain word
+'\u0e01\u0e3a\u200d\u0e02'	'\u0e01\u0e3a\\u200d\u0e02'	clause 2 range — Thai takes no joiner, so this one only hides
+'\u0eba\u200d\u0e81'	'\u0eba\\u200d\u0e81'	clause 2 range — Lao U+0EBA
+'\u2d31\u2d7f\u200d\u2d30'	'\u2d31\u2d7f\\u200d\u2d30'	clause 2 range — Tifinagh U+2D7F is itself the consonant joiner
+'\u1000\u103a\u200d\u1001'	'\u1000\u103a\\u200d\u1001'	clause 2 range — Myanmar ASAT kills, it does not stack
+'\U00011005\U0001107f\u200d\U00011006'	'\U00011005\U0001107f\\u200d\U00011006'	clause 2 range — Brahmi NUMBER JOINER
+'\u0f40\u0f84\u200d\u0f41'	'\u0f40\u0f84\\u200d\u0f41'	clause 2 range — Tibetan is out of range and keeps no exception
 'Sales Order SO-0001'	'Sales Order SO-0001'	the control — a rule that escaped everything would pass the rest
 ```
 
 ## 6. WHAT IS *NOT* DEFENDED, SAID OUT LOUD
+
+- **THE DECLARED COST OF THE EXCEPTION ITSELF.** `ශ්ර` and `ශ්‍ර` differ only by a conjunct joiner,
+  and what tells them apart on screen is that a conformant Sinhala renderer draws the second as a
+  touching conjunct. **In a font that does not form that conjunct, the two are one set of pixels.**
+  This is inherent to any joiner exception — copy #4 accepted it too, and calls it "a documented
+  trade" — and it is the price of not destroying the word. It is bounded by §3's four clauses to
+  exactly the case where the joiner is asking a renderer for something. `TestTwoValuesAReaderCannot
+  TellApartStillEscapeDifferently.CONJUNCT_PAIRS` names every pair that pays it, one by one, so the
+  cost cannot grow without somebody writing the new pair down.
+- **THE TWO COPIES CAN DISAGREE ACROSS A UNICODE VERSION.** Clause 3 asks Python
+  `unicodedata.category(ch)[0] == "L"` and JavaScript `\p{L}`, and the two runtimes ship different
+  UCD versions (bench Python 3.14.7 is UCD 16.0.0; Node v24 is Unicode 17.0). Measured 29 Sep 2026:
+  **98 inputs get opposite joiner decisions**, all of them a code point unassigned in 16 and a
+  letter in 17 — the smallest is `U+0041 U+0C4D U+200D U+0C5C U+005A`, where the engine escapes the
+  joiner and the panel does not. The direction is that the PANEL is the permissive one. Not closed
+  here: closing it means generating the letter table for U+0900–U+0DFF into the panel (89 ranges),
+  which is a fifth table and wants its own decision. Pinned, with the mechanism named, by
+  `test_the_two_copies_can_disagree_only_across_a_unicode_version` in `test_s24`.
 
 - **Homoglyphs.** `Раураl` in Cyrillic draws identically to the Latin word and produces no escape
   and no quote, because every code point in it is an ordinary visible letter. A mixed-script or

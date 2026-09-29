@@ -43,7 +43,7 @@ def _for_display(value: Any, limit: int = _CONFIRM_STR_LIMIT) -> str:
 	what makes it a cap. The true length is stated whenever anything is left out, because a
 	question holding part of a value reads exactly like one holding all of it.
 	"""
-	from flow.lib.agent import escape_for_display
+	from flow.lib.agent import escape_for_display_at
 
 	try:
 		text = value if isinstance(value, str) else str(value)
@@ -54,8 +54,14 @@ def _for_display(value: Any, limit: int = _CONFIRM_STR_LIMIT) -> str:
 		return '"" {0}'.format(_one_line(_("(a value too long to show)")))
 	shown: list[str] = []
 	used = 0
-	for ch in text:
-		escaped = escape_for_display(ch)
+	# BY INDEX INTO THE WHOLE VALUE, never a character torn out of it. `escape_for_display` used to
+	# be called here with a one-character string, and a one-character string has no character either
+	# side of it — so the joiner exception (`_spells_rather_than_hides`) could never fire on this
+	# path and every Sinhala conjunct in a write confirmation was escaped even after the engine's
+	# own escaper had been fixed. The cut below decides where to STOP; it never decides what a
+	# character means.
+	for index in range(len(text)):
+		escaped = escape_for_display_at(text, index)
 		if used + len(escaped) > limit:
 			# The count goes OUTSIDE the closing quote. Inside it, a value whose own text read
 			# `short… (9999 characters in all)` was byte-identical to a genuinely elided 9,999

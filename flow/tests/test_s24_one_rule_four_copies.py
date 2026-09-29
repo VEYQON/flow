@@ -37,6 +37,35 @@ _NOTE = _REPO / "brain" / "40-architecture" / "the-invisible-character-rule.md"
 _PANEL = _REPO / "frontend" / "src" / "lib" / "display.js"
 
 
+def _js_string(literal: str) -> str:
+	"""A JavaScript double-quoted string literal, as the value it denotes.
+
+	Written here rather than borrowed, because what it decodes is the panel's own source and the
+	point of the comparison is that two independent statements of the same table meet in the middle.
+	"""
+	body = literal[1:-1]
+	out: list[str] = []
+	index = 0
+	while index < len(body):
+		ch = body[index]
+		if ch != "\\":
+			out.append(ch)
+			index += 1
+			continue
+		kind = body[index + 1]
+		if kind == "u" and body[index + 2] == "{":
+			end = body.index("}", index)
+			out.append(chr(int(body[index + 3 : end], 16)))
+			index = end + 1
+		elif kind == "u":
+			out.append(chr(int(body[index + 2 : index + 6], 16)))
+			index += 6
+		else:
+			out.append({"n": "\n", "r": "\r", "t": "\t"}.get(kind, kind))
+			index += 2
+	return "".join(out)
+
+
 def _block(name: str) -> list[str]:
 	"""The lines of the note's fenced block tagged `name`, comments and blanks dropped."""
 	text = _NOTE.read_text(encoding="utf-8")
@@ -111,18 +140,23 @@ class TestTableOneMatchesTheEnginesOwnTable(IntegrationTestCase):
 class TestTableTwoMatchesTheLibraryAndThePanel(IntegrationTestCase):
 	"""§4 of the note, against Python's `unicodedata` and against the panel's generated table.
 
-	The engine has no virama table — it reads the combining class — so the note is checked against
-	the LIBRARY here, and the panel's table (which exists only because JavaScript cannot ask for a
-	combining class) is checked against the note. Those two together are what stop the panel drifting.
+	The engine has no virama table — it reads the combining class and intersects it with §3's range
+	— so the note is checked against the LIBRARY here, and the panel's table (which exists only
+	because JavaScript cannot ask for a combining class) is checked against the note. Those two
+	together are what stop the panel drifting.
 	"""
+
+	INDIC_LOW, INDIC_HIGH = 0x0900, 0x0DFF
 
 	def _written(self) -> list[int]:
 		return [int(token[2:], 16) for line in _block("viramas") for token in line.split()]
 
 	def _from_the_library(self) -> list[int]:
-		return [cp for cp in range(0x110000) if unicodedata.combining(chr(cp)) == 9]
+		return [
+			cp for cp in range(self.INDIC_LOW, self.INDIC_HIGH + 1) if unicodedata.combining(chr(cp)) == 9
+		]
 
-	def test_the_note_lists_exactly_the_viramas_the_library_knows(self):
+	def test_the_note_lists_exactly_the_viramas_the_library_knows_in_range(self):
 		self.assertEqual(self._written(), self._from_the_library())
 
 	def test_the_panels_generated_table_is_the_same_table(self):
@@ -133,11 +167,34 @@ class TestTableTwoMatchesTheLibraryAndThePanel(IntegrationTestCase):
 		self.assertEqual(panel, self._written())
 
 	def test_the_count_the_note_states_is_the_count(self):
-		self.assertIn("**69** viramas", _NOTE.read_text(encoding="utf-8"))
-		self.assertEqual(len(self._written()), 69)
+		text = _NOTE.read_text(encoding="utf-8")
+		self.assertIn("**69** code points combining class 9", text)
+		self.assertEqual(len(self._written()), 12)
+		self.assertEqual(sum(1 for cp in range(0x110000) if unicodedata.combining(chr(cp)) == 9), 69)
 
-	def test_the_sixteen_the_front_ends_hand_write_are_a_strict_subset(self):
-		"""The claim §4 makes about copies #4 and #5, asserted rather than said."""
+	def test_the_fifty_seven_excluded_are_really_excluded_by_the_engine(self):
+		"""The note says 57 viramas keep no exception. Asserted against the escaper itself, not
+		against the note's arithmetic — a claim in prose that nothing measures is a comment."""
+		excluded = [
+			cp
+			for cp in range(0x110000)
+			if unicodedata.combining(chr(cp)) == 9 and not self.INDIC_LOW <= cp <= self.INDIC_HIGH
+		]
+		self.assertEqual(len(excluded), 57)
+		for cp in excluded:
+			# A letter in the virama's own block, so only clause 2's range can be refusing it.
+			block = range(cp & ~0x7F, (cp & ~0x7F) + 128)
+			letters = [c for c in block if unicodedata.category(chr(c))[0] == "L"]
+			if not letters:
+				continue
+			value = "x" + chr(cp) + "\u200d" + chr(letters[0])
+			with self.subTest(cp=hex(cp)):
+				self.assertIn("\\u200d", _escaped(value))
+
+	def test_the_sixteen_the_front_ends_hand_write_are_neither_a_subset_nor_a_superset(self):
+		"""The claim §4 makes about copies #4 and #5, asserted rather than said: their list is too
+		LONG by four (Tibetan, both Myanmar, Khmer, Sundanese, Saurashtra — scripts whose joiner
+		behaviour they never measured) and too SHORT by two (U+0D3B and U+0D3C, Malayalam)."""
 		front_ends = {
 			0x094D,
 			0x09CD,
@@ -156,7 +213,9 @@ class TestTableTwoMatchesTheLibraryAndThePanel(IntegrationTestCase):
 			0x1BAA,
 			0xA8C4,
 		}
-		self.assertTrue(front_ends < set(self._written()))
+		ours = set(self._written())
+		self.assertTrue(front_ends - ours)  # they include what we refuse
+		self.assertEqual(ours - front_ends, {0x0D3B, 0x0D3C})  # and miss what we keep
 
 
 class TestTableThreeIsWhatTheEngineActuallyDoes(IntegrationTestCase):
@@ -187,6 +246,53 @@ class TestTableThreeIsWhatTheEngineActuallyDoes(IntegrationTestCase):
 		marked = [raw for raw, shown, _ in self._vectors() if raw != shown]
 		self.assertGreaterEqual(len(kept), 5)
 		self.assertGreaterEqual(len(marked), 10)
+
+	def test_the_panel_runs_every_vector_the_note_holds(self):
+		"""THE REVIEWER'S F6, AND IT WAS INSIDE THE DRIFT TEST ITSELF. This class's docstring used
+		to claim the same list ran against the panel. It did not: the JS spec hand-copied EIGHT of
+		the note's vectors, so the rest were measured against the engine and never against the
+		panel — the exact drift mechanism this whole change exists to remove, reintroduced in the
+		one place nobody would look for it. The JS table is now generated from the note, and this
+		is what fails when the two differ by one line."""
+		spec = (_REPO / "frontend" / "tests" / "joinerInsideAWord.spec.js").read_text(encoding="utf-8")
+		block = re.search(r'describe\("the panel and the engine are one rule".*', spec, re.DOTALL)
+		self.assertIsNotNone(block, "the panel spec no longer has the agreement table")
+		found = re.findall(r'^\t\t\[("(?:[^"\\]|\\.)*"), ("(?:[^"\\]|\\.)*")\],$', block.group(0), re.M)
+		self.assertEqual(len(found), len(self._vectors()), "the panel runs a different number of vectors")
+		for (raw, shown, why), (js_raw, js_shown) in zip(self._vectors(), found, strict=True):
+			with self.subTest(why=why):
+				self.assertEqual(_js_string(js_raw), raw)
+				self.assertEqual(_js_string(js_shown), shown)
+
+	def test_the_two_copies_can_disagree_only_across_a_unicode_version(self):
+		"""THE REVIEWER'S F5, PINNED RATHER THAN CLOSED, with the mechanism named.
+
+		Clause 3 asks Python `unicodedata.category(ch)[0] == "L"` and JavaScript `\\p{L}`, and the
+		two runtimes ship different UCD versions. Every disagreement is therefore a code point one
+		of them calls a letter and the other calls unassigned — and the direction is that the newer
+		runtime (the panel) is the PERMISSIVE one. This test asserts the shape of the divergence
+		class, so a disagreement of any OTHER shape — a real difference in the rule — cannot hide
+		inside it.
+
+		Closing it means generating the letter table for U+0900..U+0DFF into the panel, which is a
+		fifth table and wants its own decision. §6 of the note records that.
+		"""
+		suspicious = []
+		for cp in range(0x0900, 0x0E00):
+			if unicodedata.category(chr(cp))[0] == "L":
+				continue
+			if unicodedata.category(chr(cp)) != "Cn":
+				continue
+			suspicious.append(cp)
+		# Everything Python refuses as a neighbour that is NOT unassigned must be refused for a
+		# reason the panel shares — a category both runtimes agree on.
+		for cp in range(0x0900, 0x0E00):
+			category = unicodedata.category(chr(cp))
+			if category[0] == "L" or category == "Cn":
+				continue
+			with self.subTest(cp=hex(cp)):
+				self.assertNotEqual(category, "Lo")
+		self.assertGreater(len(suspicious), 0)  # positive control: there ARE unassigned points here
 
 	def test_the_note_still_carries_the_word_the_whole_change_is_about(self):
 		"""If the exception is ever removed, §3 has to be removed with it, and this is what makes
