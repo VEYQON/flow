@@ -777,7 +777,7 @@ class Agent:
 		try:
 			return tool(**call.arguments)
 		except Exception as e:
-			return json.dumps({"error": str(e)[:ERROR_MESSAGE_LIMIT]})
+			return json.dumps({"error": _failure_sentence(e)})
 
 
 # A tool call that cannot be told apart from another in the same turn cannot be approved separately
@@ -1424,6 +1424,49 @@ def _all_question_keys(asked: list[Any] | None) -> frozenset[str]:
 		if isinstance(key, str):
 			keys.add(key)
 	return frozenset(keys)
+
+
+# A refusal that says nothing is worse than a refusal that says the wrong thing, and until run 17
+# this was the commoner of the two. A permission check in the surrounding framework raises an
+# exception whose own text is EMPTY -- its sentence goes to a message log this module does not read
+# -- so `str(e)` was `""` and the model was handed `{"error": ""}`: told an action failed, given no
+# reason, and left to invent one. It turned up on the resume path, where an approved call is now
+# carried out as the person who ASKED for it and may be refused for exactly that reason.
+#
+# The log is deliberately not read instead. It is written by the framework, names its own record
+# types and tables, and this string goes straight into the model's context.
+#
+# Matched by the class's NAME rather than by the class, because this module touches no framework
+# object of its own -- `grep -n "frappe\." flow/lib/agent.py` is empty and is meant to stay empty;
+# `from frappe import _` is the whole of the coupling. The builtin of the same name never reaches
+# here: it always carries a message, so the branch above returns first.
+_PERMISSION_ERROR_NAMES = frozenset({"PermissionError"})
+
+_NOT_ALLOWED = (
+	"This action was not carried out. The person it is being done for is not allowed to do it, and "
+	"nothing was changed. Do not report it as done, and do not attempt it another way -- tell the "
+	"user it did not happen."
+)
+
+# Its sibling, and deliberately vaguer, because less is known. An empty message from anything else
+# says nothing about whether the action took effect, and a sentence claiming it did not would be a
+# guess presented as a fact.
+_NO_REASON_GIVEN = (
+	"This action failed and reported no reason, so whether it took effect is not known. Do not "
+	"report it as done; tell the user it failed."
+)
+
+
+def _failure_sentence(error: Exception) -> str:
+	"""What the model is told when a tool raised. Never nothing."""
+	text = str(error).strip()
+	if text:
+		return text[:ERROR_MESSAGE_LIMIT]
+	if type(error).__name__ in _PERMISSION_ERROR_NAMES or any(
+		base.__name__ in _PERMISSION_ERROR_NAMES for base in type(error).__mro__
+	):
+		return _NOT_ALLOWED
+	return _NO_REASON_GIVEN
 
 
 def _not_executed(reason: str) -> str:

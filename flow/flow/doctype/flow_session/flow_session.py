@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -12,7 +13,7 @@ from frappe import _
 from frappe.model.document import Document
 
 if TYPE_CHECKING:
-	from collections.abc import Generator
+	from collections.abc import Generator, Iterator
 
 	from flow.flow.doctype.flow_run.flow_run import FlowRun
 	from flow.lib.agent import Event
@@ -50,6 +51,96 @@ def _set_active_run(run: str | None, *, unattended: bool = False) -> None:
 	"""
 	frappe.flags.flow_run = run
 	frappe.flags.flow_unattended = bool(run) and unattended
+
+
+def _the_requester(run: FlowRun) -> str:
+	"""Whose turn a paused run is: the person who asked for it, and never the person answering.
+
+	**The decision this function IS.** A paused run can be answered through two doors — the
+	whitelisted `flow.api.api.resume_run` that the chat panel calls, and `FlowSession.resume`
+	called in process by another application's worker — and until this existed neither said
+	anything about identity at all: the remainder of the turn ran as whatever
+	`frappe.session.user` happened to be, which on the first door is the ANSWERER.
+
+	That made an approval a transfer of reach. The person answering is shown a tool and its
+	arguments; they are not shown, and never agreed to, the sentence "and the rest of this
+	conversation runs as you" — while the loop that follows is steered by the REQUESTER's text and
+	continues for up to `max_iterations` further model calls that nobody was asked about. Measured
+	before it was changed: a requester holding no read on a doctype listed twelve of its rows, and
+	a requester who could not create a record had one created (run 17, 29 Sep 2026).
+
+	So: authorise as the caller — `assert_run_owner` and `_assert_session_owner` have already run
+	by the time anything here is reached, and they stay the caller's business — then PERFORM as the
+	requester. The cost is accepted and is the smaller one: a requester who lacks the permission
+	gets a refusal after the approval, which is visible and does nothing, rather than an execution
+	nobody consented to.
+
+	**Fails closed.** An owner that is gone or disabled stops the resume rather than falling back
+	to the answerer, because falling back to the answerer is the whole defect.
+	"""
+	owner = (run.owner or "").strip()
+	if not owner:
+		frappe.throw(
+			_("This conversation has no owner recorded, so it cannot be continued."),
+			title=_("Cannot Resume"),
+		)
+	if not frappe.db.exists("User", owner) or not frappe.db.get_value("User", owner, "enabled"):
+		frappe.throw(
+			_("The person who started this conversation can no longer act, so it cannot be continued."),
+			title=_("Cannot Resume"),
+		)
+	return owner
+
+
+@contextmanager
+def _acting_as(user: str) -> Iterator[None]:
+	"""Run the block as `user`, and hand the caller's own request back exactly as it was.
+
+	`frappe.set_user` is used rather than assigning `frappe.session.user`, because only it also
+	drops `role_permissions`, `user_perms` and `local.cache` — and that half is what makes this a
+	change of PERMISSIONS rather than a change of label. A fix that set the name and left the
+	caches alone would satisfy "who does it say it is" and fail "what could it read", which is why
+	the tests assert the second.
+
+	It clears four things that belong to the REQUEST and not to the acting user, though
+	(`frappe/__init__.py`, v16.31.0): `session.sid` is overwritten with the user id,
+	`session.data` and `local.form_dict` are emptied. Those are put back on the way out, so a
+	whitelisted call does not return with its own arguments gone and its session id replaced by an
+	email address. `local.cache` is deliberately NOT restored: it is a permission-bearing cache
+	and restoring the answerer's copy of it is the bug this function exists to prevent.
+
+	A no-op when the identity is already right, so the common case — a person answering their own
+	question — touches nothing at all.
+	"""
+	if frappe.session.user == user:
+		yield
+		return
+
+	caller, sid, data = frappe.session.user, frappe.session.sid, frappe.session.data
+	form_dict = frappe.local.form_dict
+	frappe.set_user(user)
+	try:
+		yield
+	finally:
+		# `set_user` again rather than an assignment: the caches raised for the requester have to
+		# go, or the caller carries the requester's permissions out of this block.
+		frappe.set_user(caller)
+		frappe.local.session.sid = sid
+		frappe.local.session.data = data
+		frappe.local.form_dict = form_dict
+
+
+def _resumed_as(user: str, runtime, messages, answers, asked) -> Generator[Event]:
+	"""The streamed continuation, under `user` for exactly as long as it is producing events.
+
+	A streamed resume returns a generator that the WSGI layer iterates after the request handler
+	has returned, so the identity cannot be set around the CALL — it has to be set inside the
+	generator, where it is entered on the first advance and restored when the generator finishes
+	or is closed. `stream_with_persistence` then writes the result back as the caller, which is
+	what the non-streamed path does too.
+	"""
+	with _acting_as(user):
+		yield from runtime.resume(messages, answers, stream=True, asked=asked)
 
 
 class FlowSession(Document):
@@ -371,26 +462,35 @@ class FlowSession(Document):
 		if not run_name:
 			frappe.throw(_("This session has no paused run to resume."), title=_("Nothing to Resume"))
 		run = frappe.get_doc("Flow Run", run_name)
+		# Authorised as the caller — that already happened, above this method — and PERFORMED as
+		# the person whose turn it is. See `_the_requester`.
+		requester = _the_requester(run)
 
-		self.reload()
-		messages = self._build_prompt_messages()
-		if not messages:
-			frappe.throw(_("This session has no transcript to resume from."))
+		with _acting_as(requester):
+			self.reload()
+			# Inside, and not only for the tools: this reads the acting user's display name, time
+			# zone and personal memory block, so rebuilt under the answerer it put the ANSWERER's
+			# name and notes into the requester's conversation.
+			messages = self._build_prompt_messages()
+			if not messages:
+				frappe.throw(_("This session has no transcript to resume from."))
 
-		# What the person was asked, as it was recorded when the run paused. The runtime rebuilt
-		# above is not necessarily the one that asked, so this is the only thing that still knows;
-		# without it a question whose tool has since been un-gated would be answered on the old
-		# approval. Unreadable rows resolve to nothing, which is the pre-existing behaviour.
-		asked = _asked_questions(run)
+			# What the person was asked, as it was recorded when the run paused. The runtime
+			# rebuilt above is not necessarily the one that asked, so this is the only thing that
+			# still knows; without it a question whose tool has since been un-gated would be
+			# answered on the old approval. Unreadable rows resolve to nothing, which is the
+			# pre-existing behaviour.
+			asked = _asked_questions(run)
 
 		_set_active_run(run.name)
 		if stream:
 			return stream_with_persistence(
-				lambda: self._runtime.resume(messages, answers, stream=True, asked=asked), run
+				lambda: _resumed_as(requester, self._runtime, messages, answers, asked), run
 			)
 
 		try:
-			result = self._runtime.resume(messages, answers, asked=asked)
+			with _acting_as(requester):
+				result = self._runtime.resume(messages, answers, asked=asked)
 		except Exception as e:
 			run.mark_failed(str(e))
 			raise
