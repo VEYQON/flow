@@ -652,3 +652,50 @@ class TestTheStreamDoesNotLeaveTheIdentityInstalled(TwoDoorsCase):
 			next(events)
 			events.close()
 		self.assertEqual(frappe.session.user, self.approver, "the requester was left installed")
+
+
+class TestTheGuardItselfFailsClosed(TwoDoorsCase):
+	"""THE SECOND REVIEWER'S FINDINGS AGAINST MY OWN GUARD.
+
+	1. **`Administrator` is not a role set.** `frappe.permissions.get_roles` special-cases it as
+	   "every `Role` row on the site", so the role arithmetic refused an Administrator-owned run
+	   only by ACCIDENT — and the accident is removable by the very actor the guard defends
+	   against: a System Manager holds `User` write and may assign themselves every role, which is
+	   permitted and no escalation in itself. Administrator's real reach is not made of roles at
+	   all (`frappe/permissions.py`: `if user == "Administrator": return True`, a bypass no role
+	   can grant). So it is decided BEFORE the arithmetic and never by it.
+	2. **The arithmetic failed OPEN on an empty acting user.** `frappe.get_roles` DISCARDS its
+	   argument when `local.session.user` is falsy and returns `["Guest"]` for both sides, so the
+	   difference was empty and the guard passed silently — in a function whose sibling is
+	   documented as fail-closed.
+	"""
+
+	def test_administrator_is_refused_even_when_the_role_difference_is_empty(self):
+		"""Mocked deliberately, and this is the point: the rule must hold INDEPENDENTLY of what
+		the arithmetic says, because the arithmetic is what the attacker can arrange."""
+		from flow.flow.doctype.flow_session.flow_session import _the_answerer_may_not_gain_reach
+
+		frappe.set_user(self.approver)
+		with patch.object(frappe, "get_roles", return_value=["System Manager"]):
+			# The control: with this mock the difference IS empty, so only an explicit rule refuses.
+			self.assertEqual(
+				set(frappe.get_roles("Administrator")) - set(frappe.get_roles(self.approver)), set()
+			)
+			with self.assertRaises(frappe.ValidationError):
+				_the_answerer_may_not_gain_reach("Administrator")
+
+	def test_administrator_answering_their_own_run_is_not_refused(self):
+		from flow.flow.doctype.flow_session.flow_session import _the_answerer_may_not_gain_reach
+
+		frappe.set_user("Administrator")
+		_the_answerer_may_not_gain_reach("Administrator")  # must not raise
+
+	def test_an_empty_acting_user_is_refused_rather_than_waved_through(self):
+		from flow.flow.doctype.flow_session.flow_session import _the_answerer_may_not_gain_reach
+
+		frappe.local.session.user = ""
+		try:
+			with self.assertRaises(frappe.ValidationError):
+				_the_answerer_may_not_gain_reach(self.requester)
+		finally:
+			frappe.set_user("Administrator")

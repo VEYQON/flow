@@ -111,14 +111,33 @@ def _the_answerer_may_not_gain_reach(requester: str) -> None:
 	So the rule is the INTERSECTION, not a swap: authorised by the caller, performed as the
 	requester, and refused outright when that would hand the caller something they do not have.
 
-	**Role-level, and it says so.** Roles are not the whole of the permission model -- user
-	permissions and document sharing sit underneath -- so this refuses a superset of what it
-	strictly must and never a subset. That is the safe direction, and narrowing it is a spec.
-	Answering your own question, which is nearly every answer, never reaches the comparison.
+	**Role-level, and NOT complete -- the first version of this docstring claimed it was.** Roles
+	are not the whole of the permission model: a User Permission, a document share and an
+	`if_owner` grant all sit underneath, and an answerer holding identical ROLES can still lack
+	reach the requester has. So this guard under-refuses in those three shapes as well as
+	over-refusing in others, and the honest statement is that it covers roles and nothing else.
+	Covering user permissions and shares too is a spec. Answering your own question, which is
+	nearly every answer, never reaches the comparison at all.
 	"""
 	answerer = frappe.session.user
 	if answerer == requester:
 		return
+	if not answerer:
+		# `frappe.get_roles` DISCARDS its argument when `local.session.user` is falsy and answers
+		# `["Guest"]` for both sides, so the difference below would be empty and this would pass
+		# silently -- fail-OPEN, in the one function that must not.
+		frappe.throw(_("There is nobody acting here, so this cannot be answered."), title=_("Cannot Resume"))
+	if requester == "Administrator" and answerer != "Administrator":
+		# DECIDED BEFORE THE ARITHMETIC, AND NEVER BY IT. `Administrator`'s reach is not made of
+		# roles: the framework grants it everything unconditionally, and `get_roles` merely
+		# enumerates every role ROW for it. So the comparison below can be SATISFIED by an
+		# answerer who assigns themselves every role -- which a System Manager may do, and which is
+		# no escalation in itself -- while the thing they would borrow is a bypass no role grants.
+		# A guard an attacker can arrange to pass is not a guard.
+		frappe.throw(
+			_("This conversation belongs to the system, so only the system can answer it."),
+			title=_("Cannot Resume"),
+		)
 	gained = set(frappe.get_roles(requester)) - set(frappe.get_roles(answerer))
 	if gained:
 		frappe.throw(
