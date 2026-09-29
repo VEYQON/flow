@@ -88,6 +88,10 @@ def _ensure_user(email: str, *roles: str) -> str:
 	reasons that have nothing to do with what this file measures.
 	"""
 	wanted = ("Translator", *roles)
+	for role in wanted:
+		# The bench does not ship every role a test wants to tell two identities apart with.
+		if not frappe.db.exists("Role", role):
+			frappe.get_doc({"doctype": "Role", "role_name": role}).insert(ignore_permissions=True)
 	if not frappe.db.exists("User", email):
 		frappe.get_doc(
 			{
@@ -550,3 +554,101 @@ class TestTheCallersOwnRequestComesBack(TwoDoorsCase):
 					frappe.get_list("Flow Tool", pluck="name", limit_page_length=0),
 					f"door={door}: the answerer lost their own reach after the resume",
 				)
+
+
+class TestTheANSWERERDoesNotGainReachEITHER(TwoDoorsCase):
+	"""THE REVIEWER'S HIGH 1, AND IT WAS A REGRESSION THIS RUN INTRODUCED.
+
+	T1b argued one direction only — an answerer must not lend permissions to a requester — and the
+	fix for it lends in the other: the remainder of the turn runs as `run.owner`, whoever that is.
+
+	`flow/triggers/triggers.py:75` runs a trigger as its configured `run_as`, so a trigger's
+	`Flow Run.owner` is a service account, possibly `Administrator`. Such a run pauses whenever
+	`auto_approve` is off. `assert_run_owner` admits a non-owner through `Flow Run` `write`, which
+	only `System Manager` holds. So before this run's change a System Manager answering that pause
+	ran the remainder as THEMSELVES and was refused; after it they ran it as the service account —
+	including up to `max_iterations` further model calls nobody was shown. **The answerer gained
+	reach by pressing a button**, which is the same sentence the run was commissioned to make false.
+
+	So the rule is not "perform as the requester" on its own. It is: **an answerer may authorise
+	only into reach they already have, and the work then runs within the requester's.** The
+	effective authority is the intersection. The guard is fail-closed and role-level, and says so:
+	roles are not the whole of Frappe's permission model (user permissions and document sharing sit
+	underneath), so this refuses a superset of what it must and never a subset.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		# A requester holding a role the answerer does not. `Blogger` is arbitrary and grants
+		# nothing here; what matters is that the approver has never been given it.
+		self.narrow_approver = _ensure_user("s25-narrow-approver@example.com", "System Manager")
+		self.wider_requester = _ensure_user("s25-wider-requester@example.com", "Blogger")
+
+	def test_a_requester_wider_than_the_answerer_is_refused_on_every_door(self):
+		for door in self.DOORS:
+			with self.subTest(door=door):
+				WITNESS.clear()
+				run = self._paused_run(self.wider_requester, self.witness_tool.slug)
+				with patch.object(Model, "chat", new=_chat(_final())):
+					with self.assertRaises(frappe.ValidationError):
+						self._answer(door, run, {"c1": "Approve"}, self.narrow_approver)
+				self.assertEqual(WITNESS, [], f"door={door}: it ran anyway")
+
+	def test_the_same_run_answered_by_someone_who_HOLDS_that_role_does_continue(self):
+		"""The positive control, and it is what stops the guard above being 'refuse everything'."""
+		holder = _ensure_user("s25-role-holder@example.com", "System Manager", "Blogger")
+		for door in self.DOORS:
+			with self.subTest(door=door):
+				WITNESS.clear()
+				run = self._paused_run(self.wider_requester, self.witness_tool.slug)
+				with patch.object(Model, "chat", new=_chat(_final())):
+					self._answer(door, run, {"c1": "Approve"}, holder)
+				self.assertEqual(len(WITNESS), 1, f"door={door} witness={WITNESS}")
+				self.assertEqual(WITNESS[0]["user"], self.wider_requester, f"door={door}")
+
+	def test_answering_your_own_question_is_never_refused(self):
+		"""The commonest case of all, and the guard must not touch it."""
+		for door in self.DOORS:
+			with self.subTest(door=door):
+				self._approve_through(door, requester=self.wider_requester, approver=self.wider_requester)
+				self.assertEqual(len(WITNESS), 1, f"door={door} witness={WITNESS}")
+
+
+class TestTheStreamDoesNotLeaveTheIdentityInstalled(TwoDoorsCase):
+	"""THE REVIEWER'S HIGH 2.
+
+	A generator suspended at a `yield` does not unwind its `with`, and `frappe.session.user` is
+	process-global. `_resumed_as` originally wrapped the WHOLE `yield from`, so from the first
+	advance until the generator was exhausted every frame that ran BETWEEN events — the persistence
+	loop, the SSE serialiser, the WSGI writer — ran as the requester. On a client disconnect
+	`GeneratorExit` is raised at the `yield` inside `stream_with_persistence`, whose `finally`
+	(`mark_failed`, the flag reset) therefore ran as the requester too; and a consumer that
+	abandons the generator without closing it never restores the identity at all.
+	"""
+
+	def test_the_callers_identity_is_back_between_every_event(self):
+		from flow.lib.session import load_session
+
+		run = self._paused_run(self.requester, self.witness_tool.slug)
+		frappe.set_user(self.approver)
+		seen: list[str] = []
+		with patch.object(Model, "chat", new=_chat(_final())):
+			for _event in load_session(run.session).resume({"c1": "Approve"}, stream=True):
+				seen.append(frappe.session.user)
+		self.assertEqual(WITNESS[0]["user"], self.requester)
+		self.assertEqual(
+			set(seen), {self.approver}, f"the identity was left installed between events: {seen}"
+		)
+
+	def test_abandoning_the_stream_puts_the_callers_identity_back(self):
+		"""The disconnect. `close()` is what a WSGI server does to an abandoned response."""
+		from flow.lib.session import load_session
+
+		run = self._paused_run(self.requester, self.witness_tool.slug)
+		frappe.set_user(self.approver)
+		with patch.object(Model, "chat", new=_chat(_final())):
+			events = load_session(run.session).resume({"c1": "Approve"}, stream=True)
+			next(events)
+			next(events)
+			events.close()
+		self.assertEqual(frappe.session.user, self.approver, "the requester was left installed")

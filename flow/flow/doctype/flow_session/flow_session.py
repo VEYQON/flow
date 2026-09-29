@@ -92,6 +92,45 @@ def _the_requester(run: FlowRun) -> str:
 	return owner
 
 
+def _the_answerer_may_not_gain_reach(requester: str) -> None:
+	"""An answerer may authorise only into reach they already have.
+
+	**THE OTHER HALF OF `_the_requester`, AND IT WAS MISSING.** Pinning the continuation to the
+	requester closes the escalation in one direction and opens it in the other: the remainder of
+	the turn runs as `run.owner`, whoever that is. `flow/triggers/triggers.py` runs a trigger as
+	its configured `run_as`, so a trigger's run is OWNED by a service account -- possibly one
+	holding a posting role, or `Administrator`. Such a run pauses whenever `auto_approve` is off,
+	and `assert_run_owner` admits a non-owner through `Flow Run` `write`, which only
+	`System Manager` holds. So an answerer who is not the owner used to run that pause's remainder
+	as THEMSELVES and be refused; without this guard they would run it as the service account,
+	for up to `max_iterations` further model calls nobody was shown. **That is the answerer
+	gaining reach by pressing a button**, which is the same sentence this run exists to make
+	false. It is worse than it first reads: an answerer holding `Flow Run` write holds
+	`Flow Session` write too, so the call they are approving is one they could have edited.
+
+	So the rule is the INTERSECTION, not a swap: authorised by the caller, performed as the
+	requester, and refused outright when that would hand the caller something they do not have.
+
+	**Role-level, and it says so.** Roles are not the whole of the permission model -- user
+	permissions and document sharing sit underneath -- so this refuses a superset of what it
+	strictly must and never a subset. That is the safe direction, and narrowing it is a spec.
+	Answering your own question, which is nearly every answer, never reaches the comparison.
+	"""
+	answerer = frappe.session.user
+	if answerer == requester:
+		return
+	gained = set(frappe.get_roles(requester)) - set(frappe.get_roles(answerer))
+	if gained:
+		frappe.throw(
+			_(
+				"This conversation belongs to someone who can do things you cannot, so answering "
+				"it would carry out work on your account that you are not allowed to do. The "
+				"person who started it has to answer this one."
+			),
+			title=_("Cannot Resume"),
+		)
+
+
 @contextmanager
 def _acting_as(user: str) -> Iterator[None]:
 	"""Run the block as `user`, and hand the caller's own request back exactly as it was.
@@ -102,7 +141,7 @@ def _acting_as(user: str) -> Iterator[None]:
 	caches alone would satisfy "who does it say it is" and fail "what could it read", which is why
 	the tests assert the second.
 
-	It clears four things that belong to the REQUEST and not to the acting user, though
+	It clears three things that belong to the REQUEST and not to the acting user, though
 	(`frappe/__init__.py`, v16.31.0): `session.sid` is overwritten with the user id,
 	`session.data` and `local.form_dict` are emptied. Those are put back on the way out, so a
 	whitelisted call does not return with its own arguments gone and its session id replaced by an
@@ -139,8 +178,26 @@ def _resumed_as(user: str, runtime, messages, answers, asked) -> Generator[Event
 	or is closed. `stream_with_persistence` then writes the result back as the caller, which is
 	what the non-streamed path does too.
 	"""
-	with _acting_as(user):
-		yield from runtime.resume(messages, answers, stream=True, asked=asked)
+	events = runtime.resume(messages, answers, stream=True, asked=asked)
+	try:
+		while True:
+			with _acting_as(user):
+				try:
+					event = next(events)
+				except StopIteration:
+					return
+			# OUTSIDE the block, deliberately. A generator suspended at a `yield` does not unwind
+			# its `with`, and `frappe.session.user` is process-global -- so wrapping the whole
+			# `yield from` left the requester installed for every frame the CONSUMER ran between
+			# events: the persistence loop, the event serialiser, the WSGI writer. Worse, a client
+			# disconnect raises `GeneratorExit` at the consumer's `yield`, and
+			# `stream_with_persistence`'s `finally` -- `mark_failed`, the flag reset -- ran as the
+			# requester too, because the inner generator was still suspended inside the block.
+			yield event
+	finally:
+		# The inner generator's own cleanup is the requester's work, so it is closed as them.
+		with _acting_as(user):
+			events.close()
 
 
 class FlowSession(Document):
@@ -465,6 +522,7 @@ class FlowSession(Document):
 		# Authorised as the caller — that already happened, above this method — and PERFORMED as
 		# the person whose turn it is. See `_the_requester`.
 		requester = _the_requester(run)
+		_the_answerer_may_not_gain_reach(requester)
 
 		with _acting_as(requester):
 			self.reload()
