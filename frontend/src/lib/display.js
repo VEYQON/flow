@@ -183,6 +183,14 @@ export function quoteForDisplay(value, limit = DISPLAY_LIMIT) {
 		const escaped = escapeCodePointAt(points, index);
 		if (used + escaped.length > limit) {
 			const count = oneLine(__("… ({0} characters in all)", [points.length]));
+			// THE CUT CAN LAND ON A JOINER THAT WAS KEPT BECAUSE OF WHAT FOLLOWED IT, and what
+			// followed it is now on the other side of the cut. A joiner at the end of the shown
+			// text is joining nothing — the shape clause 1 refuses — so it is escaped here, where
+			// the value's true end is known. `flow/tools/builtins.py` does the same.
+			const last = shown[shown.length - 1];
+			if (JOINERS.has(last))
+				shown[shown.length - 1] =
+					"\\u" + last.codePointAt(0).toString(16).padStart(4, "0");
 			return `"${shown.join("")}" ${count}`;
 		}
 		shown.push(escaped);

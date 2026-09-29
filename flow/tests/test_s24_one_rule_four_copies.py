@@ -264,35 +264,60 @@ class TestTableThreeIsWhatTheEngineActuallyDoes(IntegrationTestCase):
 				self.assertEqual(_js_string(js_raw), raw)
 				self.assertEqual(_js_string(js_shown), shown)
 
-	def test_the_two_copies_can_disagree_only_across_a_unicode_version(self):
-		"""THE REVIEWER'S F5, PINNED RATHER THAN CLOSED, with the mechanism named.
+	def test_the_divergence_between_the_two_copies_is_exactly_two_code_points(self):
+		"""THE REVIEWER'S F5, PINNED — AND THE FIRST ATTEMPT AT THIS PIN WAS A TAUTOLOGY.
 
-		Clause 3 asks Python `unicodedata.category(ch)[0] == "L"` and JavaScript `\\p{L}`, and the
-		two runtimes ship different UCD versions. Every disagreement is therefore a code point one
-		of them calls a letter and the other calls unassigned — and the direction is that the newer
-		runtime (the panel) is the PERMISSIVE one. This test asserts the shape of the divergence
-		class, so a disagreement of any OTHER shape — a real difference in the rule — cannot hide
-		inside it.
+		It read `if category[0] == "L" ... continue` and then asserted `category != "Lo"`. `"Lo"[0]`
+		is `"L"`, so the assertion was unreachable for every code point and every Unicode version:
+		a gate that could not fail, in the module whose whole subject is gates that cannot fail.
 
-		Closing it means generating the letter table for U+0900..U+0DFF into the panel, which is a
-		fifth table and wants its own decision. §6 of the note records that.
+		THE REAL MECHANISM. Clause 3 asks Python `unicodedata.category(ch)[0] == "L"` and JavaScript
+		`\\p{L}`, and the runtimes ship different UCD versions (bench Python 3.14.7 is UCD 16.0.0,
+		Node v24 is Unicode 17.0). A code point one calls a letter and the other calls unassigned is
+		therefore a neighbour the two copies decide differently — the panel being the permissive
+		side, since it is the newer.
+
+		MEASURED 29 Sep 2026 by running both shipped copies over every (virama, joiner, same-block
+		neighbour) triple: **two code points**, U+0C5C and U+0CDC, both added in Unicode 17 — so
+		four inputs, one per joiner. This test pins the PYTHON side of that: every candidate must be
+		a code point Python calls unassigned inside one of the twelve viramas' blocks, and the two
+		known ones must be among them. It goes red when Python's UCD moves under it. The panel's
+		side is pinned in `joinerInsideAWord.spec.js`, which enumerates the same range through
+		`\\p{L}` and names the same two.
+
+		(The first version of this docstring also carried "98 inputs", which was the figure measured
+		against `b59ccbc`, when 69 viramas were live. The narrowing to 12 cut it 24-fold and the
+		number was carried over unchanged. A measurement carries its date AND the code it was taken
+		against, or it does not go in.)
 		"""
-		suspicious = []
+		viramas = self._viramas()
+		blocks = {cp >> 7 for cp in viramas}
+		unassigned = {
+			cp for cp in range(0x0900, 0x0E00) if cp >> 7 in blocks and unicodedata.category(chr(cp)) == "Cn"
+		}
+		self.assertEqual(len(viramas), 12)  # positive control: the blocks are the right blocks
+		for cp in (0x0C5C, 0x0CDC):
+			with self.subTest(cp=hex(cp)):
+				self.assertIn(cp, unassigned)
+		# And the claim that makes this a bound rather than a list: NOTHING outside the unassigned
+		# set can diverge, because every other category is one both runtimes have agreed on since
+		# long before either version in play.
 		for cp in range(0x0900, 0x0E00):
-			if unicodedata.category(chr(cp))[0] == "L":
-				continue
-			if unicodedata.category(chr(cp)) != "Cn":
-				continue
-			suspicious.append(cp)
-		# Everything Python refuses as a neighbour that is NOT unassigned must be refused for a
-		# reason the panel shares — a category both runtimes agree on.
-		for cp in range(0x0900, 0x0E00):
-			category = unicodedata.category(chr(cp))
-			if category[0] == "L" or category == "Cn":
+			if cp >> 7 not in blocks or cp in unassigned:
 				continue
 			with self.subTest(cp=hex(cp)):
-				self.assertNotEqual(category, "Lo")
-		self.assertGreater(len(suspicious), 0)  # positive control: there ARE unassigned points here
+				self.assertNotEqual(unicodedata.category(chr(cp)), "Cn")
+
+	def test_the_note_states_the_divergence_at_its_current_size(self):
+		"""The stale-measurement gate. §6 said 98 when it was 4."""
+		text = _NOTE.read_text(encoding="utf-8")
+		self.assertIn("**4 inputs get opposite joiner decisions**", text)
+		self.assertIn("U+0C5C", text)
+		self.assertIn("U+0CDC", text)
+		self.assertNotIn("98 inputs", text)
+
+	def _viramas(self) -> list[int]:
+		return [int(token[2:], 16) for line in _block("viramas") for token in line.split()]
 
 	def test_the_note_still_carries_the_word_the_whole_change_is_about(self):
 		"""If the exception is ever removed, §3 has to be removed with it, and this is what makes

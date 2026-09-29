@@ -269,3 +269,44 @@ describe("the cap does not undo the exception", () => {
 		expect(displayText(`${SINHALA}\n`)).toBe(`"${SINHALA}\\n"`);
 	});
 });
+
+describe("the panel's side of the one divergence between the two copies", () => {
+	// Clause 3 asks Python `unicodedata.category(ch)[0] == "L"` and this copy `\p{L}`, and the two
+	// runtimes ship different UCD versions — bench Python 3.14.7 is UCD 16.0.0, Node v24 is
+	// Unicode 17.0. A code point one calls a letter and the other calls unassigned is a neighbour
+	// the two copies decide differently. Measured 29 Sep 2026 against this commit: exactly two,
+	// both added in Unicode 17, and the PANEL is the permissive side because it is the newer.
+	// `flow/tests/test_s24_one_rule_four_copies.py` pins the Python half; this is the other half,
+	// and between them the divergence cannot change size without a test going red.
+	const VIRAMA_BLOCKS = new Set(
+		[
+			0x094d, 0x09cd, 0x0a4d, 0x0acd, 0x0b4d, 0x0bcd, 0x0c4d, 0x0ccd, 0x0d3b, 0x0d3c, 0x0d4d,
+			0x0dca,
+		].map((cp) => cp >> 7)
+	);
+
+	function lettersInViramaBlocks() {
+		const out = [];
+		for (let cp = 0x0900; cp < 0x0e00; cp++) {
+			if (VIRAMA_BLOCKS.has(cp >> 7) && /\p{L}/u.test(String.fromCodePoint(cp)))
+				out.push(cp);
+		}
+		return out;
+	}
+
+	it("sees exactly 572 letters where the engine sees 570", () => {
+		expect(lettersInViramaBlocks().length).toBe(572);
+	});
+
+	it("names the two the engine's Unicode version does not know", () => {
+		const letters = new Set(lettersInViramaBlocks());
+		expect(letters.has(0x0c5c)).toBe(true); // TELUGU, added in Unicode 17
+		expect(letters.has(0x0cdc)).toBe(true); // KANNADA, added in Unicode 17
+	});
+
+	it("keeps the joiner before one of them, which is the divergence itself", () => {
+		// The engine escapes this joiner; this copy does not. Asserted rather than described, so
+		// that if the engine's Unicode version catches up, this test is what says so.
+		expect(escapeForDisplay("A్‍౜Z")).toBe("A్‍౜Z");
+	});
+});

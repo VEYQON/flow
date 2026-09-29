@@ -74,10 +74,19 @@ def _for_display(value: Any, limit: int = _CONFIRM_STR_LIMIT) -> str:
 			# be able to open a line of its own. `_render_confirm_template` flattens an
 			# administrator's sentence for exactly this reason.
 			count = _one_line(_("… ({0} characters in all)").format(len(text)))
+			# THE CUT CAN LAND ON A JOINER THAT WAS KEPT BECAUSE OF WHAT FOLLOWED IT, and what
+			# followed it is now on the other side of the cut. A joiner at the end of the shown
+			# text is joining nothing — the exact shape clause 1 of `_spells_rather_than_hides`
+			# refuses — so it is escaped here, where the value's true end is known.
+			if shown and shown[-1] in _JOINERS_SHOWN_RAW:
+				shown[-1] = "\\u%04x" % ord(shown[-1])
 			return '"{0}" {1}'.format("".join(shown), count)
 		shown.append(escaped)
 		used += len(escaped)
 	return '"{0}"'.format("".join(shown))
+
+
+_JOINERS_SHOWN_RAW = ("\u200c", "\u200d")
 
 
 def _summarize_values(values: dict) -> str:

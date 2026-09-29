@@ -227,16 +227,32 @@ line of this table is wrong, whichever copy it is.**
   trade" — and it is the price of not destroying the word. It is bounded by §3's four clauses to
   exactly the case where the joiner is asking a renderer for something. `TestTwoValuesAReaderCannot
   TellApartStillEscapeDifferently.CONJUNCT_PAIRS` names every pair that pays it, one by one, so the
-  cost cannot grow without somebody writing the new pair down.
+  cost is bounded only by what a font actually forms, which is not a thing a test can see:
+  `CONJUNCT_PAIRS` holds EXAMPLES, not a census. An earlier version of this paragraph claimed the
+  list was complete and that nothing could join it unnoticed; a reviewer found two pairs inside the
+  range already paying the cost and in neither list — the Sinhala ZWNJ case (which is §5's own
+  "kept" vector, and inert in every conformant font, not merely in a font lacking a conjunct) and
+  Tamil k+p, which forms no ligature anywhere. Both are now in the list, and the assertion on its
+  length is gone, because a count nothing enforces reads as a bound.
 - **THE TWO COPIES CAN DISAGREE ACROSS A UNICODE VERSION.** Clause 3 asks Python
   `unicodedata.category(ch)[0] == "L"` and JavaScript `\p{L}`, and the two runtimes ship different
-  UCD versions (bench Python 3.14.7 is UCD 16.0.0; Node v24 is Unicode 17.0). Measured 29 Sep 2026:
-  **98 inputs get opposite joiner decisions**, all of them a code point unassigned in 16 and a
-  letter in 17 — the smallest is `U+0041 U+0C4D U+200D U+0C5C U+005A`, where the engine escapes the
-  joiner and the panel does not. The direction is that the PANEL is the permissive one. Not closed
-  here: closing it means generating the letter table for U+0900–U+0DFF into the panel (89 ranges),
-  which is a fifth table and wants its own decision. Pinned, with the mechanism named, by
-  `test_the_two_copies_can_disagree_only_across_a_unicode_version` in `test_s24`.
+  UCD versions (bench Python 3.14.7 is UCD 16.0.0; Node v24.21.0 is Unicode 17.0). **Measured
+  29 Sep 2026 against the code in this commit**, by running both shipped copies over every (virama,
+  joiner, same-block neighbour) triple: **4 inputs get opposite joiner decisions** — two code
+  points, `U+0C5C` (Telugu) and `U+0CDC` (Kannada), both added in Unicode 17, once per joiner. The
+  smallest is `U+0041 U+0C4D U+200D U+0C5C U+005A`, where the engine escapes the joiner and the
+  panel does not: the PANEL is the permissive side, because it is the newer. Not closed here —
+  closing it means generating the letter table for U+0900–U+0DFF into the panel (89 ranges), a
+  fifth table that wants its own decision. Pinned on the Python side by
+  `test_the_divergence_between_the_two_copies_is_exactly_two_code_points` and on the panel's side by
+  `joinerInsideAWord.spec.js`.
+
+  **THIS NUMBER WAS WRONG ONCE AND THE WAY IT WAS WRONG IS WORTH KEEPING.** It said 98, which was
+  measured against the previous commit, when 69 viramas were live rather than 12. The narrowing cut
+  it 24-fold and the figure was carried over unchanged — dated, and presented as measured against
+  the code beside it. A measurement carries its date AND the code it was taken against, or it does
+  not go in. `test_the_note_states_the_divergence_at_its_current_size` now fails if this paragraph
+  and the measurement part company.
 
 - **Homoglyphs.** `Раураl` in Cyrillic draws identically to the Latin word and produces no escape
   and no quote, because every code point in it is an ordinary visible letter. A mixed-script or

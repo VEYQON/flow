@@ -53,6 +53,8 @@ NOT TOUCHED BY THIS MODULE: `_invoke`, `_resolve_confirmation`, `_confirmation_q
 
 from __future__ import annotations
 
+import pathlib
+import re
 import unicodedata
 
 from frappe.tests import IntegrationTestCase
@@ -190,11 +192,31 @@ class TestTwoValuesAReaderCannotTellApartStillEscapeDifferently(IntegrationTestC
 	other pair must still paint differently.
 	"""
 
-	# Characters this test treats as painting nothing, for the purpose of the assertion below.
-	# Written out here deliberately: §2 of `brain/40-architecture/the-invisible-character-rule.md`
-	# is the authority, and `test_s24` checks the note against the engine's own table, so these two
-	# independent statements have to meet in the middle or one of them is wrong.
-	INVISIBLE = "\u200b\u200c\u200d\u200e\u200f\u2060\ufeff\u00ad\u034f\u180e\u115f\u1160\u3164\ufe0f\uffa0"
+	@staticmethod
+	def _invisible() -> frozenset[str]:
+		"""Every code point §2 of the note names, read from the note.
+
+		A HAND-WRITTEN FIFTEEN WAS NOT ENOUGH, and the comment that stood here claimed it was "one
+		of two independent statements meeting in the middle" when nothing compared them. The table
+		has 4174 members; a widening that exempted a variation selector or a tag character would
+		have gone unstripped and uncaught. The note is parsed instead — it is the one writing of
+		the rule, and `test_s24` is what keeps it true against the engine's own table.
+		"""
+		note = (
+			pathlib.Path(__file__).resolve().parents[2]
+			/ "brain"
+			/ "40-architecture"
+			/ "the-invisible-character-rule.md"
+		).read_text(encoding="utf-8")
+		block = re.search(r"^```default-ignorable-ranges\n(.*?)^```$", note, re.DOTALL | re.MULTILINE)
+		assert block, "the note has no ranges block"
+		out: set[str] = set()
+		for line in block.group(1).splitlines():
+			if not line.strip():
+				continue
+			low, high = line.split()[:2]
+			out.update(chr(cp) for cp in range(int(low[2:], 16), int(high[2:], 16) + 1))
+		return frozenset(out)
 
 	# Pairs that must still differ in what a reader can SEE.
 	PAINTED_PAIRS = (
@@ -212,20 +234,31 @@ class TestTwoValuesAReaderCannotTellApartStillEscapeDifferently(IntegrationTestC
 		("\u1000\u103a\u1001", "\u1000\u103a\u200d\u1001"),
 	)
 
-	# Pairs whose only difference IS the conjunct joiner. Declared cost, named one by one.
+	# Pairs whose only difference IS a conjunct joiner. THESE ARE EXAMPLES OF THE COST, NOT A
+	# CENSUS OF IT, and the first version of this class claimed otherwise — a reviewer showed that
+	# the Sinhala ZWNJ pair (which is the note's own §5 "kept" vector, and worse than either pair
+	# below: ZWNJ after AL-LAKUNA asks for the separated form Sinhala already draws by default, so
+	# it is inert in EVERY conformant font) and a Tamil pair with no ligature both pay it and were
+	# in neither list. The true size of the cost is every (virama, letter) pair the twelve viramas
+	# admit, minus the ones a font actually forms — which is a font question, not a test question.
 	CONJUNCT_PAIRS = (
 		("\u0dc1\u0dca\u0dbb", "\u0dc1\u0dca\u200d\u0dbb"),
 		("\u0915\u094d\u0937", "\u0915\u094d\u200d\u0937"),
+		("\u0dc1\u0dca\u0dbb", "\u0dc1\u0dca\u200c\u0dbb"),  # the ZWNJ case, inert in every font
+		("\u0b95\u0bcd\u0baa", "\u0b95\u0bcd\u200d\u0baa"),  # Tamil k+p forms no ligature anywhere
 	)
 
 	def _painted(self, text: str) -> str:
-		return "".join(ch for ch in text if ch not in self.INVISIBLE)
+		invisible = self._invisible()
+		return "".join(ch for ch in text if ch not in invisible)
 
 	def test_the_stripper_itself_strips(self):
 		"""The positive control for `_painted`. Without it, a stripper that removed nothing would
 		make every assertion below pass."""
 		self.assertEqual(self._painted(f"a{ZWJ}b"), "ab")
 		self.assertEqual(self._painted("ab"), "ab")
+		self.assertEqual(len(self._invisible()), 4174)  # the whole table, not a sample of it
+		self.assertEqual(self._painted("a\ufe0fb\U000e0101c"), "abc")  # a selector and a tag
 
 	def test_no_two_of_them_paint_alike(self):
 		"""The assertion the mutated code fails: with the exception widened to everything, `paid`
@@ -240,14 +273,18 @@ class TestTwoValuesAReaderCannotTellApartStillEscapeDifferently(IntegrationTestC
 				)
 
 	def test_the_conjunct_pairs_are_the_declared_cost_and_are_kept_short(self):
-		"""These DO paint alike once the joiner is stripped, and that is the exception working: a
-		Sinhala renderer draws the conjunct and the non-conjunct differently, which no test can see.
-		Asserted rather than assumed, so that the cost stays exactly this size — if a later change
-		moves a pair into this list, this test is where it has to be written down."""
+		"""These DO paint alike once the joiner is stripped, and that is the exception working — for
+		the first two, because a conformant renderer draws the conjunct and the non-conjunct
+		differently, which no test can see. For the last two it is NOT working: nothing draws them
+		differently, and they are here because a claim that they did not exist was false.
+
+		There is deliberately NO assertion on the length of this list. The first version had one,
+		under a docstring saying the cost "cannot grow without somebody writing the new pair down".
+		Nothing forced that, and two pairs inside the range were already paying it unlisted. A
+		count that nothing enforces is worse than no count: it reads as a bound."""
 		for left, right in self.CONJUNCT_PAIRS:
 			with self.subTest(left=repr(left)):
 				self.assertEqual(self._painted(_escaped(left)), self._painted(_escaped(right)))
-		self.assertEqual(len(self.CONJUNCT_PAIRS), 2)
 
 	def test_no_two_of_them_escape_alike_either(self):
 		"""The weaker string property, kept because it is still true and still worth pinning."""
@@ -604,3 +641,30 @@ class TestTheCapDoesNotUndoTheException(IntegrationTestCase):
 		cap must still have been judged against the whole value, not against the prefix."""
 		long_word = "\u0dc1\u0dca\u200d\u0dbb" * 40
 		self.assertNotIn("\\u200d", self._for_display(long_word, 200))
+
+
+class TestTheCutItselfCannotLeaveAJoinerJoiningNothing(IntegrationTestCase):
+	"""The reviewer's second pass. A joiner is kept because of what FOLLOWS it — and the cap can
+	put what follows it on the other side of the cut, leaving an unescaped joiner as the last
+	painted character inside the quote. That is clause 1's own shape, readmitted by the capping
+	caller rather than by the rule."""
+
+	def _for_display(self, value, limit):
+		from flow.tools.builtins import _for_display
+
+		return _for_display(value, limit)
+
+	def test_a_conjunct_cut_immediately_after_its_joiner_shows_the_joiner_escaped(self):
+		shown = self._for_display("\u0dc1\u0dca\u200d\u0dbb\u0dd3", 3)
+		self.assertIn("\\u200d", shown)
+		self.assertNotIn("\u200d", shown.split('"')[1])
+
+	def test_the_same_for_a_non_joiner(self):
+		shown = self._for_display("\u0dc1\u0dca\u200c\u0dbb", 3)
+		self.assertIn("\\u200c", shown)
+
+	def test_a_cut_that_does_not_land_on_a_joiner_is_untouched(self):
+		"""The control: the fix must not escape a joiner that is still doing its job."""
+		shown = self._for_display("\u0dc1\u0dca\u200d\u0dbb\u0dd3", 4)
+		self.assertNotIn("\\u200d", shown)
+		self.assertIn("\u0dc1\u0dca\u200d\u0dbb", shown)
