@@ -1116,6 +1116,60 @@ def _paints_nothing(ch: str) -> bool:
 	return False
 
 
+# The two joiners are the one deliberate exception to the rule above, and the reason is that in
+# Sinhala, Tamil, Devanagari and every other Indic script a joiner is not decoration — it is
+# SPELLING. A conjunct is written CONSONANT + VIRAMA + ZWJ + CONSONANT, so `\u0dc1\u0dca\u200d\u0dbb\u0dd3`
+# is one word and marking the joiner inside it drops six characters of machine escape into the
+# middle of it. The defence that exists so a person can read what they are approving was making the
+# text unreadable for the people who read it.
+#
+# PORTED, NOT INVENTED. Two sibling front ends decided this first and tested it
+# (`joinsRatherThanHides`): "a joiner that FOLLOWS a virama is orthography, not hiding, and is
+# kept." Their version is widened here in one direction and narrowed in two; every difference is
+# written down in `docs/one-rule-four-copies.md` beside the reason for it.
+_JOINERS = ("\u200c", "\u200d")  # ZERO WIDTH NON-JOINER, ZERO WIDTH JOINER
+
+# Unicode's own Virama combining class. READ FROM THE LIBRARY rather than written out, because the
+# front ends write out sixteen viramas by hand and `unicodedata` knows sixty-nine (measured
+# 29 Sep 2026, UCD 16.0.0) — the same table drift in miniature, and a table nobody has to maintain
+# cannot drift.
+_VIRAMA_COMBINING_CLASS = 9
+
+
+def _spells_rather_than_hides(text: str, index: int) -> bool:
+	"""True for a joiner at `index` that is forming a conjunct, rather than sitting invisibly.
+
+	Four clauses, and each one is the shape of an attack it refuses:
+
+	1. NOT AT EITHER EDGE. A joiner with nothing on one side of it joins nothing; it can only hide.
+	2. A VIRAMA IMMEDIATELY BEFORE. That is what makes it orthography and not decoration.
+	3. A LETTER IMMEDIATELY AFTER. This disposes of the doubled and the run cases for free: the code
+	   point after the first joiner of `VIRAMA ZWJ ZWJ LETTER` is a joiner, which is not a letter,
+	   and the one after the second has no virama before it.
+	4. THE TWO NEIGHBOURS IN THE SAME 128-CODE-POINT ALIGNED BLOCK. This clause the front ends do
+	   not have, and it closes a hole they still carry: `SO-000A\u094d\u200dx` — a Latin letter, a
+	   Devanagari virama, a joiner, a Latin `x` — satisfies 1 to 3 while the joiner forms a conjunct
+	   with nothing, so it is purely hidden. A virama binds a letter of its OWN script, and the
+	   Indic blocks are laid out by the standard on exactly that 128-point grid. Measured on UCD
+	   16.0.0: of the 69 viramas, 60 have every letter of their script inside the virama's own
+	   block, and for Devanagari 81 of its 90 letters are (the nine outside are the Devanagari
+	   Extended-A candrabindu signs and `DEVANAGARI LETTER AY`). A script the clause cannot see —
+	   Tibetan is the clearest — keeps no exception at all, which is where it was before this
+	   function existed. The rule fails CLOSED.
+
+	Reads `text` and nothing else.
+	"""
+	if index == 0 or index + 1 >= len(text):
+		return False
+	before = text[index - 1]
+	after = text[index + 1]
+	if unicodedata.combining(before) != _VIRAMA_COMBINING_CLASS:
+		return False
+	if unicodedata.category(after)[0] != "L":
+		return False
+	return ord(before) >> 7 == ord(after) >> 7
+
+
 def _escaped(text: str) -> str:
 	"""Text made safe to read: every character that could move the cursor is shown, never obeyed.
 
@@ -1135,9 +1189,14 @@ def _escaped(text: str) -> str:
 	a C* or Z* category is escaped now, the ordinary space excepted: unassigned code points, private
 	use and lone surrogates included, so a later revision of Unicode cannot quietly add a new way
 	through.
+
+	THE ONE EXCEPTION IS A JOINER DOING ITS JOB — see `_spells_rather_than_hides`. A joiner inside
+	an Indic conjunct is spelling, not hiding, and escaping it destroys the word. Nothing else is
+	exempt, and a joiner anywhere else is escaped exactly as it was: the exception is narrow on
+	purpose, because the defence it is an exception to is what makes what you see what runs.
 	"""
 	out: list[str] = []
-	for ch in text:
+	for index, ch in enumerate(text):
 		if ch in '\\"':
 			out.append("\\" + ch)
 		elif ch == "\n":
@@ -1146,6 +1205,8 @@ def _escaped(text: str) -> str:
 			out.append("\\r")
 		elif ch == "\t":
 			out.append("\\t")
+		elif ch in _JOINERS and _spells_rather_than_hides(text, index):
+			out.append(ch)
 		elif ch != " " and (unicodedata.category(ch)[0] in "CZ" or _paints_nothing(ch)):
 			out.append(f"\\u{ord(ch):04x}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08x}")
 		else:
