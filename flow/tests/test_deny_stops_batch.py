@@ -367,7 +367,20 @@ class TestTheLoadBearingFunctionsAreUntouched(UnitTestCase):
 		# independently so a second re-baseline cannot pass unnoticed here.
 		"_invoke": "2c89005367c8e8bc8ce944ddc2b4fe7f164c84a50802964024f63981e3633246",
 		"_resolve_confirmation": "adbb8b26e0b0fb166a5a9fff1c658c531d081b3bd2f2967e55b8e838b5ab8f47",
-		"_confirmation_question": "32916612298d4ebdb423d9904e268992a2e638b56a67f2ca14fa67deba9cf34c",
+		# Re-baselined a second time, for S26 (run 17, 29 Sep 2026), under the owner's exception
+		# for that spec: the brief names this function's fallback body. ONE LINE changed —
+		# `json.dumps(call.arguments, indent=2, default=str)` became `_readable_arguments(...)`,
+		# because `json.dumps` defaults to `ensure_ascii=True` and every non-English letter on the
+		# commonest approval card of all was arriving as a backslash-u sequence. What executes and
+		# on which answer is decided elsewhere and this change cannot reach it; the wording is all
+		# that moved, and `flow/tests/test_s26_the_card_speaks_every_language.py` pins the new
+		# wording from both sides — the four scripts, and the right-to-left override, line
+		# separator and hidden joiner that `ensure_ascii` had been catching by accident.
+		# The previous value was
+		# 32916612298d4ebdb423d9904e268992a2e638b56a67f2ca14fa67deba9cf34c. The other three are
+		# byte-unchanged in the same commit, and `test_s19_batch_is_one_decision.py` quotes them
+		# independently so a re-baseline of any of THEM cannot pass unnoticed here.
+		"_confirmation_question": "9ee6e922cf59846f322e2c284af895bdf716ba352b78e7b7599a7a58ba8e305e",
 		"_has_denial": "80f799b6827afea159589dcee7889282ad8c376aacc15be424c273cd0e55b209",
 	}
 

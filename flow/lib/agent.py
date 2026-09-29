@@ -1279,6 +1279,87 @@ def _quoted_argument(value: Any) -> str | None:
 	return f'"{shown}"'
 
 
+def _readable_arguments(value: Any, depth: int = 0) -> str:
+	"""The call's arguments, laid out as `json.dumps(..., indent=2, default=str)` laid them out,
+	with every string escaped by THIS module's rule instead of by `ensure_ascii`.
+
+	**The defect.** `json.dumps` defaults to `ensure_ascii=True`, and the untemplated body never
+	passed through `_escaped` at all. So on the commonest card of all — a gated tool with neither a
+	`confirm_prompt` nor a `confirm_template` — every non-ASCII character arrived as a backslash-u
+	sequence. Not the joiner: every letter of every writing system that is not English. A Sinhala
+	value was twenty-odd escapes, and so was a Tamil, Arabic or Chinese one.
+
+	**Why the flag was not simply turned off.** Nobody chose `ensure_ascii=True` — it is a default
+	this call never passed — but by accident it was the only thing escaping a right-to-left
+	override, a line separator or a hidden joiner on this path, and turning it off alone would have
+	put all three onto the card raw. The guard was real; it was indiscriminate, catching every
+	letter of four scripts in order to catch three attackers.
+
+	So the guard is replaced rather than removed, by the stricter rule this module already has.
+	`_escaped` covers a SUPERSET of what `ensure_ascii` was catching — everything in a C* or Z*
+	category, the ordinary space excepted, plus anything that paints nothing — and it escapes none
+	of the letters. One rule for everything a person reads, which is the point of `_escaped`
+	existing under a public name at all.
+
+	**The English card does not move.** The layout is `json.dumps(indent=2)`'s, reproduced, so
+	arguments that were already ASCII render byte for byte as they shipped. Two deliberate
+	divergences, both stricter: `\b`, `\f` and DEL come out as `\u0008`, `\u000c` and `\u007f`
+	rather than as JSON's own shorthands or, for DEL, as nothing at all.
+
+	It also cannot raise, which the thing it replaces could: `json.dumps` rejects a dict key that
+	is not a basic type outright, and `_confirmation_question`'s own comment says that function
+	must never be the reason nobody is asked. Here such a key is shown as text.
+	"""
+	pad, closing = "  " * (depth + 1), "  " * depth
+	if isinstance(value, dict):
+		if not value:
+			return "{}"
+		rows = [
+			f"{pad}{_readable_text(_readable_key(key))}: {_readable_arguments(item, depth + 1)}"
+			for key, item in value.items()
+		]
+		return "{\n" + ",\n".join(rows) + "\n" + closing + "}"
+	if isinstance(value, list | tuple):
+		if not value:
+			return "[]"
+		rows = [f"{pad}{_readable_arguments(item, depth + 1)}" for item in value]
+		return "[\n" + ",\n".join(rows) + "\n" + closing + "]"
+	if isinstance(value, str):
+		return _readable_text(value)
+	# `bool` before `int`, because it is one: `json.dumps` writes `true`, not `1`.
+	if value is None or isinstance(value, bool | int | float):
+		return json.dumps(value)
+	# What `default=str` did, and for the same reason: an argument nothing can serialise must not
+	# be the reason a person is never asked.
+	return _readable_text(str(value))
+
+
+def _readable_key(key: Any) -> str:
+	"""A dict key as JSON would have named it. Strings are already right; the rest are the four
+	`json.dumps` coerces rather than rejects, and anything else is shown as text rather than
+	raising."""
+	if isinstance(key, str):
+		return key
+	if key is None:
+		return "null"
+	if key is True:
+		return "true"
+	if key is False:
+		return "false"
+	if isinstance(key, int | float):
+		return json.dumps(key)
+	return str(key)
+
+
+def _readable_text(text: str) -> str:
+	"""One string, quoted and escaped by the module's one rule.
+
+	`_escaped` already escapes the backslash and the quote, so what comes back sits inside the
+	quotes as a JSON string body would — it is simply a stricter one.
+	"""
+	return f'"{_escaped(text)}"'
+
+
 def _render_confirm_template(template: str, arguments: dict[str, Any]) -> str | None:
 	"""Fill an administrator's sentence in from this call's own arguments, or give up.
 
@@ -1336,8 +1417,10 @@ def _confirmation_question(call: ToolCall, tool: Tool) -> Question:
 	body = tool.confirm_prompt(call.arguments) if tool.confirm_prompt else None
 	if not body:
 		# Built only where it is used. `json.dumps` can raise on an exotic argument, and this
-		# function must not be the reason nobody is asked.
-		dump = json.dumps(call.arguments, indent=2, default=str)
+		# function must not be the reason nobody is asked -- `_readable_arguments` reproduces its
+		# layout, cannot raise, and escapes by this module's rule rather than by `ensure_ascii`,
+		# which was turning every non-English letter on this card into a backslash-u sequence.
+		dump = _readable_arguments(call.arguments)
 		sentence = (
 			_render_confirm_template(tool.confirm_template, call.arguments) if tool.confirm_template else None
 		)

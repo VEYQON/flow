@@ -540,27 +540,32 @@ class TestTheValueThatRUNSIsUntouched(IntegrationTestCase):
 
 
 class TestTheFallbackDumpIsADifferentDefectEntirely(IntegrationTestCase):
-	"""FOUND WHILE PROVING THE ABOVE, RECORDED, AND DELIBERATELY NOT FIXED HERE.
+	"""FOUND HERE IN RUN 16, RECORDED AS A PIN ON THE DEFECT, AND FIXED IN RUN 17 BY S26.
 
-	`_confirmation_question` builds its fallback body as `json.dumps(call.arguments, indent=2,
+	`_confirmation_question` built its fallback body as `json.dumps(call.arguments, indent=2,
 	default=str)` (`flow/lib/agent.py`), and `json.dumps` defaults to `ensure_ascii=True`. So on
 	the commonest card of all — a gated tool with neither a `confirm_prompt` nor a
-	`confirm_template` — EVERY non-ASCII character is escaped, not merely the joiner: a Sinhala
-	value arrives as twenty-odd backslash-u sequences and a Tamil one likewise. The fix above cannot
-	reach it, because that dump never passes through `_escaped` at all.
+	`confirm_template` — EVERY non-ASCII character was escaped, not merely the joiner: a Sinhala
+	value arrived as twenty-odd backslash-u sequences and a Tamil one likewise. Run 15's fix could
+	not reach it, because that dump never passed through `_escaped` at all.
 
-	WHY IT IS NOT FIXED IN THIS COMMIT, and this is not reluctance:
-	  - `_confirmation_question` is one of the four functions CLAUDE.md rule 4 protects: "no change
-	    without a spec that names it." The brief for this run names the marking code and the
-	    joiner; it does not name this function.
-	  - The obvious one-word change is WRONG AND UNSAFE. `ensure_ascii=False` alone would put a
-	    RIGHT-TO-LEFT OVERRIDE straight onto the card unescaped, because `ensure_ascii=True` is
-	    today the only thing escaping it on this path. The correct change is to build the body from
-	    `_quoted_argument` instead of from `json.dumps`, which is a design change to a load-bearing
-	    function and needs its own spec.
+	Run 16 declined to fix it, correctly: `_confirmation_question` is one of the four functions
+	CLAUDE.md rule 4 protects and run 16's brief did not name it, and the one-word change was
+	unsafe — `ensure_ascii=False` alone would have put a RIGHT-TO-LEFT OVERRIDE straight onto the
+	card, because `ensure_ascii=True` was then the only thing escaping it on that path. It wrote
+	these two tests to pin the present behaviour and said in as many words that they were "the
+	tests that must flip" the day somebody wrote the spec.
 
-	These two tests PIN the present behaviour so that nobody changes it by accident and so that the
-	day someone writes that spec, the tests that must flip are already named.
+	**Run 17's brief is that spec, and this is that flip.** They now assert the opposite, in the
+	same shape, so the change is legible as a change rather than as a deletion. What run 16 named
+	as the correct fix is the fix that was made: the body is built from `_escaped` — through
+	`_readable_arguments`, which reproduces `json.dumps(indent=2)`'s layout so the English card is
+	byte-identical — rather than from `ensure_ascii`.
+
+	The whole of the new behaviour, including every guard `ensure_ascii` had been providing by
+	accident, lives in `flow/tests/test_s26_the_card_speaks_every_language.py`. These two stay here
+	because this is the file the defect was found in, and a finding that leaves no trace where it
+	was found is a finding somebody re-finds.
 	"""
 
 	def _fallback_body(self, value: str) -> str:
@@ -578,17 +583,29 @@ class TestTheFallbackDumpIsADifferentDefectEntirely(IntegrationTestCase):
 		call = ToolCall(id="c1", name="note", arguments={"text": value})
 		return _confirmation_question(call, plain).prompt
 
-	def test_a_sinhala_value_is_still_unreadable_on_an_untemplated_card(self):
+	def test_a_sinhala_value_is_readable_on_an_untemplated_card(self):
+		"""Was `test_a_sinhala_value_is_still_unreadable_on_an_untemplated_card`, asserting
+		`\\u0dc1` was present and the word was not. Both clauses are now the other way round."""
 		body = self._fallback_body(SINHALA)
-		self.assertNotIn(SINHALA, body)
-		self.assertIn("\\u0dc1", body)  # the FIRST LETTER of the word, escaped as machine text
+		self.assertIn(SINHALA, body)
+		self.assertNotIn("\\u0dc1", body)
 
 	def test_the_same_card_with_a_sentence_shows_the_word_correctly(self):
-		"""The positive control that makes the test above a finding rather than a fact of life:
-		the templated half of the SAME question renders the word, so the dump is what is wrong."""
+		"""Kept unchanged. It was the positive control that made the test above a FINDING rather
+		than a fact of life — the templated half of the same question always rendered the word, so
+		the dump was what was wrong. It is now the control that the two halves AGREE."""
 		from flow.lib.agent import _render_confirm_template
 
 		self.assertEqual(_render_confirm_template("Write {text}.", {"text": SINHALA}), f'Write "{SINHALA}".')
+
+	def test_the_two_halves_of_the_card_now_agree(self):
+		"""What the pair above is worth saying once, directly: the sentence and the arguments
+		beneath it show the same word the same way."""
+		from flow.lib.agent import _render_confirm_template
+
+		sentence = _render_confirm_template("Write {text}.", {"text": SINHALA})
+		self.assertIn(SINHALA, sentence)
+		self.assertIn(SINHALA, self._fallback_body(SINHALA))
 
 
 class TestTheCapDoesNotUndoTheException(IntegrationTestCase):

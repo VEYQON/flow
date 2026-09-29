@@ -776,7 +776,13 @@ class TestOnlyTheInvokeDigestMoved(UnitTestCase):
 
 	UNCHANGED = {
 		"_resolve_confirmation": "adbb8b26e0b0fb166a5a9fff1c658c531d081b3bd2f2967e55b8e838b5ab8f47",
-		"_confirmation_question": "32916612298d4ebdb423d9904e268992a2e638b56a67f2ca14fa67deba9cf34c",
+		# MOVED SINCE, by S26 (run 17, 29 Sep 2026) and not by S19 — the class name above is the
+		# statement S19 made, and it was true of S19. The re-baseline is recorded at length beside
+		# the canonical pin in `test_deny_stops_batch.py`; the previous value was
+		# 32916612298d4ebdb423d9904e268992a2e638b56a67f2ca14fa67deba9cf34c. This literal is kept
+		# independent of that pin on purpose: it is what makes a re-baseline of the OTHER TWO
+		# below impossible to slip through in one edit.
+		"_confirmation_question": "9ee6e922cf59846f322e2c284af895bdf716ba352b78e7b7599a7a58ba8e305e",
 		"_has_denial": "80f799b6827afea159589dcee7889282ad8c376aacc15be424c273cd0e55b209",
 	}
 
