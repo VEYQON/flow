@@ -31,6 +31,7 @@ and it is `test_the_boundary_is_real_*`: an empty list is equally consistent wit
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any
 from unittest.mock import patch
@@ -130,7 +131,7 @@ def _scripted_stream(response: ChatResponse):
 	return response
 
 
-def _chat(response: ChatResponse):
+def _chat(response: ChatResponse, calls: list[int] | None = None):
 	"""A model double that answers BOTH shapes, because the streamed doors need the streamed one.
 
 	`return_value=<ChatResponse>` is not a model double for a streamed run: `_loop_stream` calls
@@ -143,6 +144,8 @@ def _chat(response: ChatResponse):
 	"""
 
 	def chat(self, messages, tools=None, *, stream=False):
+		if calls is not None:
+			calls.append(len(messages))
 		return _scripted_stream(response) if stream else response
 
 	return chat
@@ -227,6 +230,7 @@ class TwoDoorsCase(IntegrationTestCase):
 		# and `form_dict` that `TestTheCallersOwnRequestComesBack` plants to watch them come back.
 		if frappe.session.user != as_user:
 			frappe.set_user(as_user)
+		self._warm_the_answerers_caches(as_user)
 		if door == "whitelisted":
 			return resume_run(run.name, answers)
 		if door == "in-process":
@@ -238,6 +242,29 @@ class TwoDoorsCase(IntegrationTestCase):
 		if door == "in-process-stream":
 			return list(load_session(run.session).resume(answers, stream=True))
 		raise AssertionError(f"unknown door {door!r}")
+
+	def _warm_the_answerers_caches(self, as_user: str) -> None:
+		"""Make the answerer's permission caches HOT before the resume, as a real request does.
+
+		A REPORTED NEGATIVE, because the opposite was expected. Probe P3 replaced
+		`frappe.set_user(user)` in `_acting_as` with a bare `frappe.local.session.user = user` —
+		the identity as a field, with the answerer's permission caches left standing — and this
+		file stayed GREEN, with the caches cold AND with them warmed here. It is an EQUIVALENT
+		mutation on the permission path, not a surviving one: every cache the check consults is
+		keyed by the user (`frappe/permissions.py` `get_role_permissions` keys on
+		`(doctype, user, is_owner)`, and `get_roles` takes the user as an argument), so changing
+		the name is enough to change the answer.
+
+		`set_user` is kept anyway, and this is the honest reason: it is also the only thing that
+		drops `local.cache` and `local.user_perms`, which are NOT keyed by user, and a fix that
+		relied on the keying above would be relying on somebody else's cache design.
+
+		The warming stays because it is what a real request looks like by the time it reaches a
+		resume, and a fixture whose caches are all cold is a fixture that cannot see a cache bug.
+		"""
+		frappe.get_roles()
+		with contextlib.suppress(frappe.PermissionError):
+			frappe.get_list("Flow Tool", pluck="name", limit_page_length=1)
 
 	def _approve_through(self, door: str, *, requester: str, approver: str, slug: str | None = None):
 		"""The whole shape: a requester's turn pauses, `approver` approves it through `door`."""
@@ -343,10 +370,19 @@ class TestTheOtherAnswers(TwoDoorsCase):
 				WITNESS.clear()
 				before = frappe.db.count("Flow Tool")
 				run = self._paused_run(self.wide_requester, self.write_tool.slug, {"title": "S25 Denied"})
-				with patch.object(Model, "chat", new=_chat(_final())):
+				asked_again: list[int] = []
+				with patch.object(Model, "chat", new=_chat(_final(), asked_again)):
 					self._answer(door, run, {"c1": "Deny"}, self.approver)
 				self.assertEqual(WITNESS, [], f"door={door}: a denial ran the tool")
 				self.assertEqual(frappe.db.count("Flow Tool"), before, f"door={door}")
+				# And it STOPS. Without this the test passes with `_has_denial` returning False
+				# (probe P9, green): the tool still does not run, because `_resolve_confirmation`
+				# refuses it call by call -- but the turn carries on and the model gets another go
+				# at the thing it was just refused. "Creates nothing" was never the whole rule.
+				self.assertEqual(
+					asked_again, [], f"door={door}: a denial went back to the model {asked_again}"
+				)
+				self.assertEqual(frappe.get_doc("Flow Run", run.name).status, "Completed", door)
 
 	def test_the_same_write_through_the_same_door_DOES_run_on_approve(self):
 		"""The positive control for the denial test: the tool is reachable and does write."""
@@ -355,8 +391,11 @@ class TestTheOtherAnswers(TwoDoorsCase):
 				WITNESS.clear()
 				before = frappe.db.count("Flow Tool")
 				run = self._paused_run(self.wide_requester, self.write_tool.slug, {"title": "S25 Approved"})
-				with patch.object(Model, "chat", new=_chat(_final())):
+				asked_again: list[int] = []
+				with patch.object(Model, "chat", new=_chat(_final(), asked_again)):
 					self._answer(door, run, {"c1": "Approve"}, self.approver)
+				# The control on the denial test's silence: an APPROVAL does go back to the model.
+				self.assertEqual(len(asked_again), 1, f"door={door}: {asked_again}")
 				self.assertEqual(len(WITNESS), 1, f"door={door} witness={WITNESS}")
 				self.assertEqual(WITNESS[0]["user"], self.wide_requester, f"door={door}")
 				self.assertEqual(frappe.db.count("Flow Tool"), before + 1, f"door={door}")
