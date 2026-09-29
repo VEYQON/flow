@@ -1,0 +1,209 @@
+---
+type: architecture
+status: current
+measured: 2026-09-29
+unicode: 16.0.0
+---
+# The invisible-character rule — written once, so four copies can be checked against it
+
+THE PROBLEM THIS NOTE EXISTS FOR. The same Unicode rule is written out **four times independently**
+across this estate, and on 28 September 2026 a consolidation found that **three of the four were
+wrong** — each in a different way. Nothing can be shared between the four repositories, so the only
+remaining defence is that the rule is written down ONCE, in full, with the reason for every clause,
+and that each copy is measured against the writing. `flow/tests/test_s24_one_rule_four_copies.py`
+parses **this file** and fails if either copy in this repository has drifted from it.
+
+If you are changing one copy, change this note first. If this note and a copy disagree, this note
+is what the test believes.
+
+## 0. WHERE THE FOUR COPIES ARE
+
+| # | repository | file | how it states the property | joiner exception |
+|---|---|---|---|---|
+| 1 | `veyqon-flow` (this one) | `flow/lib/agent.py` — `_DEFAULT_IGNORABLE_RANGES`, `_paints_nothing`, `_escaped` | 17 hand-written ranges, because `unicodedata` does not expose the property | **yes**, since 29 Sep 2026 |
+| 2 | `veyqon-flow` (this one) | `frontend/src/lib/display.js` — `CONTROL_OR_SEPARATOR`, `escapeForDisplay` | native `\p{Default_Ignorable_Code_Point}` | **yes**, since 29 Sep 2026 |
+| 3 | `q_flow_tools` | the tool-side escaper — **OUT OF SCOPE, another lane owns that tree** | 17 hand-written ranges, a copy of #1 | **no — still mangles Sinhala** |
+| 4 | `Q-AI` (`agentq-web` and `veyqon-web`, character-for-character twins) | `src/features/chat/lib/visibleControls.ts` | an explicit character class, NOT the property | yes, and it is where ours came from |
+| 5 | `q-ai-mobile` | `veyqon-mobile/src/features/chat/lib/display.ts` | native `\p{Default_Ignorable_Code_Point}` | **no, deliberately — and it mangles Sinhala** |
+
+The consolidation counted four; there are five. It also said "both front ends carry a tested
+zero-width-joiner exception", and that is only true of the two web apps: the mobile app is a third
+front end that decided the other way, on an argument about EMOJI that does not reach the Indic case.
+
+## 1. WHAT IS ESCAPED — THE THREE TERMS
+
+A character is escaped when **any** of the three holds, with the ordinary space `U+0020` excepted
+and the joiner exception of §3 subtracted:
+
+1. **Unicode general category C\*** — Cc control, Cf format, Cn unassigned, Co private use, Cs
+   surrogate.
+2. **Unicode general category Z\*** — Zs space, Zl line separator, Zp paragraph separator.
+3. **`Default_Ignorable_Code_Point`** — "a conformant renderer is entitled to paint nothing here".
+
+WHY ALL THREE, in the order the mistakes were made:
+- The rule began as **Cc and Cf only**, the categories that *looked* dangerous. That missed U+2028
+  and U+2029, which `str.splitlines` and every layout engine treat as line breaks, so a value could
+  still open a line of its own inside the card. Hence the whole of C\* and Z\*, which also takes in
+  unassigned code points and lone surrogates, so a later revision of Unicode cannot quietly add a
+  new way through.
+- Term 3 was **missing**, and a reviewer found it by *measuring the property against the rule*
+  rather than by reading the rule. **267 code points carry the property and are in neither C\* nor
+  Z\***, so all 267 arrived raw AND UNQUOTED — without even the quote that is the signal something
+  was escaped. **Four of them are category `Lo`: LETTERS** (U+115F, U+1160, U+3164, U+FFA0). No
+  rule about controls, formats, separators or combining marks was ever going to reach a letter, and
+  `SO-0001` beside `SO-0001` + U+3164 is two different writes a reader cannot tell apart.
+
+THE PRICE, which is a decision and not an oversight: the property takes in the variation selectors,
+so an argument holding an emoji written with U+FE0F renders quoted. The cost of the other choice is
+a class of invisible character judged safe by whoever last thought about it, which is the mistake
+the whitelist exists to make impossible.
+
+## 2. TABLE ONE — THE SEVENTEEN RANGES
+
+Copy #1 writes these out because Python's `unicodedata` has no such property. Copies #2 and #5 ask
+the regex engine for it instead. Both must agree, which is what
+`frontend/tests/displayProperty.spec.js` and the test named at the top assert.
+
+```default-ignorable-ranges
+U+00AD  U+00AD      1  SOFT HYPHEN
+U+034F  U+034F      1  COMBINING GRAPHEME JOINER
+U+061C  U+061C      1  ARABIC LETTER MARK
+U+115F  U+1160      2  HANGUL CHOSEONG FILLER … HANGUL JUNGSEONG FILLER — LETTERS that paint nothing
+U+17B4  U+17B5      2  KHMER VOWEL INHERENT AQ … AA
+U+180B  U+180F      5  MONGOLIAN FREE VARIATION SELECTOR ONE … FOUR
+U+200B  U+200F      5  ZERO WIDTH SPACE … RIGHT-TO-LEFT MARK — contains BOTH joiners, see §3
+U+202A  U+202E      5  LEFT-TO-RIGHT EMBEDDING … RIGHT-TO-LEFT OVERRIDE — reorders without adding
+U+2060  U+206F     16  WORD JOINER … NOMINAL DIGIT SHAPES
+U+3164  U+3164      1  HANGUL FILLER — a LETTER that paints nothing
+U+FE00  U+FE0F     16  VARIATION SELECTOR-1 … -16 — the declared price, see §1
+U+FEFF  U+FEFF      1  ZERO WIDTH NO-BREAK SPACE (BOM)
+U+FFA0  U+FFA0      1  HALFWIDTH HANGUL FILLER — a LETTER that paints nothing
+U+FFF0  U+FFF8      9  unassigned, reserved as ignorable
+U+1BCA0 U+1BCA3     4  SHORTHAND FORMAT LETTER OVERLAP … UP STEP
+U+1D173 U+1D17A     8  MUSICAL SYMBOL BEGIN BEAM … END PHRASE
+U+E0000 U+E0FFF  4096  tag characters and the variation-selector supplement
+```
+
+4174 code points in all.
+
+## 3. THE ONE EXCEPTION — A JOINER THAT SPELLS
+
+U+200D ZERO WIDTH JOINER and U+200C ZERO WIDTH NON-JOINER carry the property, so §1 marks them —
+correctly for every script that does not use them. **In Sinhala, Tamil, Devanagari and every other
+Indic script a joiner is not decoration. It is spelling.** A conjunct is written
+
+> CONSONANT + VIRAMA + ZWJ + CONSONANT
+
+so `ශ්‍රී ලංකා` is two ordinary words, and marking the joiner inside the first turns it into
+`ශ්\u200dරී ලංකා` — six characters of machine escape dropped into the middle of the name of the
+country most of the people reading these cards live in.
+
+**THE RULE.** A joiner is kept as itself, unescaped, only when **all four** hold:
+
+| # | clause | the shape it refuses |
+|---|---|---|
+| 1 | it is at neither edge of the value | a joiner with nothing on one side joins nothing; it can only hide |
+| 2 | the code point immediately **before** it is a **virama** (canonical combining class 9) | a joiner anywhere else between two letters is the hiding case |
+| 3 | the code point immediately **after** it is a **letter** (category L\*) | a doubled joiner, a run of them, a joiner before a space, a bracket, a digit, a vowel sign or a second virama |
+| 4 | those two neighbours share a **128-code-point aligned block** (`cp >> 7` equal) | `SO-000A` + DEVANAGARI VIRAMA + ZWJ + `x`: clauses 1–3 all hold and the joiner binds nothing |
+
+Clause 3 also disposes of the doubled and run cases for free: the code point after the first joiner
+of `VIRAMA ZWJ ZWJ LETTER` is a joiner, which is not a letter.
+
+**WHERE IT CAME FROM AND WHERE IT DIVERGES.** Copy #4 decided this first and tested it
+(`joinsRatherThanHides`): *"a joiner that FOLLOWS a virama is orthography, not hiding, and is
+kept."* Ours is that rule **plus clauses 3 and 4, which copy #4 does not have** — it never looks
+past the joiner, so a trailing joiner, a doubled joiner and a cross-script joiner all keep their
+exemption there. Those are two open defects in copy #4.
+
+**WHAT WE DID NOT TAKE FROM COPY #4.** Its other half exempts a joiner **between two
+`Extended_Pictographic` characters**, so a family emoji is not shattered into its parts. Not
+adopted, for two reasons: Python's `unicodedata` does not expose that property, so adopting it would
+mean hand-writing a **fifth** copy of a Unicode table inside the very change whose subject is that
+four copies is three too many; and copy #5's argument is sound for emoji — *"a tool ARGUMENT is not
+prose; it is the exact value about to be written to a record"* — even though it is not sound for a
+conjunct. Not adopting it changes nothing: an emoji joiner was escaped before and is escaped now.
+
+**CLAUSE 4 IS A HEURISTIC, AND HERE IS ITS EXACT REACH.** Measured 29 Sep 2026 on UCD 16.0.0: of
+the **69** viramas, **60** have every letter of their own script inside the virama's own 128-point
+block. The nine that do not are DEVANAGARI (81 of its 90 letters are inside; the nine outside are
+the Devanagari Extended-A candrabindu signs and `DEVANAGARI LETTER AY`), TIBETAN (5 of 50), MYANMAR
+(71 of 120, both viramas), TAI THAM, two MEETEI MAYEK, SOYOMBO and GUNJALA GONDI. **A conjunct the
+clause cannot see keeps no exception at all — it is escaped, exactly as it was before this rule
+existed. The rule fails CLOSED**, and the cost is an ugly card for those scripts, never a hidden
+character.
+
+## 4. TABLE TWO — THE VIRAMAS
+
+Copy #1 **reads these from the library** — `unicodedata.combining(ch) == 9` — and has no table.
+Copy #2 carries a table only because JavaScript regular expressions cannot ask for a combining
+class; it is generated, and the drift test recomputes it. **Copies #4 and #5 write out SIXTEEN by
+hand**, so they escape the conjuncts of every other Indic script. That is table drift caught in the
+act, and it is why copy #1 has no table at all.
+
+```viramas
+U+094D U+09CD U+0A4D U+0ACD U+0B4D U+0BCD U+0C4D U+0CCD U+0D3B U+0D3C U+0D4D U+0DCA U+0E3A
+U+0EBA U+0F84 U+1039 U+103A U+1714 U+1715 U+1734 U+17D2 U+1A60 U+1B44 U+1BAA U+1BAB U+1BF2
+U+1BF3 U+2D7F U+A806 U+A82C U+A8C4 U+A953 U+A9C0 U+AAF6 U+ABED U+10A3F U+11046 U+11070
+U+1107F U+110B9 U+11133 U+11134 U+111C0 U+11235 U+112EA U+1134D U+113CE U+113CF U+113D0
+U+11442 U+114C2 U+115BF U+1163F U+116B6 U+1172B U+11839 U+1193D U+1193E U+119E0 U+11A34
+U+11A47 U+11A99 U+11C3F U+11D44 U+11D45 U+11D97 U+11F41 U+11F42 U+1612F
+```
+
+## 5. TABLE THREE — THE VECTORS EVERY COPY MUST AGREE ON
+
+Input on the left, the displayed form on the right, both as Python `repr` of the escaper's output
+(`_escaped` / `escapeForDisplay`). The drift test runs every line against copy #1; the JS suite's
+`joinerInsideAWord.spec.js` runs the same list against copy #2. **A copy that disagrees with one
+line of this table is wrong, whichever copy it is.**
+
+```vectors
+'\u0dc1\u0dca\u200d\u0dbb\u0dd3'	'\u0dc1\u0dca\u200d\u0dbb\u0dd3'	Sinhala conjunct — kept
+'\u0b95\u0bcd\u200d\u0bb7'	'\u0b95\u0bcd\u200d\u0bb7'	Tamil conjunct — kept
+'\u0915\u094d\u200d\u0937'	'\u0915\u094d\u200d\u0937'	Devanagari conjunct — kept
+'\u0dc1\u0dca\u200c\u0dbb'	'\u0dc1\u0dca\u200c\u0dbb'	ZWNJ asks for the separate form — kept
+'\u0dc1\u0dca\u200d'	'\u0dc1\u0dca\\u200d'	clause 1 — nothing after it
+'\u200d\u0dbb'	'\\u200d\u0dbb'	clause 1 — nothing before it
+'\u0dc1\u0dca\u200d \u0dbb'	'\u0dc1\u0dca\\u200d \u0dbb'	clause 3 — a space is not a letter
+'\u0dc1\u0dca\u200d.\u0dbb'	'\u0dc1\u0dca\\u200d.\u0dbb'	clause 3 — punctuation
+'\u0dc1\u0dca\u200d\u0dcf'	'\u0dc1\u0dca\\u200d\u0dcf'	clause 3 — a vowel sign of the SAME block
+'\u0dc1\u0dca\u200d\u0dca'	'\u0dc1\u0dca\\u200d\u0dca'	clause 3 — a second virama
+'\u0dc1\u0dca\u200d\u0de6'	'\u0dc1\u0dca\\u200d\u0de6'	clause 3 — a digit of the same script
+'\u0dc1\u0dca\u200d\u200d\u0dbb'	'\u0dc1\u0dca\\u200d\\u200d\u0dbb'	doubled — both halves marked
+'\u0dc1\u200d\u0dbb'	'\u0dc1\\u200d\u0dbb'	clause 2 — no virama, however Indic the letters
+'SO-000A\u094d\u200dx'	'SO-000A\u094d\\u200dx'	clause 4 — a Devanagari virama cannot license a Latin x
+'\u0dc1\u0dca\u200d\u0937'	'\u0dc1\u0dca\\u200d\u0937'	clause 4 — Sinhala virama, Devanagari letter
+'paid\u200dunpaid'	'paid\\u200dunpaid'	the original attack, untouched by the exception
+'gnp\u202eexe'	'gnp\\u202eexe'	a bidi override is not a joiner and takes no exemption
+'\u202e\u0dc1\u0dca\u200d\u0dbb'	'\\u202e\u0dc1\u0dca\u200d\u0dbb'	the joiner kept, the override STILL marked
+'\u0dc1\u0dca\u202e\u0dbb'	'\u0dc1\u0dca\\u202e\u0dbb'	a virama licenses a joiner and nothing else
+'SO-0001\u3164'	'SO-0001\\u3164'	the invisible LETTER run 15 closed
+'Sales Order SO-0001'	'Sales Order SO-0001'	the control — a rule that escaped everything would pass the rest
+```
+
+## 6. WHAT IS *NOT* DEFENDED, SAID OUT LOUD
+
+- **Homoglyphs.** `Раураl` in Cyrillic draws identically to the Latin word and produces no escape
+  and no quote, because every code point in it is an ordinary visible letter. A mixed-script or
+  Unicode-skeleton check is a different mechanism with its own false positives and nobody has
+  decided it.
+- **A long run of combining marks.** `Delete` + forty U+0301 overruns the lines above and below it.
+  The marks are legitimate orthography everywhere else, so the mitigation is a cap on consecutive
+  `\p{Mn}`, not an escape.
+- **`_confirmation_question`'s untemplated fallback body**, which is `json.dumps(..., indent=2)`
+  and never passes through the escaper at all. `ensure_ascii=True` means EVERY non-ASCII character
+  is escaped there, so a Sinhala value on a card with no sentence is still unreadable — a bigger
+  defect than the joiner and a different one. It is a CLAUDE.md rule-4 function; it needs its own
+  spec. Pinned by `TestTheFallbackDumpIsADifferentDefectEntirely` in
+  `flow/tests/test_s23_a_joiner_inside_a_word.py`.
+
+## 7. WHAT `q_flow_tools` MUST ADOPT
+
+One paragraph, for the lane that owns that tree. `q_flow_tools` carries copy #3: the identical 17
+ranges of §2, ported from `flow/lib/agent.py`, with no joiner exception — so it escapes ZWJ and
+mangles Sinhala exactly as this repository did before 29 September 2026. It needs §3 added to its
+escaper, whole and with all four clauses: the viramas read from `unicodedata.combining(ch) == 9`
+rather than typed out, the letter-after and same-block clauses included rather than only the
+virama-before clause the web apps have, and the vectors of §5 added as tests. Nothing else changes —
+§1 and §2 are already correct there. It must not adopt the emoji half of copy #4's rule, for the
+reason in §3.

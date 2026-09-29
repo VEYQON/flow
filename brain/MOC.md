@@ -8,6 +8,7 @@ The hub. If a note isn't linked from here, it's lost.
 ## Start here
 - [[30-loops/dev-loops|The 7 development loops]] — how work gets done
 - [[40-architecture/engine-overview|Engine overview]] — how a turn flows through the engine
+- [[40-architecture/the-invisible-character-rule|The invisible-character rule]] — the one writing of a rule that exists in five copies, and what each copy must match
 - [[70-runbooks/local-setup|Local setup]] — the bench, and how to rebuild it
 - [[20-adr/ADR-001-fork-flow|ADR-001 Fork Flow]] — why this repo exists and its branch model
 
