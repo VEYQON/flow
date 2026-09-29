@@ -43,6 +43,59 @@ import { __ } from "@/lib/translate";
 // whitelist exists to make impossible. The escape is visible and reversible; nothing is stripped.
 const CONTROL_OR_SEPARATOR = /[\p{C}\p{Z}\p{Default_Ignorable_Code_Point}]/u;
 
+// THE ONE DELIBERATE EXCEPTION, and it is a port of `_spells_rather_than_hides` in
+// `flow/lib/agent.py`, which is itself a port of `joinsRatherThanHides` in the two sibling web
+// apps. U+200D ZERO WIDTH JOINER carries `Default_Ignorable_Code_Point`, so the rule above marks
+// it — correctly for every script that does not use it. In Sinhala, Tamil, Devanagari and every
+// other Indic script the joiner is SPELLING: a conjunct is written CONSONANT + VIRAMA + ZWJ +
+// CONSONANT, so `ශ්‍රී` is one word and marking the joiner inside it drops
+// six characters of machine escape into the middle of it. The defence that exists so a person can
+// read what they are approving was making the text unreadable for the people who read it.
+//
+// A joiner is kept ONLY when all four hold, and each clause refuses a shape an attacker uses:
+//   1. it is at neither edge of the value — a joiner with nothing on one side joins nothing;
+//   2. a VIRAMA sits immediately before it — that is what makes it orthography;
+//   3. a LETTER sits immediately after it — which also disposes of the doubled and the run cases,
+//      because the code point after the first joiner of VIRAMA ZWJ ZWJ LETTER is a joiner;
+//   4. the two neighbours share a 128-code-point aligned block — without this,
+//      `SO-000A` + DEVANAGARI VIRAMA + ZWJ + `x` satisfies 1 to 3 while the joiner binds nothing.
+// The Indic blocks are laid out by the standard on exactly that grid. A script the clause cannot
+// see keeps NO exception, which is where it was before: the rule fails closed.
+const JOINERS = new Set(["\u200c", "\u200d"]);
+
+// Unicode's Virama combining class (canonical combining class 9), and this list is GENERATED, never
+// typed: `flow/tests/test_s24_one_rule_four_copies.py` recomputes it from Python's `unicodedata` on
+// every run and fails if one code point here differs. JavaScript's regular expressions cannot ask
+// for a combining class, which is the only reason the engine reads it from a library and this copy
+// carries a table. The two sibling web apps hand-write SIXTEEN of these; there are sixty-nine.
+// Measured 29 Sep 2026 against UCD 16.0.0.
+const VIRAMAS = new Set([
+	0x094d, 0x09cd, 0x0a4d, 0x0acd, 0x0b4d, 0x0bcd, 0x0c4d, 0x0ccd, 0x0d3b, 0x0d3c, 0x0d4d, 0x0dca,
+	0x0e3a, 0x0eba, 0x0f84, 0x1039, 0x103a, 0x1714, 0x1715, 0x1734, 0x17d2, 0x1a60, 0x1b44, 0x1baa,
+	0x1bab, 0x1bf2, 0x1bf3, 0x2d7f, 0xa806, 0xa82c, 0xa8c4, 0xa953, 0xa9c0, 0xaaf6, 0xabed,
+	0x10a3f, 0x11046, 0x11070, 0x1107f, 0x110b9, 0x11133, 0x11134, 0x111c0, 0x11235, 0x112ea,
+	0x1134d, 0x113ce, 0x113cf, 0x113d0, 0x11442, 0x114c2, 0x115bf, 0x1163f, 0x116b6, 0x1172b,
+	0x11839, 0x1193d, 0x1193e, 0x119e0, 0x11a34, 0x11a47, 0x11a99, 0x11c3f, 0x11d44, 0x11d45,
+	0x11d97, 0x11f41, 0x11f42, 0x1612f,
+]);
+
+const LETTER = /\p{L}/u;
+
+/**
+ * True for the joiner at `index` of `points` when it is forming a conjunct rather than hiding.
+ *
+ * `points` is the value as an array of CODE POINTS, so "the character before" means the character
+ * before, and a surrogate pair is one neighbour rather than two. Reads `points` and nothing else.
+ */
+function spellsRatherThanHides(points, index) {
+	if (index === 0 || index + 1 >= points.length) return false;
+	const before = points[index - 1].codePointAt(0);
+	const after = points[index + 1];
+	if (!VIRAMAS.has(before)) return false;
+	if (!LETTER.test(after)) return false;
+	return before >> 7 === after.codePointAt(0) >> 7;
+}
+
 // How much escaped text the panel will show before it elides, per value.
 //
 // Looser than the engine's own caps (120 in `builtins.py`, 200 in `_quoted_argument`) and on purpose:
@@ -61,13 +114,17 @@ export const DISPLAY_LIMIT = 2000;
  */
 export function escapeForDisplay(text) {
 	let out = "";
-	// `for…of` iterates by CODE POINT, as Python does, so a surrogate pair is one character and a
-	// lone surrogate is one character that `\p{Cs}` matches.
-	for (const ch of String(text)) {
+	// Split by CODE POINT, as Python does, so a surrogate pair is one character and a lone
+	// surrogate is one character that `\p{Cs}` matches. An ARRAY rather than a `for…of` because the
+	// joiner exception has to look at the character on either side of the one being escaped.
+	const points = Array.from(String(text));
+	for (let index = 0; index < points.length; index++) {
+		const ch = points[index];
 		if (ch === "\\" || ch === '"') out += "\\" + ch;
 		else if (ch === "\n") out += "\\n";
 		else if (ch === "\r") out += "\\r";
 		else if (ch === "\t") out += "\\t";
+		else if (JOINERS.has(ch) && spellsRatherThanHides(points, index)) out += ch;
 		else if (ch !== " " && CONTROL_OR_SEPARATOR.test(ch)) {
 			const cp = ch.codePointAt(0);
 			out +=
