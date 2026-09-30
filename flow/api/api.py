@@ -58,7 +58,10 @@ def resume_run(
 			title=_("Cannot Resume"),
 		)
 
-	out = load_session(run.session).resume(parsed_answers, stream=stream)
+	# `run.name`, and not only `run.session`: everything above authorised THIS run — the owner
+	# check and the `Paused` check — and without carrying the name down, the session resolves the
+	# run to act on for itself and the two can be different rows.
+	out = load_session(run.session).resume(parsed_answers, stream=stream, run_name=run.name)
 	return _sse_response(out) if stream else _summarize(out)
 
 

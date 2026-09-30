@@ -188,6 +188,54 @@ def _acting_as(user: str) -> Iterator[None]:
 		frappe.local.form_dict = form_dict
 
 
+def _the_requesters_runtime(session: FlowSession, current):
+	"""Rebuild the stored agent into a runtime under whoever is acting right now.
+
+	**THE PIN HAD A SECOND WAY IN.** `flow.lib.session.load_session` assembles the runtime before
+	`FlowSession.resume` is ever entered, which on the whitelisted door is the ANSWERER, and
+	`FlowAgent.assemble` is not a dumb constructor: it checks `Flow Model` read with
+	`frappe.has_permission` and resolves the agent's tool rows. So the inventory the continuation
+	could reach, and the instructions placed in the requester's prompt, were resolved under
+	somebody else's rights while every other part of the turn was the requester's. A pin that a
+	second assembly path bypasses is a convention, not a guarantee; there is one assembly path
+	into a resume and a test asserts there is no second one.
+
+	`auto_approve` and `unattended` are carried across rather than reset: they are the CALLER's
+	standing statements about this run, not properties of the stored agent, and a freshly
+	assembled runtime has neither. (`Agent.resume` clears `unattended` itself — carrying it means
+	the clearing is still the thing that does the work, rather than an accident of rebuilding.)
+
+	A session with no `agent` link is driven by a code `Agent` the in-process caller passed in;
+	there is no row to re-resolve and nothing was resolved under anyone's rights, so it is handed
+	back untouched. The `name` check is what tells the two apart: a runtime `assemble` built for
+	this session's agent carries that agent's name, and a caller's own object does not.
+
+	**THE RE-RESOLUTION IS THE POINT, AND IT HAPPENS EVEN WHEN THE RESULT IS DISCARDED.** An
+	in-process caller may hand a resume a runtime it has deliberately altered — swapped tools, a
+	code tool the stored agent has never heard of — and that choice is the caller's to make; it is
+	not a permission decision and re-resolving over the top of it silently removes the tool the
+	caller meant to run. So when the inventory or the instructions differ from the stored agent's,
+	the caller's object is kept. What is NOT kept is the permission decision: `assemble` has
+	already been called above, as the requester, so `has_permission("Flow Model", "read", ...)` is
+	answered for the person the turn belongs to, and a requester who may not use the model stops
+	the resume here rather than borrowing the answerer's access to it. The narrowness is the
+	honest part: a caller-supplied inventory is still resolved under the caller, and closing that
+	means changing what `load_session` promises every caller — which is a spec, not this.
+	"""
+	if not session.agent or getattr(current, "name", None) != session.agent:
+		return current
+	from flow.lib.session import _resolve_existing_agent
+
+	runtime, _snapshot = _resolve_existing_agent(session, None)
+	if {t.name for t in runtime.tools} != {t.name for t in current.tools} or (
+		runtime.instructions != current.instructions
+	):
+		return current
+	runtime.auto_approve = current.auto_approve
+	runtime.unattended = current.unattended
+	return runtime
+
+
 def _resumed_as(user: str, runtime, messages, answers, asked) -> Generator[Event]:
 	"""The streamed continuation, under `user` for exactly as long as it is producing events.
 
@@ -525,26 +573,85 @@ class FlowSession(Document):
 				frappe.log_error(title="Chat attachment indexing failed")
 				row.db_set("mode", "Inline")
 
-	def resume(self, answers: dict[str, Any], *, stream: bool = False) -> FlowRun | Generator[Event]:
-		"""Resume this session's paused run with the user's answers."""
+	def resume(
+		self, answers: dict[str, Any], *, stream: bool = False, run_name: str | None = None
+	) -> FlowRun | Generator[Event]:
+		"""Resume this session's paused run with the user's answers.
+
+		**ONE IDENTITY, BOTH HALVES.** The identity the approval card was rendered for and the
+		identity this continuation executes as are the same identity, and any place they can
+		diverge is a defect. The card is built when the run PAUSES, inside the requester's own
+		turn (`chat` runs as the caller, and `create_run` stamps that caller as the run's owner);
+		the body runs here, in a different request, possibly days later and at somebody else's
+		keystroke. Until the continuation was pinned, those two ends were two different people:
+		the card was rendered as the asker and the body ran as the approver, so the person
+		approving was shown one account's question and lent a different account's hands to it.
+		`_the_requester` is the ONLY place this end of the pair is chosen, and there is no
+		runtime assertion here that it equals `run.owner` because that would assert that a
+		function returns what it returns. What holds the invariant is the construction, and what
+		watches the construction is `flow/tests/test_s26_the_pin_is_the_only_way_in.py`.
+
+		`run_name`, when given, is the run the CALLER authorised and intends to answer. The
+		resolution below cannot use it to pick the run — a session's transcript is shared by all
+		of its runs, so an answer resolved against an older turn acts on a transcript whose live
+		turn is somebody else's — so it is used to REFUSE instead. Without that, the run that was
+		checked (`assert_run_owner`, the `Paused` check) and the run that was acted on could be
+		two different rows whenever a session held two paused runs at once.
+		"""
 		from flow.flow.doctype.flow_run.flow_run import stream_with_persistence
 
-		run_name = frappe.db.get_value(
+		resolved = frappe.db.get_value(
 			"Flow Run",
 			{"session": self.name, "status": "Paused"},
 			"name",
 			order_by="creation desc",
 		)
-		if not run_name:
+		if not resolved:
 			frappe.throw(_("This session has no paused run to resume."), title=_("Nothing to Resume"))
-		run = frappe.get_doc("Flow Run", run_name)
+		if run_name and run_name != resolved:
+			# The answer names a question other than the one this conversation is waiting on.
+			# Refused, and nothing is resolved against the wrong turn — the caller's
+			# authorisation was granted over `run_name` and would be spent somewhere else.
+			frappe.throw(
+				_(
+					"This answer was given to an earlier question, and the conversation has "
+					"since moved on. Open it again and answer the question it is waiting on."
+				),
+				title=_("Cannot Resume"),
+			)
+		run = frappe.get_doc("Flow Run", resolved)
 		# Authorised as the caller — that already happened, above this method — and PERFORMED as
 		# the person whose turn it is. See `_the_requester`.
 		requester = _the_requester(run)
-		_the_answerer_may_not_gain_reach(requester)
+		# NOTHING BUT REFUSALS, and `_has_denial` alone is not that. `answers` is attacker-shaped:
+		# `_parse_answers` checks its shape and never its keys, and `_has_denial` is
+		# `any(v == "Deny")` — so a key naming no pending call at all (`{"c1": "<text>",
+		# "zz": "Deny"}`) satisfied it while `c1` still went down the FREE-TEXT branch of
+		# `_resolve_confirmation`, whose result is persisted into the REQUESTER's transcript and
+		# replayed to the model on every later turn of their conversation. Nothing executes, and
+		# that was the whole of the first version's reasoning; writing the answerer's sentence
+		# into somebody else's context is the escalation without the execution.
+		nothing_but_refusals = bool(answers) and all(answer == "Deny" for answer in answers.values())
+		if not nothing_but_refusals:
+			# A DENIAL IS NOT A GAIN OF REACH, so it is not gated as one. `_resolve_confirmation`
+			# answers "Deny" with a rejection string and calls nothing; every approval standing
+			# beside it in the same group is withheld; `_stopped_result` ends the turn with zero
+			# further model calls. Nothing runs, so there is nothing to borrow. Gating it too
+			# left a run whose owner nobody here may act for with no way out of `Paused` through
+			# the card that raised it — the guard turning a refusal to act into an inability to
+			# refuse. Only the exact "Deny" is let through: free text is a REDIRECT, and a
+			# redirect carries the loop on for up to `max_iterations` further calls as the
+			# requester, which is the reach the guard exists to refuse.
+			_the_answerer_may_not_gain_reach(requester)
 
 		with _acting_as(requester):
 			self.reload()
+			# The runtime too, and not only the tool bodies. `load_session` assembled one under
+			# the CALLER, and `FlowAgent.assemble` is not inert: it runs a real
+			# `has_permission("Flow Model", "read", ...)` and resolves the tool inventory. So the
+			# prompt's instructions and the set of tools the continuation may reach were the
+			# ANSWERER's, under a pin whose whole claim is that the turn is the requester's.
+			self._runtime = _the_requesters_runtime(self, self._runtime)
 			# Inside, and not only for the tools: this reads the acting user's display name, time
 			# zone and personal memory block, so rebuilt under the answerer it put the ANSWERER's
 			# name and notes into the requester's conversation.
