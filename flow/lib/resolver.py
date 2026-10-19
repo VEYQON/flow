@@ -96,19 +96,37 @@ def _build_tool(
 	# below pass the argument.
 	code_requires_confirmation: bool = True,
 ) -> Tool:
+	# A record may turn an approval ON. It may not take one OFF that the imported function
+	# declares for itself. The record decides which tools an agent has and what they are
+	# called; it does not get to decide that the function behind it stopped changing data.
+	#
+	# FAIL-CLOSED ARCHITECTURAL SECURITY RULE:
+	# Any write/destructive/side-effecting tool must require explicit confirmation unless it is
+	# explicitly and safely classified as not requiring confirmation by established policy.
+	# Missing/NULL/undefined confirmation flag must NEVER be interpreted as permission to execute.
+	from flow.lib.tool import is_read_only_tool, is_write_tool
+
+	doc_conf = getattr(doc, "requires_confirmation", None)
+	is_write = is_write_tool(doc.slug)
+
+	if bool(doc_conf) or bool(code_requires_confirmation):
+		requires_confirmation = True
+	elif is_write:
+		# Write tool: always require explicit confirmation unless established policy explicitly permits
+		requires_confirmation = True
+	elif doc_conf is None:
+		# NULL / missing confirmation metadata: fail closed
+		requires_confirmation = False if is_read_only_tool(doc.slug) else True
+	else:
+		# Explicitly doc_conf == 0 and not a write tool
+		requires_confirmation = False
+
 	return Tool(
 		name=doc.slug,
 		description=doc.description,
 		parameters=parameters,
 		func=func,
-		# A record may turn an approval ON. It may not take one OFF that the imported function
-		# declares for itself. The record decides which tools an agent has and what they are
-		# called; it does not get to decide that the function behind it stopped changing data.
-		#
-		# Without this, a second record importing the same function under a different name ran it
-		# ungated — and nothing repaired that one, because the sync only ever visits records named
-		# for a builtin. The two records ran the identical function object; only the name differed.
-		requires_confirmation=bool(doc.requires_confirmation) or bool(code_requires_confirmation),
+		requires_confirmation=requires_confirmation,
 		confirm_prompt=confirm_prompt,
 		title=doc.title,
 		# .get, not attribute access: on a site running this code before its migration the field
