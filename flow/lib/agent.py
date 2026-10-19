@@ -64,15 +64,6 @@ NOT_EXECUTED_MESSAGES = {
 		"actions in the same reply, and one of them was refused. "
 		"Do not report it as done. Ask before doing it on its own."
 	),
-	"unconfirmed_or_unsafe": (
-		"This action was not carried out and nothing was done. It is a mutation or write tool "
-		"whose confirmation policy is missing or requires explicit approval. "
-		"Do not report it as done. Explicit confirmation is required before execution."
-	),
-	"unknown_tool": (
-		"This action was not carried out. The tool requested is not available in the tool registry. "
-		"Do not report it as done."
-	),
 }
 VALID_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
@@ -398,14 +389,11 @@ class Agent:
 				index >= live_from and have_record and not denied_group and call.id not in question_keys
 			)
 			tool = self._tools_by_name.get(call.name)
-			from flow.lib.tool import is_write_tool
-			is_write = bool(tool and is_write_tool(tool.name))
-
 			# What the person was asked. With no record of the pause there is nothing to read it
 			# from, so the tool's own gate stands in and the two can never disagree — which is
 			# exactly the behaviour that existed before any of this was recorded.
 			asked_to_approve = (
-				call.id in approval_keys if have_record else bool(tool and (tool.requires_confirmation or is_write))
+				call.id in approval_keys if have_record else bool(tool and tool.requires_confirmation)
 			)
 			if index < live_from:
 				# Not the turn this pause is on. `_pending_calls` spans the WHOLE transcript, so
@@ -422,14 +410,14 @@ class Agent:
 				content = _serialize_tool_result(None)
 			elif tool is None:
 				content = _not_executed("unavailable")
-			elif asked_to_approve and (tool.requires_confirmation or is_write):
+			elif asked_to_approve and tool.requires_confirmation:
 				# Only the exact "Approve" ever executes, so that is the only answer the group's
 				# denial has to hold back; everything else resolves exactly as it always has.
 				if denied_group and answer == "Approve":
 					content = _withheld_confirmation()
 				else:
 					content = self._resolve_confirmation(call, answer)
-			elif asked_to_approve or (tool and (tool.requires_confirmation or is_write)):
+			elif asked_to_approve or tool.requires_confirmation:
 				content = _not_executed("approval_no_longer_applies")
 			elif have_record and call.id not in answers and call.id not in question_keys:
 				# Nobody was asked about this call: it was held back so that nothing in its turn
@@ -753,38 +741,19 @@ class Agent:
 	def _disposition(self, call: ToolCall) -> str:
 		"""What happens to this call before anything in its turn runs: "refuse", "ask" or "run".
 
-		FAIL-CLOSED SECURITY ENFORCEMENT:
-		- Unknown tool: FAIL CLOSED (refuse).
-		- Write tool: requires explicit confirmation unless certified safe by policy.
-		- Missing/NULL/undefined confirmation: NEVER defaults to False (refuse/ask).
-		- Normal read tool with confirmation == False: allowed to run.
+		Read from the tool's own flag, never from the tool body, so a whole batch can be decided
+		before any of it executes. A question a TOOL returns is not an approval and is not
+		classified here: by the time it exists its body has already run, so holding its
+		neighbours back would protect nothing.
 		"""
-		if call.error:
-			return "run"
-
 		tool = self._tools_by_name.get(call.name)
-		if tool is None:
-			return "refuse"
-
-		from flow.lib.tool import is_read_only_tool, is_write_tool
-
-		is_write = is_write_tool(call.name) or is_write_tool(tool.name)
-
-		req_conf = getattr(tool, "requires_confirmation", None)
-
-		# Write tool or explicit confirmation required
-		if req_conf is True or is_write:
-			return "refuse" if self._is_unattended() else "ask"
-
-		# NULL / missing confirmation metadata: FAIL CLOSED
-		if req_conf is None:
-			if is_read_only_tool(call.name) or is_read_only_tool(tool.name):
-				return "run"
-			return "refuse" if self._is_unattended() else "ask"
-
-		if not req_conf:
+		if call.error or tool is None:
 			return "run"
-
+		if not tool.requires_confirmation:
+			return "run"
+		# Refuse is decided BEFORE ask, and the order is the whole rule: an unattended run must
+		# never reach the question at all. Read once and in one place, so a batch can never be
+		# classified by a rule that differs from the one that executes it.
 		return "refuse" if self._is_unattended() else "ask"
 
 	def _invoke(self, call: ToolCall) -> Any:
@@ -794,12 +763,10 @@ class Agent:
 			return json.dumps({"error": call.error})
 		tool = self._tools_by_name.get(call.name)
 		if tool is None:
-			return _not_executed("unknown_tool")
+			return json.dumps({"error": f"Unknown tool: {call.name!r}"})
 		disposition = self._disposition(call)
 		if disposition == "refuse":
-			if self._is_unattended():
-				return _not_executed("unattended")
-			return _not_executed("unconfirmed_or_unsafe")
+			return _not_executed("unattended")
 		if disposition == "ask":
 			return _confirmation_question(call, tool)
 		return self._run_tool(call)

@@ -60,7 +60,3 @@ scheduler_events = {
 after_migrate = ["flow.assistant.sync_builtin_assistant"]
 
 extend_bootinfo = "flow.boot.boot_session"
-
-permission_query_conditions = {
-	"Flow Agent": "flow.flow.doctype.flow_agent.flow_agent.get_permission_query_conditions",
-}

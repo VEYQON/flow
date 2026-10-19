@@ -45,25 +45,6 @@ class FlowAgent(Document):
 		tools: DF.TableMultiSelect[FlowAgentTool]
 	# end: auto-generated types
 
-	def has_permission(self, ptype="read", user=None) -> bool:
-		"""Authoritative server-side tenant and user isolation for Flow Agents (Q-Dots).
-
-		- System Managers and Administrators have full access.
-		- System-generated workspace agents (is_system_generated = 1) are readable
-		  by all workspace users, but cannot be modified or deleted by non-managers.
-		- Custom user agents (Q-Dots, is_system_generated = 0) are strictly private
-		  to their owner. Other users are denied read, write, select, and delete.
-		"""
-		user = user or frappe.session.user
-		if user == "Administrator" or "System Manager" in frappe.get_roles(user):
-			return True
-
-		if getattr(self, "is_system_generated", 0):
-			return ptype == "read"
-
-		# Custom agent (Q-Dot): strictly private to owner
-		return getattr(self, "owner", None) == user
-
 	def on_trash(self):
 		block_delete(self, always=True)
 
@@ -185,19 +166,3 @@ class FlowAgent(Document):
 			"tools": [row.tool for row in self.tools],
 			"max_iterations": self.max_iterations or DEFAULT_MAX_ITERATIONS,
 		}
-
-
-def get_permission_query_conditions(user=None) -> str:
-	"""SQL WHERE conditions for Flow Agent list queries and API resource endpoints.
-
-	Ensures non-admin users only ever see:
-	1. System-generated agents, AND
-	2. Custom agents owned by the current user.
-	Cross-tenant and other users' private agents are completely excluded from database queries.
-	"""
-	user = user or frappe.session.user
-	if user == "Administrator" or "System Manager" in frappe.get_roles(user):
-		return ""
-
-	return f"(`tabFlow Agent`.is_system_generated = 1 OR `tabFlow Agent`.owner = {frappe.db.escape(user)})"
-

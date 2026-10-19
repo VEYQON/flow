@@ -21,51 +21,6 @@ _PRIMITIVE_SCHEMAS: dict[type, dict[str, str]] = {
 	bytes: {"type": "string"},
 }
 
-# Verbs and prefixes indicating write, mutation, or side-effecting operations
-MUTATION_PREFIXES = (
-	"create_", "insert_", "add_", "update_", "modify_", "edit_", "patch_",
-	"delete_", "remove_", "drop_", "clear_", "cancel_", "submit_", "amend_",
-	"send_", "post_", "execute_", "run_", "apply_", "approve_", "reject_",
-	"assign_", "mark_", "draft_", "close_", "terminate_", "archive_", "reset_",
-	"disable_", "enable_", "set_",
-)
-
-MUTATION_EXACT_NAMES = frozenset({
-	"create", "update", "delete", "submit", "cancel", "amend", "send",
-	"approve", "reject", "execute", "run_action", "update_memory", "post",
-	"insert", "remove", "patch", "modify", "apply", "execute_action",
-})
-
-READ_ONLY_PREFIXES = (
-	"get_", "list_", "search_", "find_", "fetch_", "read_", "describe_",
-	"show_", "view_", "check_", "count_", "summary_", "query_", "load_",
-)
-
-READ_ONLY_EXACT_NAMES = frozenset({
-	"find_doctypes", "describe", "read", "search_knowledge", "search",
-	"get", "list", "fetch", "count", "ping", "check",
-})
-
-
-def is_write_tool(name: str | None) -> bool:
-	"""Check if a tool's name or slug indicates write/destructive/side-effecting operations."""
-	if not name:
-		return False
-	clean = name.strip().lower().replace("-", "_")
-	if clean in MUTATION_EXACT_NAMES:
-		return True
-	return any(clean.startswith(prefix) for prefix in MUTATION_PREFIXES)
-
-
-def is_read_only_tool(name: str | None) -> bool:
-	"""Check if a tool's name or slug is explicitly classified as read-only."""
-	if not name:
-		return False
-	clean = name.strip().lower().replace("-", "_")
-	if clean in READ_ONLY_EXACT_NAMES:
-		return True
-	return any(clean.startswith(prefix) for prefix in READ_ONLY_PREFIXES)
-
 
 @dataclass
 class Tool:
@@ -103,23 +58,18 @@ def tool(
 	*,
 	name: str | None = None,
 	description: str | None = None,
-	requires_confirmation: bool | None = None,
+	requires_confirmation: bool = False,
 	confirm_prompt: Callable[[dict[str, Any]], str] | None = None,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
 	def wrap(f: Callable[..., Any]) -> Tool:
 		if not callable(f):
 			raise TypeError("@tool can only be applied to callables")
-		resolved_name = name or f.__name__
-		req_conf = requires_confirmation
-		if req_conf is None:
-			# Fail-closed: missing confirmation flag defaults to True for mutating tools
-			req_conf = True if is_write_tool(resolved_name) else False
 		return Tool(
-			name=resolved_name,
+			name=name or f.__name__,
 			description=description or (inspect.getdoc(f) or "").strip(),
 			parameters=build_schema(f),
 			func=f,
-			requires_confirmation=req_conf,
+			requires_confirmation=requires_confirmation,
 			confirm_prompt=confirm_prompt,
 		)
 
