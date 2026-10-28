@@ -484,17 +484,18 @@ def sync_builtin_tools() -> None:
 	guard in FlowTool.validate (which protects user edits, not system migration)."""
 	for builtin in BUILTIN_TOOLS:
 		import_path = f"flow.tools.builtins.{builtin.name}"
+		# Builtin defaults: execute and update_memory default to disabled (F4 safety)
+		default_enabled = 0 if builtin.name in ("execute", "update_memory") else 1
 		if frappe.db.exists("Flow Tool", builtin.name):
-			frappe.db.set_value(
-				"Flow Tool",
-				builtin.name,
-				{
-					"import_path": import_path,
-					"description": builtin.description,
-					"requires_confirmation": int(builtin.requires_confirmation),
-					"is_system_generated": 1,
-				},
-			)
+			updates = {
+				"import_path": import_path,
+				"description": builtin.description,
+				"requires_confirmation": int(builtin.requires_confirmation),
+				"is_system_generated": 1,
+			}
+			if builtin.name in ("execute", "update_memory"):
+				updates["enabled"] = 0
+			frappe.db.set_value("Flow Tool", builtin.name, updates)
 		else:
 			frappe.get_doc(
 				{
@@ -506,5 +507,6 @@ def sync_builtin_tools() -> None:
 					"description": builtin.description,
 					"is_system_generated": 1,
 					"requires_confirmation": int(builtin.requires_confirmation),
+					"enabled": default_enabled,
 				}
 			).insert(ignore_permissions=True)
