@@ -89,6 +89,11 @@ class Model:
 		and returns the assembled `ChatResponse` via PEP 380 (`StopIteration.value`)."""
 		import litellm
 
+		from flow.lib.site_rules import dev_site_message, is_dev_site
+
+		if is_dev_site():  # every model call from every container, not only the turn endpoints
+			frappe.throw(dev_site_message(), title=frappe._("AI Disabled on Development Site"))
+
 		if isinstance(messages, str):
 			messages = [{"role": "user", "content": messages}]
 
@@ -113,7 +118,11 @@ class Model:
 
 
 def resolve_provider_credentials(model_id: str) -> dict[str, Any]:
-	"""Look up central Flow Provider credentials for a model's provider."""
+	"""Look up central Flow Provider credentials for a model's provider. Dev sites get none."""
+	from flow.lib.site_rules import is_dev_site
+
+	if is_dev_site():
+		return {}
 	try:
 		import litellm
 
