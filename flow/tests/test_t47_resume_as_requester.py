@@ -89,6 +89,42 @@ class TestResumeAsRequester(IntegrationTestCase):
 			self._approve_as(self.manager, run_name)
 		self.assertFalse(frappe.db.exists("Role", ROLE))
 
+	def _record_create_checks(self):
+		"""Record who is signed in each time the approved tool asks whether it may create a Role
+		(the create tool's first step, before any insert)."""
+		seen = []
+		original = frappe.has_permission
+
+		def has_permission(doctype=None, ptype="read", *args, **kwargs):
+			if doctype == "Role" and ptype == "create":
+				seen.append(frappe.session.user)
+			return original(doctype, ptype, *args, **kwargs)
+
+		return seen, patch.object(frappe, "has_permission", side_effect=has_permission)
+
+	def test_another_users_approval_runs_the_tool_as_the_requester(self):
+		run_name = self._pause_as(self.requester)
+		seen, spy = self._record_create_checks()
+		with spy:
+			self._approve_as(self.manager, run_name)
+
+		self.assertTrue(seen, "the approved tool never asked to create the Role")
+		self.assertEqual(set(seen), {self.requester})
+		self.assertEqual(frappe.session.user, self.manager)
+
+	def test_another_users_streamed_approval_runs_the_tool_as_the_requester(self):
+		run_name = self._pause_as(self.requester)
+		seen, spy = self._record_create_checks()
+		frappe.set_user(self.manager)
+		with spy, patch.object(Model, "chat", return_value=_final("ok")):  # the turn after the tool is not under test
+			body = b"".join(resume_run(run_name, {"c1": "Approve"}, stream=True).response)
+
+		self.assertTrue(seen, "the approved tool never asked to create the Role")
+		self.assertEqual(set(seen), {self.requester})
+		self.assertIn(b"No permission to create Role", body)  # refused as the requester, in the stream
+		self.assertFalse(frappe.db.exists("Role", ROLE))
+		self.assertEqual(frappe.session.user, self.manager)
+
 	def test_nobody_else_continues_an_administrator_turn(self):
 		run_name = self._pause_as("Administrator")
 
