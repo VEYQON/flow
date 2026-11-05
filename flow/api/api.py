@@ -34,6 +34,9 @@ def start_run(
 	from flow.lib.session import load_session, new_session
 
 	stream = _is_truthy(stream)
+	refused = _refuse_without_ai(stream)
+	if refused:
+		return refused
 	files = _parse_attachments(attachments)
 	convo = load_session(session, agent=agent, model=model) if session else new_session(agent, model=model)
 	out = convo.chat(input, attachments=files, stream=stream)
@@ -49,6 +52,9 @@ def resume_run(
 
 	parsed_answers = _parse_answers(answers)
 	stream = _is_truthy(stream)
+	refused = _refuse_without_ai(stream)
+	if refused:
+		return refused
 
 	run = frappe.get_doc("Flow Run", run_name)
 	assert_run_owner(run)
@@ -174,6 +180,27 @@ def attach_file(file: str) -> dict[str, Any]:
 	from flow.flow.doctype.flow_session_attachment.flow_session_attachment import stage_attachment
 
 	return stage_attachment(file.strip())
+
+
+def _refuse_without_ai(stream: bool) -> Response | None:
+	"""Stop a turn before it starts on a dev site or a site out of AI tokens. Streamed callers get
+	the message as a normal reply (text + done), others a ValidationError."""
+	from flow.lib.site_rules import dev_site_message, is_dev_site, quota_message
+
+	if is_dev_site():
+		message, title = dev_site_message(), _("AI Disabled on Development Site")
+	else:
+		message, title = quota_message(), _("AI Token Quota Exhausted")
+	if not message:
+		return None
+	if not stream:
+		frappe.throw(message, title=title)
+
+	def body() -> Generator[bytes]:
+		yield f"event: text\ndata: {json.dumps({'type': 'text', 'delta': message})}\n\n".encode()
+		yield f"event: done\ndata: {json.dumps({'type': 'done', 'status': 'Completed', 'iterations': 0})}\n\n".encode()
+
+	return Response(body(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _sse_response(events: Iterable[Event]) -> Response:

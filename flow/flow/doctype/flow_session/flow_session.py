@@ -302,12 +302,21 @@ class FlowSession(Document):
 		if not messages:
 			frappe.throw(_("This session has no transcript to resume from."))
 
+		# An approval AUTHORISES; it does not lend the answerer's permissions. Who may answer was
+		# decided by the caller's checks (assert_run_owner); the approved tool and the rest of the
+		# turn PERFORM as the person who asked. Before this, a System Manager approving an
+		# employee's "create an Employee" ran it as the System Manager and it succeeded.
+		requester = _requester_for(run)
+
 		_set_active_run(run.name)
 		if stream:
-			return stream_with_persistence(lambda: self._runtime.resume(messages, answers, stream=True), run)
+			return stream_with_persistence(
+				lambda: _events_as(requester, lambda: self._runtime.resume(messages, answers, stream=True)), run
+			)
 
 		try:
-			result = self._runtime.resume(messages, answers)
+			with _acting_as(requester):
+				result = self._runtime.resume(messages, answers)
 		except Exception as e:
 			run.mark_failed(str(e))
 			raise
@@ -507,3 +516,48 @@ def derive_title(text: str) -> str:
 	if len(cleaned) <= TITLE_MAX_LENGTH:
 		return cleaned
 	return cleaned[: TITLE_MAX_LENGTH - 1].rstrip() + "…"
+
+
+def _requester_for(run) -> str:
+	"""The user a resumed run performs as: its owner. Fails closed, never falls back to the answerer."""
+	requester = run.owner
+	if not requester or not frappe.db.get_value("User", requester, "enabled"):
+		frappe.throw(_("The person who asked for this is no longer active, so it cannot continue."), frappe.PermissionError)
+	# Administrator's reach is not made of roles: nobody else may continue an Administrator-owned turn.
+	if requester == "Administrator" and frappe.session.user != "Administrator":
+		frappe.throw(_("Only Administrator can continue this request."), frappe.PermissionError)
+	return requester
+
+
+class _acting_as:
+	"""Run a block as `user`, then restore whoever was signed in, even on error."""
+
+	def __init__(self, user: str):
+		self.user = user
+		self.previous = None
+
+	def __enter__(self):
+		self.previous = frappe.session.user
+		if self.user != self.previous:
+			frappe.set_user(self.user)
+		return self
+
+	def __exit__(self, *exc):
+		if frappe.session.user != self.previous:
+			frappe.set_user(self.previous)
+		return False
+
+
+def _events_as(user: str, make_events):
+	"""Stream `make_events()` with every step performed as `user`. The answerer is restored
+	before each yield, so code between events (persistence, the response writer) is unchanged."""
+	events = None
+	while True:
+		with _acting_as(user):
+			if events is None:
+				events = iter(make_events())
+			try:
+				event = next(events)
+			except StopIteration:
+				return
+		yield event
